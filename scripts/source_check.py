@@ -40,6 +40,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import argparse
 import json
 import re
@@ -58,7 +60,9 @@ from app.gateway import bind_experiment, chat  # noqa: E402
 from app.models import Candidate, ControlledCorruption, Frame, Segment  # noqa: E402
 
 PV = "source_integrity_v1"
-MODEL = "moonshotai/kimi-k3"     # 判完整性要细读，用稳的模型
+# 判完整性要细读，用稳的模型；但**允许被调度覆盖**：夜间要把第一阶段也分派到
+# 免费/套餐通道时，设 LG_SOURCE_MODEL=zcode/glm-5.3-flash 即可（默认值不变）。
+MODEL = os.environ.get("LG_SOURCE_MODEL", "moonshotai/kimi-k3")
 SYSTEM = ("你是中文文本校勘员。只判断这段文本**是否完好**（有没有缺字/多字/句子被截断/"
           "人名前后不一致/水印残留），**不评价文笔好坏**，也不要改写它。")
 PROMPT = """下面是一段从网上下载的中文小说（盗版 txt 常有掉字、多字、水印），请只做校勘。
