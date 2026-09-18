@@ -7,8 +7,9 @@
   POST /corpus/import-inbox | import-distiller | import-file
   GET  /works /segments /corpus/stats
   POST /experiments            (body = experiment config override)
-  POST /experiments/{id}/run   (后台线程跑全 stage)
-  GET  /experiments /experiments/{id} /experiments/{id}/report(.json)
+  POST /experiments/{id}/run   (后台线程跑实验引擎的阶段状态机；body 可带 {"stages":[...]} 子集)
+  GET  /experiments /experiments/{id} /experiments/{id}/stages /experiments/{id}/report(.json)
+                               （/stages = 引擎各阶段状态，任务 12）
   GET  /experiments/{id}/review          队列（含优先级理由）
   GET  /experiments/{id}/review/next     盲评取题：匿名 A/B，服务端暗记映射
   GET  /experiments/{id}/review/{rid}/serve  改判入口：重端已判题（A/B 重洗 + 回填原判）
@@ -29,7 +30,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, config, corpus, db, experiments
+from . import access, config, corpus, db, engine, experiments
 from .models import Candidate, Experiment, Job, ReviewItem, Segment, Work, LlmCall
 
 app = FastAPI(title="Language Genome — SemanticFrame Calibration Lab", version="0.2.0")
@@ -144,16 +145,38 @@ def create_exp(body: ExperimentIn):
                                          if k != "segment_ids"}}
 
 
+class RunIn(BaseModel):
+    stages: list[str] | None = None   # 引擎阶段子集（如 ["plan","extract"]）；None=全部
+
+
 @app.post("/experiments/{exp_id}/run")
-def run_exp(exp_id: str):
+def run_exp(exp_id: str, body: RunIn | None = None):
+    # 2026-09-18 接实验引擎（任务 12）：后台线程跑阶段状态机
+    # plan → source_check → extract → reconstruct → residual → judge → report。
+    # 响应 {"status","id"} 与旧管线完全兼容（只加 stages 字段），前端不用改。
+    stages = body.stages if body else None
     with db.session() as s:
         e = s.get(Experiment, exp_id)
         if not e:
             raise HTTPException(404, "experiment 不存在")
         if e.status == "running":
             return {"status": "already_running", "id": exp_id}
-    experiments.run_experiment_background(exp_id)
-    return {"status": "started", "id": exp_id}
+    engine.run_experiment_background(exp_id, stages)
+    return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
+
+
+@app.get("/experiments/{exp_id}/stages")
+def exp_stages(exp_id: str):
+    """实验引擎各阶段状态（任务 12）：没跑过的阶段记 pending，跑过的带计数与 token。"""
+    with db.session() as s:
+        e = s.get(Experiment, exp_id)
+        if not e:
+            raise HTTPException(404, "not found")
+        eng = (e.stats or {}).get("engine") or {}
+        return {"id": e.id, "status": e.status, "error": e.error,
+                "stage_order": engine.ENGINE_STAGES,
+                "current_stage": eng.get("current_stage"),
+                "stages": engine.stage_states(e)}
 
 
 @app.get("/experiments")

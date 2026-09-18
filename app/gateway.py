@@ -374,6 +374,8 @@ _MOCK_RESPONSES = {
     "judge": '{"verdict":"uncertain","score":0.5,"confidence":0.6,"abstain":false,"issues":[],"reasoning":"mock"}',
     "sem_residual": '{"missing":[],"added":[],"contradicted":[],"certainty_shift":0,"explicitness_delta":0,"subtext_preserved":0.5,"pov_consistent":true,"tags":[],"notes":"mock"}',
     "propositions": '{"propositions":[{"id":"P1","text":"发生了某事"},{"id":"P2","text":"某人有意图"}]}',
+    # 实验引擎 mock 端到端要用：源校勘（source_integrity）的确定性伪输出
+    "source_integrity": '{"src_ok": true, "defects": [], "severity": "low"}',
 }
 
 
@@ -392,6 +394,8 @@ def _mock_chat(*, model: str, user: str, purpose: str,
         tpl = _MOCK_RESPONSES["sem_residual"]
     elif "propositions" in purpose:
         tpl = _MOCK_RESPONSES["propositions"]
+    elif purpose.startswith("source_integrity"):
+        tpl = _MOCK_RESPONSES["source_integrity"]
     else:
         tpl = f"mock:{purpose}"
     r = ChatResult(

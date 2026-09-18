@@ -54,7 +54,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
-from app.gateway import chat  # noqa: E402
+from app.gateway import bind_experiment, chat  # noqa: E402
 from app.models import Candidate, ControlledCorruption, Frame, Segment  # noqa: E402
 
 PV = "source_integrity_v1"
@@ -131,8 +131,11 @@ def rule_defects(text: str) -> list[str]:
     return out
 
 
-def check_one(text: str) -> dict | None:
+def check_one(text: str, exp_id: str | None = None) -> dict | None:
     from app.prompt_render import render
+    # exp_id：实验引擎跑本阶段时把 llm_calls 归账到该实验（gateway 线程本地归属）；
+    # CLI 直跑仍是 None，行为与以前完全一致。
+    bind_experiment(exp_id)
     r = chat(model=MODEL, system=SYSTEM, user=render(PROMPT, text=text),
              purpose="source_integrity", prompt_version=PV,
              temperature=0.0, max_tokens=2500)
@@ -167,7 +170,7 @@ def targets(scope: str) -> list[str]:
 
 
 def run(scope: str = "used", conc: int = 8, limit: int = 0,
-        ids: list[str] | None = None) -> dict:
+        ids: list[str] | None = None, exp_id: str | None = None) -> dict:
     if ids is not None:
         with db.session() as s:
             rows = [(x.id, x.text_clean or x.text, x.integrity) for x in
@@ -221,7 +224,7 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                 _stat["bad"] += 1
             return
         try:
-            d = check_one(text)
+            d = check_one(text, exp_id)
         except Exception:                            # noqa: BLE001
             with _lock:
                 _stat["failed"] += 1

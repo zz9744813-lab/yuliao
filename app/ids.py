@@ -10,4 +10,7 @@ def new_id(prefix: str) -> str:
 
 
 def new_exp_id() -> str:
-    return f"EXP-{time.strftime('%m%d')}-{secrets.token_hex(2)}".upper()
+    # 2026-09-18：hex 从 2 字节提到 4 字节。原来 65536 的号池在一次测试套件
+    # （~15 个 create_experiment）里就有 ~0.16% 的生日碰撞率，实测撞过一次
+    # （UNIQUE constraint failed: experiments.id）——偶发红一次最坑排查。
+    return f"EXP-{time.strftime('%m%d')}-{secrets.token_hex(4)}".upper()
