@@ -25,7 +25,8 @@
 > | **11 Benchmark（§14）** | ⚠️ 有了**第一块能跑的**：Hidden Set + Runner + Leaderboard（`benchmark_build.py` / `benchmark_run.py`，171 题）；另 11 项子基准仍缺 |
 > | 13 Training Export（§42） | ⚠️ SFT 219（`--from-frames`，**不需要人工标签**）+ DPO 244（`--pairs`）/ 严格 1（`--strict`）+ 负面库 108；RM/Rewrite 缺 |
 > | 7 Judge Arena | ⚠️ 评委**已证不可靠**：κ −0.04~+0.11，且**控制臂显示四家共享同一偏差**（§0.5③） |
-> | 12 Experiment Engine / 14 Observability | ⬜ 部分（experiments 表在，无引擎；llm_calls 有记录）|
+> | 12 Experiment Engine | ✅ `app/engine.py` + `scripts/run_experiment.py`（阶段状态机，可续跑/幂等/失败传播）|
+> | 14 Observability | ✅ `app/observability.py`（纯函数聚合）+ `GET /llm/stats?hours=24&exp=` + `scripts/observability_report.py`；窗口内 0 条显式 n=0，ISO 时间窗按字符串比较（tests/test_observability.py 钉住）|
 >
 > 📌 **§0.5 是本次交接新增的核心章节**，其余章节是 09-16 版本的历史积累（仍然有效）。
 >

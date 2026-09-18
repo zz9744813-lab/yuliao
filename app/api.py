@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, config, corpus, db, engine, experiments
+from . import access, config, corpus, db, engine, experiments, observability
 from .models import Candidate, Experiment, Job, ReviewItem, Segment, Work, LlmCall
 
 app = FastAPI(title="Language Genome — SemanticFrame Calibration Lab", version="0.2.0")
@@ -627,7 +627,12 @@ def verdict(review_id: str, body: Verdict):
 # ── 观测 ────────────────────────────────────────────────────
 
 @app.get("/llm/stats")
-def llm_stats():
+def llm_stats(hours: int = 24, exp: str | None = None):
+    # 原全表口径（by_purpose.calls/tokens/failed）原样保留：控制台 loadUsage 只读它。
+    # 任务 14 增量：window = 近 hours 小时的时间窗聚合（模型/用途/状态/小时/失败
+    # Top-N/实验排行），字段只加不减，见 app/observability.py。
+    if hours < 1 or hours > 24 * 30:
+        raise HTTPException(400, f"hours 取值 1~720，收到 {hours}")
     with db.session() as s:
         rows = s.query(LlmCall).all()
         out: dict = {}
@@ -638,4 +643,10 @@ def llm_stats():
             d["tokens"] += r.tokens_in + r.tokens_out
             if r.status != "ok":
                 d["failed"] += 1
-        return {"mode": config.LLM_MODE, "by_purpose": out}
+        resp = {"mode": config.LLM_MODE, "by_purpose": out}
+        try:
+            resp["window"] = observability.snapshot(s, hours=hours, exp=exp)
+        except ValueError as e:
+            # 查无此实验：报错，不静默给空窗口（纪律④）
+            raise HTTPException(404, str(e))
+        return resp
