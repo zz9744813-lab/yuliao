@@ -1,0 +1,1443 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Language Genome · 校准实验室</title>
+<script>
+  // 首次绘制前定主题，避免浅→深闪烁：优先 localStorage，否则跟随系统
+  (function(){
+    var t = localStorage.getItem('rv_theme');
+    if(t !== 'light' && t !== 'dark'){
+      t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  })();
+</script>
+<style>
+  /* ── 令牌两层：原语层（色阶）→ 语义层（组件只引用语义令牌）──────────────
+     换肤/深色只改语义层映射，组件代码一行不动。 */
+  :root{
+    /* Round 5「冷纸」：参照 Geist/Linear 的做法——中性色去彩化、层级拉开，
+       让金色成为唯一的彩色，出现在"值得注意"的地方 */
+    --n-0:#ffffff; --n-50:#fafaf8; --n-100:#f3f2ef; --n-200:#ebeae6;
+    --n-300:#e0dfdb; --n-400:#d2d1cb; --n-500:#aeada6; --n-600:#7c7b74;
+    --n-700:#555450; --n-800:#35342f; --n-900:#201f1c; --n-950:#141310;
+    --acc-100:#f0e8da; --acc-300:#c9b28a; --acc-500:#8a6d3b; --acc-600:#755c30; --acc-700:#5e4926;
+
+    --bg:var(--n-100); --surface:var(--n-0); --surface-2:var(--n-50);
+    --line:var(--n-300); --line-2:var(--n-400);
+    --fg:var(--n-900); --fg-2:var(--n-700); --dim:var(--n-600);
+    --accent:var(--acc-500); --accent-soft:var(--acc-100); --accent-strong:var(--acc-600);
+    --a:#2f6f4f; --a-soft:#eef5f0; --a-line:#7fb094;
+    --b:#7a4a86; --b-soft:#f5eff6; --b-line:#b18bbd;
+    --ok:#2f6f4f; --bad:#a8412f; --info:#3a6ea5;
+
+    --shadow-sm:0 1px 2px rgba(38,36,31,.05), 0 3px 10px rgba(38,36,31,.045);
+    --shadow-md:0 2px 6px rgba(38,36,31,.06), 0 14px 32px rgba(38,36,31,.09);
+    --shadow-dock:0 -2px 10px rgba(38,36,31,.05), 0 -10px 24px rgba(38,36,31,.06);
+    --skel-1:#eceae3; --skel-2:#f7f5f0;
+    --del-bg:#fdf0ec; --del-bd:#dfa892; --ins-bg:#eef5f0; --ins-bd:#9cc3a9;
+    --kbd-bg:rgba(0,0,0,.06);
+    --toast-bg:var(--n-900); --toast-fg:var(--n-100);
+    --chip-up-bg:#fdf0ec;  --chip-up-bd:#f0d5cc;  --chip-up-fg:#9c4a33;
+    --chip-dis-bg:#f2f0fb; --chip-dis-bd:#ddd8f2; --chip-dis-fg:#5a4a95;
+    --chip-nov-bg:#eef5f0; --chip-nov-bd:#d3e6da; --chip-nov-fg:#2f6f4f;
+    --warn-bg:#fdf6e8; --warn-bd:#ecd9ab; --warn-fg:#7a5b1e;
+    --warn-btn-bd:#d9c48a; --warn-btn-bg:#f7ecd2;
+    --ctx-fg:#6d685e;
+    --tag-ok-bd:#cfe3d6; --tag-info-bd:#cfdff0; --tag-bad-bd:#eccfc8;
+    --scroll:var(--n-400); --scroll-hover:var(--n-500);
+    --win-a:rgba(47,111,79,.32); --win-b:rgba(122,74,134,.32);
+    --paper:radial-gradient(1100px 520px at 50% -8%, rgba(255,255,255,.55), rgba(255,255,255,0));
+    --paper-bg:#fdfcf9;
+    --shadow-card:0 1px 2px rgba(38,36,31,.05), 0 10px 30px -10px rgba(38,36,31,.13);
+
+    --sans:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
+    --serif:"Source Han Serif SC","Noto Serif SC","Songti SC","STSong","SimSun",Georgia,serif;
+    --radius:9px;
+    --rv-font:16.5px;  /* A－/A＋ 切换；localStorage 持久化 */
+    --rv-pad:20px;     /* 密度：舒适 20 / 紧凑 14（JS 设置） */
+    --rv-line:2.05;    /* 密度：舒适 2.05 / 紧凑 1.85 */
+  }
+  html[data-theme="dark"]{
+    /* Round 5「石墨」：近黑底 + 纯灰结构 + 金色单点，A/B 稿纸保持温暖深棕拉温差 */
+    --n-0:#161619; --n-50:#1b1b1f; --n-100:#101013; --n-200:#232327;
+    --n-300:#2b2b30; --n-400:#3a3a40; --n-500:#56565f; --n-600:#8b8b94;
+    --n-700:#a9a9b0; --n-800:#cfcdd2; --n-900:#ecebe8; --n-950:#f7f6f3;
+    --acc-100:#2e2616; --acc-300:#c9b28a; --acc-500:#c9a86a; --acc-600:#d8bc85; --acc-700:#e3cd9c;
+
+    --bg:#0c0c0e; --surface:#151517; --surface-2:#1b1b1f;
+    --line:#26262b; --line-2:#35363c;
+    --fg:#ecebe7; --fg-2:#a8a7a0; --dim:#84837d;
+    --a:#7fb094; --a-soft:rgba(127,191,154,.12); --a-line:#4d7d62;
+    --b:#b18bbd; --b-soft:rgba(177,139,189,.12); --b-line:#6e5680;
+    --ok:#7fb094; --bad:#e08d78; --info:#8fb8d9;
+
+    --shadow-sm:0 1px 2px rgba(0,0,0,.30), 0 3px 10px rgba(0,0,0,.28);
+    --shadow-md:0 2px 6px rgba(0,0,0,.35), 0 14px 32px rgba(0,0,0,.42);
+    --shadow-dock:0 -2px 10px rgba(0,0,0,.30), 0 -10px 24px rgba(0,0,0,.35);
+    --skel-1:#26262c; --skel-2:#32323a;
+    --del-bg:rgba(224,141,120,.16); --del-bd:#c97a63;
+    --ins-bg:rgba(127,191,154,.14); --ins-bd:#6ba784;
+    --kbd-bg:rgba(255,255,255,.12);
+    --toast-bg:#ecebe6; --toast-fg:#1c1c20;
+    --chip-up-bg:rgba(224,141,120,.14);  --chip-up-bd:#5a3c30;  --chip-up-fg:#e6a08a;
+    --chip-dis-bg:rgba(194,154,208,.14); --chip-dis-bd:#4a3a5e; --chip-dis-fg:#c9a9d8;
+    --chip-nov-bg:rgba(127,191,154,.12); --chip-nov-bd:#2c4a3a; --chip-nov-fg:#8fc7a8;
+    --warn-bg:#2c2616; --warn-bd:#4a3d20; --warn-fg:#d9bd76;
+    --warn-btn-bd:#5a4a26; --warn-btn-bg:#3a3020;
+    --ctx-fg:#9a968c;
+    --tag-ok-bd:#2c4a38; --tag-info-bd:#2c4055; --tag-bad-bd:#5a3a31;
+    --scroll:#3d3d46; --scroll-hover:#56565f;
+    --win-a:rgba(127,191,154,.30); --win-b:rgba(177,139,189,.30);
+    --paper:radial-gradient(1100px 520px at 50% -8%, rgba(255,255,255,.035), rgba(255,255,255,0));
+    --paper-bg:#1d1a16;
+    --shadow-card:0 1px 2px rgba(0,0,0,.45), 0 12px 34px -8px rgba(0,0,0,.62);
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  html{scroll-padding-top:70px;}
+  body{margin:0;background-color:var(--bg);background-image:var(--paper);
+       color:var(--fg);font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased;
+       transition:background-color .18s ease, color .18s ease;}
+  header{display:flex;align-items:center;gap:16px;padding:0 24px;height:58px;
+         border-bottom:1px solid var(--line);background:var(--surface);
+         background:color-mix(in srgb, var(--surface) 88%, transparent);
+         backdrop-filter:blur(12px) saturate(1.15);-webkit-backdrop-filter:blur(12px) saturate(1.15);
+         position:sticky;top:0;z-index:20;}
+  header h1{font-size:14.5px;margin:0;font-weight:600;letter-spacing:.2px;color:var(--fg);
+            display:flex;align-items:center;gap:9px;}
+  header h1 b{color:var(--accent);font-weight:500;}
+  header .hmark{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
+                border-radius:6px;color:#fff;font-size:11px;font-style:normal;flex:none;
+                background:linear-gradient(135deg, var(--acc-600), var(--acc-500));
+                box-shadow:inset 0 1px 0 rgba(255,255,255,.25), 0 1px 2px rgba(38,36,31,.18);}
+  header .mode{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums;
+               border:1px solid var(--line);border-radius:999px;padding:1px 8px;}
+  nav{display:flex;gap:2px;margin-left:auto;}
+  nav button{background:none;border:none;color:var(--fg-2);padding:7px 14px;cursor:pointer;
+             font-size:13px;font-family:inherit;border-radius:999px;
+             transition:background .15s ease, color .15s ease;}
+  nav button:hover{background:var(--surface-2);color:var(--fg);}
+  nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:500;}
+  main{padding:24px 22px;max-width:1180px;margin:0 auto;}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+        padding:calc(var(--rv-pad) - 2px) var(--rv-pad);margin-bottom:16px;box-shadow:var(--shadow-sm);}
+  /* 盲评页的队列卡只是一条操作线，不该有"卡片"重量 */
+  #tab-review>.card{box-shadow:none;background:transparent;border:none;
+                    padding:2px 2px 0;margin-top:10px;}
+  #tab-review>.card table{background:var(--surface);border:1px solid var(--line);
+                          border-radius:10px;overflow:hidden;}
+  .card h3{margin:0 0 14px;font-size:13px;color:var(--fg);font-weight:500;letter-spacing:.3px;
+           display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+  .card h3 .spacer{margin-left:auto;}
+  table{border-collapse:collapse;width:100%;font-size:13px;}
+  th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;}
+  th{color:var(--dim);font-weight:400;font-size:12px;}
+  tbody tr:hover{background:var(--surface-2);}
+  button.act{background:var(--surface);color:var(--fg-2);border:1px solid var(--line-2);
+             padding:5px 12px;border-radius:7px;cursor:pointer;font-size:12.5px;font-family:inherit;
+             transition:border-color .15s ease, color .15s ease, transform .1s ease, background .15s ease;}
+  button.act:hover{border-color:var(--accent);color:var(--accent);}
+  button.act:active{transform:translateY(1px);}
+  button.primary{background:var(--accent);color:#fff;border:none;font-weight:500;}
+  button.primary:hover{background:var(--accent-strong);color:#fff;}
+  input,select{background:var(--surface);color:var(--fg);border:1px solid var(--line-2);
+               border-radius:7px;padding:6px 9px;font-size:13px;font-family:inherit;}
+  input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft);}
+  label{color:var(--fg-2);font-size:12.5px;}
+  .row{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-bottom:12px;}
+  .muted{color:var(--dim);font-size:12px;}
+  .kv{font-family:ui-monospace,Consolas,monospace;font-size:12px;}
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11.5px;
+       background:var(--surface-2);border:1px solid var(--line);color:var(--fg-2);}
+  .tag.done{color:var(--ok);border-color:var(--tag-ok-bd);} .tag.running{color:var(--info);border-color:var(--tag-info-bd);}
+  .tag.failed{color:var(--bad);border-color:var(--tag-bad-bd);} .tag.pending,.tag.retry{color:var(--dim);}
+  #report-body pre{white-space:pre-wrap;font-family:inherit;}
+  .md-head{color:var(--accent);}
+  .toast{position:fixed;right:22px;bottom:22px;background:var(--toast-bg);color:var(--toast-fg);
+         padding:11px 18px;border-radius:9px;display:none;font-size:13px;z-index:50;
+         box-shadow:var(--shadow-md);opacity:0;transform:translateY(10px);
+         transition:opacity .18s ease, transform .18s ease;
+         max-width:min(420px, calc(100vw - 44px));}
+  .toast.show{opacity:1;transform:none;}
+  .stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px;}
+  .stage-cell{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;
+              padding:9px 11px;font-size:12px;color:var(--fg-2);}
+  .stage-cell b{display:block;font-size:12px;margin-bottom:4px;color:var(--fg);font-weight:500;}
+  a{color:var(--info);}
+
+  /* ── 设置弹层（齿轮）────────────────────────────────── */
+  .spop-wrap{position:relative;margin-left:4px;flex:none;}
+  .spop{position:absolute;right:0;top:calc(100% + 8px);background:var(--surface);
+        border:1px solid var(--line-2);border-radius:12px;box-shadow:var(--shadow-md);
+        padding:12px 14px;display:none;min-width:236px;z-index:40;}
+  .spop.open{display:block;}
+  .srow{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:6px 0;}
+  .srow>span:first-child{font-size:12.5px;color:var(--fg-2);}
+  .seg{display:inline-flex;border:1px solid var(--line-2);border-radius:8px;overflow:hidden;
+       background:var(--surface-2);}
+  .seg button{background:none;border:none;padding:6px 13px;font-size:12.5px;cursor:pointer;
+              font-family:inherit;color:var(--fg-2);
+              transition:background .15s ease, color .15s ease;}
+  .seg button:hover{color:var(--fg);}
+  .seg button.on{background:var(--accent-soft);color:var(--accent);font-weight:500;}
+
+  /* ── 盲评工作区 ───────────────────────────────────── */
+  /* 景深层级：只有 A/B 卡和 dock 浮起；顶栏/上文/队列是平面发丝线 chrome */
+  .rv-top{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+          padding:16px 22px 14px;margin-bottom:14px;}
+  .rv-head{display:flex;align-items:center;gap:18px;flex-wrap:wrap;}
+  .rv-title{font-size:14.5px;font-weight:600;display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
+  .rv-title #rv-batch{color:var(--accent);}
+  .rv-title small{color:var(--dim);font-weight:400;font-size:12px;margin-left:2px;}
+  .rv-prog{display:flex;align-items:center;gap:10px;margin-left:auto;flex-wrap:wrap;}
+  .rv-prog .num{font-size:13px;color:var(--fg);font-weight:500;font-variant-numeric:tabular-nums;}
+  .rv-prog .pct{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums;min-width:34px;}
+  .bar{width:120px;height:6px;background:var(--surface-2);border:1px solid var(--line);
+       border-radius:99px;overflow:hidden;}
+  .bar i{display:block;height:100%;width:0;border-radius:99px;
+         background:linear-gradient(90deg,var(--acc-300),var(--accent));transition:width .3s ease;}
+  .tool{background:var(--surface);border:1px solid var(--line-2);color:var(--fg-2);
+        padding:5px 10px;border-radius:7px;cursor:pointer;font-size:12.5px;font-family:inherit;
+        transition:border-color .15s ease, color .15s ease, transform .1s ease, background .15s ease;}
+  .tool:hover{border-color:var(--accent);color:var(--accent);}
+  .tool:active{transform:translateY(1px);}
+  .tool.on{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);font-weight:500;}
+  /* 工具组：零散小按钮收进一个分段控件，页头不再撒一地 */
+  .tgrp{display:inline-flex;align-items:center;gap:2px;background:var(--surface-2);
+        border:1px solid var(--line);border-radius:9px;padding:3px;}
+  .tgrp .tool{background:transparent;border-color:transparent;border-radius:6px;padding:5px 10px;}
+  .tgrp .tool:hover{border-color:transparent;background:var(--surface);color:var(--accent);}
+  .tgrp .tool.on{background:var(--accent-soft);border-color:transparent;color:var(--accent);}
+  #rv-exp{max-width:250px;font-size:12px;}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;}
+  .chip{font-size:11.5px;padding:2px 9px;border-radius:999px;background:var(--surface-2);
+        border:1px solid var(--line);color:var(--fg-2);}
+  .chip.up{background:var(--chip-up-bg);border-color:var(--chip-up-bd);color:var(--chip-up-fg);}
+  .chip.dis{background:var(--chip-dis-bg);border-color:var(--chip-dis-bd);color:var(--chip-dis-fg);}
+  .chip.nov{background:var(--chip-nov-bg);border-color:var(--chip-nov-bd);color:var(--chip-nov-fg);}
+  .chip.lock{border-style:dashed;color:var(--dim);}
+  /* 提示降级为辅助信息：虚线分隔 + 更小字号，别和主操作抢视觉权重 */
+  .hint{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line);
+        font-size:12px;color:var(--dim);line-height:1.8;}
+
+  /* 改判横幅 */
+  .rj{display:flex;align-items:center;gap:10px;background:var(--warn-bg);border:1px solid var(--warn-bd);
+      color:var(--warn-fg);border-radius:var(--radius);padding:10px 16px;margin-bottom:14px;font-size:13px;}
+  .rj .spacer{margin-left:auto;}
+  .rj button{background:none;border:1px solid var(--warn-btn-bd);color:var(--warn-fg);padding:4px 10px;
+             border-radius:7px;cursor:pointer;font-family:inherit;font-size:12.5px;
+             transition:background .15s ease;}
+  .rj button:hover{background:var(--warn-btn-bg);}
+
+  .ctx{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);
+       margin-bottom:14px;overflow:hidden;}
+  .ctx-head{display:flex;align-items:center;gap:10px;padding:9px 18px;font-size:11.5px;
+            letter-spacing:.5px;color:var(--dim);border-bottom:1px solid var(--line);}
+  .ctx-head .spacer{margin-left:auto;}
+  .ctx-head button{background:none;border:none;color:var(--accent);cursor:pointer;
+                   font-size:12px;letter-spacing:0;font-family:inherit;padding:3px 10px;
+                   border-radius:6px;transition:background .15s ease;}
+  .ctx-head button:hover{background:var(--accent-soft);}
+  .ctx-body{padding:14px 22px;max-height:32vh;overflow-y:auto;font-family:var(--serif);
+            font-size:calc(var(--rv-font) - 1.5px);line-height:1.95;color:var(--ctx-fg);
+            white-space:pre-wrap;text-align:justify;text-justify:inter-ideograph;
+            hanging-punctuation:allow-start;}
+  .ctx.collapsed .ctx-body{display:none;}
+  .ctx.collapsed .ctx-head{border-bottom:none;}
+  .ctx.collapsed .ctx-head button{background:var(--accent-soft);color:var(--accent);
+                                  font-weight:500;padding:3px 10px;}
+
+  .ab-wrap{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:16px;}
+  .ab-card{background:var(--paper-bg);
+           background:linear-gradient(180deg, var(--paper-bg), var(--surface) 260%);
+           border:1px solid var(--line);border-radius:14px;
+           padding:0;overflow:hidden;display:flex;flex-direction:column;
+           box-shadow:var(--shadow-card);
+           transition:box-shadow .18s ease, border-color .18s ease;}
+  .ab-label{padding:12px 24px 11px;font-size:12px;font-weight:500;letter-spacing:1px;
+            border-bottom:1px solid var(--line);
+            background:color-mix(in srgb, var(--paper-bg) 85%, transparent);
+            backdrop-filter:blur(8px) saturate(1.1);-webkit-backdrop-filter:blur(8px) saturate(1.1);
+            position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:9px;}
+  .ab-label .badge{display:inline-flex;align-items:center;justify-content:center;
+                   width:24px;height:24px;border-radius:7px;font-size:12px;font-weight:600;
+                   color:#fff;flex:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.22),
+                   0 1px 2px rgba(0,0,0,.16);}
+  .ab-card.a .ab-label{color:var(--a);} .ab-card.b .ab-label{color:var(--b);}
+  .ab-label .lab-tx{font-size:11px;color:var(--dim);font-weight:400;letter-spacing:.5px;}
+  .ab-card.a .badge{background:var(--a);} .ab-card.b .badge{background:var(--b);}
+  .ab-card.a{border-top:2px solid var(--a-line);} .ab-card.b{border-top:2px solid var(--b-line);}
+  .ab-card.a.win-a{box-shadow:0 0 0 2px var(--a-line), var(--shadow-card);border-color:var(--a);}
+  .ab-card.b.win-b{box-shadow:0 0 0 2px var(--b-line), var(--shadow-card);border-color:var(--b);}
+  .ab-text{padding:calc(var(--rv-pad) + 6px) calc(var(--rv-pad) + 14px);
+           font-family:var(--serif);width:100%;
+           font-size:var(--rv-font);line-height:var(--rv-line);
+           color:var(--fg);white-space:pre-wrap;flex:1;min-height:180px;max-height:48vh;
+           overflow-y:auto;max-width:36em;margin:0 auto;
+           text-align:justify;text-justify:inter-ideograph;
+           hanging-punctuation:allow-start;text-wrap:pretty;}
+  /* 划选批注是高频动作：选区底色用品牌金，划过去不刺眼、完成感也强 */
+  .ab-text ::selection,.ab-text::selection{background:var(--acc-300);color:var(--n-950);}
+  html[data-theme="dark"] .ab-text ::selection,html[data-theme="dark"] .ab-text::selection{
+    background:rgba(216,188,133,.3);color:#fff;}
+
+  /* 取到新题时的入场微动：两卡错峰浮起。
+     ⚠ 只动 transform、绝不碰 opacity：后台标签页/绘制节流会让 Web Animation
+     停在 pre-start 的 from 帧上，若 from{opacity:0} 卡片就整体隐形
+     （2026-09-18 实测踩中：整页只剩 dock）。只移动位移时，最坏情况也就是
+     卡在偏 8px 的位置，内容永远可见。 */
+  @keyframes cardIn{from{transform:translateY(8px);}to{transform:none;}}
+  #rv-ab.fresh .ab-card{animation:cardIn .3s cubic-bezier(.2,.75,.25,1) both;}
+  #rv-ab.fresh .ab-card.b{animation-delay:.06s;}
+
+  /* 差异高亮（默认关）：A 标被改掉的、B 标新写的。内联标签，不改变 textContent */
+  .ab-text .dhl{font-style:normal;border-radius:3px;padding:1px 0;}
+  .ab-text .dhl.del{background:var(--del-bg);box-shadow:inset 0 -2px 0 var(--del-bd);}
+  .ab-text .dhl.ins{background:var(--ins-bg);box-shadow:inset 0 -2px 0 var(--ins-bd);}
+  .dlegend{font-size:11.5px;color:var(--dim);margin:0 0 12px;padding:8px 12px;line-height:1.7;
+           border:1px solid var(--line);border-left:3px solid var(--acc-300);
+           border-radius:8px;background:var(--surface-2);}
+  .dlegend b{color:var(--fg-2);font-weight:500;}
+
+  .dock{position:sticky;bottom:10px;margin-top:6px;background:var(--surface);
+        background:color-mix(in srgb, var(--surface) 96%, transparent);
+        backdrop-filter:blur(14px) saturate(1.15);-webkit-backdrop-filter:blur(14px) saturate(1.15);
+        border:1px solid var(--line-2);border-radius:14px;
+        padding:13px 18px;display:flex;gap:9px;flex-wrap:wrap;
+        align-items:center;box-shadow:var(--shadow-dock);}
+  /* 判定键层级：A/B 更好是主操作（金棕渐变），四个弱判定是次级（描边幽灵） */
+  .dock .vb{background:var(--surface);border:1px solid var(--line-2);color:var(--fg-2);
+            padding:11px 19px;border-radius:10px;cursor:pointer;font-size:14px;font-family:inherit;
+            display:inline-flex;align-items:center;gap:9px;
+            box-shadow:0 1px 2px rgba(38,36,31,.04);
+            transition:transform .12s ease, border-color .15s ease, color .15s ease,
+                       background .15s ease, box-shadow .15s ease;}
+  .dock .vb.strong{padding:11px 24px;font-size:14.5px;}
+  .dock .vb:hover{border-color:var(--acc-300);color:var(--accent);background:var(--surface-2);}
+  .dock .vb:active{transform:translateY(1px) scale(.98);}
+  .dock .vb.strong{background:linear-gradient(180deg, var(--acc-500), var(--acc-600));
+                   border-color:var(--acc-600);color:#fff;font-weight:500;
+                   box-shadow:inset 0 1px 0 rgba(255,255,255,.22), 0 2px 8px -2px rgba(94,73,38,.5);}
+  .dock .vb.strong:hover{background:linear-gradient(180deg, var(--acc-600), var(--acc-700));
+                         border-color:var(--acc-700);color:#fff;}
+  .dock .vb:disabled{opacity:.45;cursor:default;}
+  .dock .vb.picked{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);
+                   font-weight:500;transform:scale(1.03);box-shadow:0 0 0 3px var(--accent-soft);}
+  .dock .vb.picked.strong{background:linear-gradient(180deg, var(--acc-600), var(--acc-700));
+                          color:#fff;border-color:var(--acc-700);}
+  html[data-theme="dark"] .dock .vb.strong{color:#241d10;}
+  html[data-theme="dark"] .dock .vb.strong:hover{color:#1a1408;}
+  html[data-theme="dark"] .dock .vb.picked.strong{color:#1a1408;}
+  /* 键帽样式：模拟实体键（上亮下重的描边），一眼认出"这是键盘操作" */
+  kbd{font-family:var(--sans);font-weight:500;font-size:10.5px;background:var(--surface);
+      color:var(--dim);border:1px solid var(--line-2);border-bottom-width:2px;
+      border-radius:5px;padding:1px 6px;letter-spacing:.5px;}
+  .dock .vb.strong kbd{background:rgba(255,255,255,.16);border-color:rgba(255,255,255,.25);color:#fff;}
+  html[data-theme="dark"] .dock .vb.strong kbd{
+      background:rgba(0,0,0,.15);border-color:rgba(0,0,0,.3);color:#241d10;}
+  .dock .state{margin-left:auto;font-size:12.5px;color:var(--dim);}
+
+  .qtab{background:none;border:none;color:var(--fg-2);font-size:13px;cursor:pointer;
+        padding:2px 2px;margin-right:16px;border-bottom:2px solid transparent;font-family:inherit;
+        transition:color .15s ease, border-color .15s ease;}
+  .qtab:hover{color:var(--fg);}
+  .qtab.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:500;}
+
+  .done-panel{background:var(--paper-bg);border:1px solid var(--line);border-radius:12px;
+              padding:52px 24px;text-align:center;box-shadow:var(--shadow-card);}
+  .done-panel::before{content:'✦';display:block;font-size:30px;line-height:1;
+                      color:var(--accent);opacity:.5;margin-bottom:14px;}
+  .done-panel.err::before{content:'⚠';color:var(--bad);opacity:.6;}
+  .done-panel .big{font-family:var(--serif);font-size:17px;font-weight:500;margin-bottom:8px;}
+  .done-panel .sub{font-size:13px;color:var(--dim);line-height:1.9;}
+  .empty{color:var(--dim);font-size:13px;padding:20px 0 20px 14px;border-left:2px solid var(--line-2);}
+
+  /* ── 噪点批注样式（集霸 2026-09-14：整段还行，但总有几处坏的拖垮全段）── */
+  .ab-text mark{border-radius:2px;padding:1px 0;cursor:pointer;color:inherit;}
+  .ab-text mark.k0{background:#fff3bf;border-bottom:2px solid #d9a300;}
+  .ab-text mark.k1{background:#ffe3e0;border-bottom:2px solid #c0563f;}
+  .ab-text mark.k2{background:#e6f2ff;border-bottom:2px solid #3a7bd5;}
+  .ab-text mark.k3{background:#e8f7e8;border-bottom:2px solid #4a9a4a;}
+  .ab-text mark.k4{background:#f3e8ff;border-bottom:2px solid #8a5bd6;}
+  .ab-text mark.k5{background:#fdf0e0;border-bottom:2px solid #c98a2b;}
+  .ab-text mark.k6{background:#eef0f2;border-bottom:2px solid #8d887d;}
+  /* 夜读模式：7 类批注全部重调，保证暗底可读，且与 diff 增/删底色不撞 */
+  html[data-theme="dark"] .ab-text mark.k0{background:rgba(217,163,0,.20);border-bottom-color:#d9a300;}
+  html[data-theme="dark"] .ab-text mark.k1{background:rgba(192,86,63,.24);border-bottom-color:#e08d78;}
+  html[data-theme="dark"] .ab-text mark.k2{background:rgba(58,123,213,.22);border-bottom-color:#8fb8d9;}
+  html[data-theme="dark"] .ab-text mark.k3{background:rgba(74,154,74,.22);border-bottom-color:#7fc285;}
+  html[data-theme="dark"] .ab-text mark.k4{background:rgba(138,91,214,.24);border-bottom-color:#b98fe0;}
+  html[data-theme="dark"] .ab-text mark.k5{background:rgba(201,138,43,.22);border-bottom-color:#e0ab5c;}
+  html[data-theme="dark"] .ab-text mark.k6{background:rgba(141,136,125,.20);border-bottom-color:#a09a8d;}
+  html[data-theme="dark"] .ab-card.a .badge{background:rgba(127,191,154,.16);color:var(--a);
+    box-shadow:inset 0 0 0 1px rgba(127,191,154,.45);}
+  html[data-theme="dark"] .ab-card.b .badge{background:rgba(177,139,189,.16);color:var(--b);
+    box-shadow:inset 0 0 0 1px rgba(177,139,189,.45);}
+  .mark-list{padding:4px calc(var(--rv-pad) + 14px) 16px;font-size:12px;color:var(--fg-2);}
+  .mark-list:empty{display:none;}
+  .mark-list .mi{display:flex;gap:8px;align-items:baseline;padding:3px 0;
+                 border-top:1px dashed var(--line);}
+  .mark-list .mi b{font-weight:500;color:var(--fg);white-space:nowrap;}
+  .mark-list .mi .tx{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .mark-list .mi .del{margin-left:auto;cursor:pointer;color:var(--dim);white-space:nowrap;}
+  .mark-list .mi .del:hover{color:var(--bad);}
+  .mark-pop{position:fixed;z-index:60;background:var(--surface);border:1px solid var(--line-2);
+            border-radius:10px;box-shadow:var(--shadow-md);padding:10px 12px;
+            display:none;max-width:min(430px, calc(100vw - 24px));}
+  .mark-pop .row1{display:flex;gap:6px;flex-wrap:wrap;align-items:center;}
+  .mark-pop .k{font-size:12px;padding:5px 11px;border-radius:999px;border:1px solid var(--line-2);
+               background:var(--surface);cursor:pointer;font-family:inherit;color:var(--fg-2);
+               transition:border-color .15s ease, color .15s ease, background .15s ease;}
+  .mark-pop .k:hover{border-color:var(--accent);color:var(--accent);}
+  .mark-pop .cancel{font-size:12px;color:var(--dim);cursor:pointer;padding:4px 6px;}
+  .mark-pop .cancel:hover{color:var(--fg);}
+  .mark-pop .sel{font-size:11.5px;color:var(--dim);margin-bottom:7px;max-width:400px;
+                 overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .mark-hint{font-size:11.5px;color:var(--dim);margin-top:2px;}
+
+  /* 主题化细滚动条（阅读栏与整页都不出现粗灰条——石墨主题下白条格外刺眼） */
+  html,.ab-text,.ctx-body,#rv-q-wrap{scrollbar-width:thin;scrollbar-color:var(--scroll) transparent;}
+  .ab-text::-webkit-scrollbar,.ctx-body::-webkit-scrollbar,html::-webkit-scrollbar{width:8px;height:8px;}
+  html::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:99px;
+    border:2px solid transparent;background-clip:padding-box;}
+  html::-webkit-scrollbar-thumb:hover{background:var(--scroll-hover);background-clip:padding-box;}
+  .ab-text::-webkit-scrollbar-thumb,.ctx-body::-webkit-scrollbar-thumb{background:var(--scroll);
+    border-radius:99px;border:2px solid transparent;background-clip:padding-box;}
+  .ab-text::-webkit-scrollbar-thumb:hover,.ctx-body::-webkit-scrollbar-thumb:hover{
+    background:var(--scroll-hover);background-clip:padding-box;}
+
+  /* 切题骨架屏：shimmer 占位，不白屏 */
+  .sk{height:1.15em;border-radius:5px;margin:.95em 0;
+      background:linear-gradient(100deg, var(--skel-1) 30%, var(--skel-2) 50%, var(--skel-1) 70%);
+      background-size:220% 100%;animation:shimmer 1.3s linear infinite;}
+  @keyframes shimmer{from{background-position:180% 0}to{background-position:-40% 0}}
+  @media (prefers-reduced-motion: reduce){
+    *,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;}
+  }
+
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px;}
+
+  @media(max-width:860px){
+    main{padding:10px;}
+    header{padding:0 12px;gap:6px;height:52px;}
+    header h1{font-size:13px;gap:6px;}
+    header h1 b{display:none;}          /* 手机上标题只留品牌名，给导航腾地方 */
+    header .mode{display:none;}
+    nav{gap:0;}
+    nav button{padding:6px 9px;font-size:12.5px;}
+    header .tool{padding:5px 8px;}
+
+    .rv-top{padding:12px 14px 10px;margin-bottom:10px;}
+    .rv-title{font-size:13.5px;gap:6px;}
+    .rv-prog{margin-left:0;width:100%;gap:8px;}
+    .rv-prog .bar{flex:1;min-width:56px;}
+    #rv-exp{max-width:none;flex:1;min-width:110px;font-size:12px;}
+    .chips{margin-top:8px;}
+    .hint{margin-top:10px;padding-top:10px;font-size:11.5px;line-height:1.7;}
+
+    .ctx{margin-bottom:10px;}
+    .ctx-head{padding:8px 14px;}
+    .ctx-body{padding:12px 16px;max-height:26vh;font-size:calc(var(--rv-font) - 2.5px);line-height:1.9;}
+
+    .ab-wrap{grid-template-columns:1fr;gap:10px;margin-bottom:10px;}
+    .ab-card{border-radius:12px;}
+    .ab-label{padding:9px 16px 8px;}
+    .ab-text{padding:14px 18px;max-height:32vh;min-height:120px;max-width:none;}
+
+    /* dock：A/B 各占半行的大键，其余四键两个一行，状态垫底整行 */
+    .dock{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:10px;bottom:6px;border-radius:14px;}
+    .dock .vb{padding:14px 8px;justify-content:center;font-size:13.5px;}
+    .dock .vb.strong{grid-column:auto;}
+    .dock .state{grid-column:1/-1;text-align:center;margin-left:0;font-size:12px;}
+    .mark-pop .k{padding:9px 14px;font-size:14px;}
+  }
+
+  /* 纸纹：极轻噪点铺层，让大面积纯色有纸的肌理（≈5%，不抢阅读） */
+  body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:99;
+              opacity:.05;mix-blend-mode:multiply;
+              background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");}
+  html[data-theme="dark"] body::after{mix-blend-mode:overlay;opacity:.07;}
+</style>
+</head>
+<body>
+<header>
+  <h1><i class="hmark">◆</i>语言基因组 <b>SemanticFrame 校准实验室</b></h1>
+  <span class="mode" id="mode-tag">…</span>
+  <nav>
+    <button data-tab="review" class="on">盲评</button>
+    <button data-tab="exp">实验</button>
+    <button data-tab="corpus">语料</button>
+    <button data-tab="usage">用量</button>
+  </nav>
+  <div class="spop-wrap">
+    <button class="tool" id="rv-theme-btn" onclick="toggleThemeCycle()"
+            title="日间 / 夜间切换（也记忆选择）">☾</button>
+    <button class="tool" id="rv-settings-btn" onclick="toggleSettings(event)"
+            title="显示设置：主题 / 密度 / 字号">⚙</button>
+    <div class="spop" id="rv-settings">
+      <div class="srow"><span>主题</span><span class="seg">
+        <button data-st="light" onclick="setTheme('light')">纸感</button>
+        <button data-st="dark" onclick="setTheme('dark')">夜读</button>
+      </span></div>
+      <div class="srow"><span>密度</span><span class="seg">
+        <button data-sd="cozy" onclick="setDensity('cozy')">舒适</button>
+        <button data-sd="compact" onclick="setDensity('compact')">紧凑</button>
+      </span></div>
+      <div class="srow"><span>字号</span><span class="seg">
+        <button onclick="stepFont(-1)">A－</button>
+        <button onclick="stepFont(1)">A＋</button>
+      </span></div>
+    </div>
+  </div>
+</header>
+<main>
+
+  <section id="tab-review">
+    <div class="rv-top">
+      <div class="rv-head">
+        <div class="rv-title">盲评 · 批次 <span id="rv-batch">r15</span>
+          <small id="rv-exp-label"></small></div>
+        <div class="rv-prog">
+          <span class="num" id="rv-count">— / —</span>
+          <span class="pct" id="rv-pct"></span>
+          <div class="bar"><i id="rv-bar"></i></div>
+          <span class="tgrp">
+            <button class="tool" onclick="stepFont(-1)" title="缩小正文字号">A－</button>
+            <button class="tool" onclick="stepFont(1)" title="放大正文字号">A＋</button>
+            <button class="tool" id="rv-diff-btn" onclick="toggleDiff()"
+                    title="差异高亮：标出 A/B 两段不同的地方。注意：改动少的一侧可能因此显得更稳">差异：关</button>
+            <button class="tool" id="rv-rejudge-btn" onclick="rejudgeLast()"
+                    style="display:none" title="改判本会话最后判定的一题">↩ 改判</button>
+          </span>
+          <select id="rv-exp" onchange="switchBatch()" title="切换实验"></select>
+        </div>
+      </div>
+      <div class="chips" id="rv-reasons"></div>
+      <div class="hint" id="rv-hint">判定标准：哪一段更像成熟人类作者写的——不看信息对错，只看语感。
+        键盘 <kbd>A</kbd>/<kbd>B</kbd> 更好、<kbd>E</kbd> 无差别、<kbd>X</kbd> 都差、<kbd>?</kbd> 无法判、<kbd>S</kbd> 跳过。
+        选中 A/B 里的句子可标出「坏了的地方」；本题信号标签在判定后才会显示（防锚定）。</div>
+    </div>
+
+    <div class="rj" id="rv-rj" style="display:none">
+      <span>正在改判 · 原判：<b id="rv-rj-prev"></b>（提交即覆盖，不计入已判计数）</span>
+      <span class="spacer"></span>
+      <button onclick="exitRejudge()">退出改判，取下一题</button>
+    </div>
+
+    <div class="ctx" id="rv-context">
+      <div class="ctx-head">
+        <span>上文 <span id="rv-ctx-meta"></span></span>
+        <span class="spacer"></span>
+        <button onclick="toggleCtxScope()" id="rv-ctx-btn">看全场景</button>
+      </div>
+      <div class="ctx-body" id="rv-ctx-body"></div>
+    </div>
+
+    <div class="ab-wrap" id="rv-ab">
+      <article class="ab-card a">
+        <div class="ab-label"><span class="badge">A</span><span class="lab-tx">候选稿</span></div>
+        <div class="ab-text" id="rv-a"></div>
+        <div class="mark-list" id="mk-a"></div>
+      </article>
+      <article class="ab-card b">
+        <div class="ab-label"><span class="badge">B</span><span class="lab-tx">候选稿</span></div>
+        <div class="ab-text" id="rv-b"></div>
+        <div class="mark-list" id="mk-b"></div>
+      </article>
+    </div>
+    <div class="dlegend" id="rv-dlegend" style="display:none">差异高亮 · <b>A 栏</b>标「被改掉的」、<b>B 栏</b>标「新写的」——改动少的一侧可能因此显得更稳，仅作辅助阅读用。</div>
+    <div class="mark-hint" id="rv-mark-hint"></div>
+
+    <div class="mark-pop" id="mark-pop">
+      <div class="sel" id="mark-pop-sel"></div>
+      <div class="row1">
+        <span class="cancel" onclick="cancelMark()">取消</span>
+      </div>
+    </div>
+
+    <div class="dock" id="rv-dock">
+      <button class="vb strong" data-v="A" onclick="sendVerdict('A')">A 更好 <kbd>A</kbd></button>
+      <button class="vb strong" data-v="B" onclick="sendVerdict('B')">B 更好 <kbd>B</kbd></button>
+      <button class="vb" data-v="tie" onclick="sendVerdict('tie')">无差别 <kbd>E</kbd></button>
+      <button class="vb" data-v="both_bad" onclick="sendVerdict('both_bad')">都差 <kbd>X</kbd></button>
+      <button class="vb" data-v="cant_judge" onclick="sendVerdict('cant_judge')">无法判 <kbd>?</kbd></button>
+      <button class="vb" data-v="skip" onclick="skipItem()">跳过 <kbd>S</kbd></button>
+      <span class="state" id="rv-state"></span>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>
+        <button class="qtab on" id="qtab-pending" onclick="queueTab('pending')">待判队列</button>
+        <button class="qtab" id="qtab-done" onclick="queueTab('done')">已判 <span id="qtab-done-n">0</span></button>
+        <span class="spacer"></span>
+        <button class="act" onclick="toggleQueue()" id="rv-q-btn">展开</button>
+      </h3>
+      <div id="rv-q-wrap" style="display:none">
+        <table id="rv-table"></table>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-exp" style="display:none">
+    <div class="card">
+      <h3>新建实验</h3>
+      <div class="row">
+        <label>作品 <select id="f-work"><option value="">全部语料</option></select></label>
+        <label>段数 <input id="f-nseg" type="number" value="36" style="width:70px"></label>
+        <label>粒度 <input id="f-grans" value="S,M,L" style="width:80px"></label>
+        <label>温度 <input id="f-temps" value="0.5,0.9" style="width:90px"></label>
+        <label>采样 <input id="f-samples" type="number" value="1" style="width:56px"></label>
+        <label>并发 <input id="f-conc" type="number" value="4" style="width:56px"></label>
+      </div>
+      <div class="row">
+        <label>重建模型 <input id="f-models" style="width:420px"
+          value="deepseek/deepseek-v4.1-flash,meta/muse-spark-1.3-contributor,agnes-3.0-flash"></label>
+        <label>评委模型 <input id="f-judges" style="width:220px" value="moonshotai/kimi-k3"></label>
+        <button class="act primary" onclick="createExp()">创建并运行</button>
+      </div>
+      <div class="muted">评委模型请避开重建模型同家族；空 = 默认配置。</div>
+    </div>
+    <div class="card">
+      <h3>实验列表 <span class="spacer"></span><button class="act" onclick="loadExps()">刷新</button></h3>
+      <table id="exp-table"><thead>
+        <tr><th>ID</th><th>状态</th><th>当前 stage</th><th>段数</th><th>粒度</th><th>创建时间</th><th></th></tr>
+      </thead><tbody></tbody></table>
+    </div>
+    <div class="card" id="exp-detail" style="display:none">
+      <h3>实验详情 <span id="d-id" class="kv"></span><span class="spacer"></span>
+        <button class="act" onclick="runExp(curExp)">运行/续跑</button>
+        <button class="act" onclick="loadReport(curExp)">看报告</button>
+        <button class="act" onclick="autoRefresh(curExp)">自动刷新</button>
+      </h3>
+      <div class="stage-grid" id="d-stages"></div>
+      <h3 style="margin-top:18px">运行统计</h3>
+      <pre id="d-stats" class="kv"></pre>
+    </div>
+    <div class="card" id="report-card" style="display:none">
+      <h3>校准报告</h3>
+      <div id="report-body"></div>
+    </div>
+  </section>
+
+  <section id="tab-corpus" style="display:none">
+    <div class="card">
+      <h3>语料统计 <span class="spacer"></span>
+        <button class="act" onclick="loadCorpus()">刷新</button>
+        <button class="act" onclick="importInbox()">导入 inbox</button></h3>
+      <div id="corpus-stats" class="kv"></div>
+      <div class="row" style="margin-top:10px">
+        <input id="imp-path" placeholder="绝对路径导入，如 F:\小说\...\xx.txt" style="width:420px">
+        <button class="act" onclick="importFile()">导入文件</button>
+      </div>
+    </div>
+    <div class="card"><h3>作品</h3>
+      <table id="work-table"><thead>
+        <tr><th>ID</th><th>标题</th><th>作者</th><th>段数</th><th>来源</th><th>备注</th></tr>
+      </thead><tbody></tbody></table>
+    </div>
+    <div class="card"><h3>抽样段落</h3><div id="seg-list" class="kv"></div></div>
+  </section>
+
+  <section id="tab-usage" style="display:none">
+    <div class="card"><h3>LLM 用量 <span class="spacer"></span>
+      <button class="act" onclick="loadUsage()">刷新</button></h3>
+      <table id="usage-table"><thead>
+        <tr><th>环节</th><th>调用</th><th>tokens</th><th>失败</th></tr>
+      </thead><tbody></tbody></table>
+    </div>
+  </section>
+
+</main>
+<div class="toast" id="toast"></div>
+<script src="/static/diff.js"></script>
+<script>
+const $ = s => document.querySelector(s);
+let curExp = null, curReview = null, autoTimer = null, batchTotal = 0, batchDone = 0;
+
+let toastTimer = null;
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
+  // 下一帧再加 show 类，display→block 的过渡才播得出来（滑入）
+  requestAnimationFrame(()=>requestAnimationFrame(()=>t.classList.add('show')));
+  clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{ t.classList.remove('show');
+    setTimeout(()=>{ t.style.display='none'; }, 200); }, 2600); }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+async function api(path, opts){
+  const r = await fetch(path, opts ? {method:opts.method||'POST',
+    headers:{'Content-Type':'application/json'}, body:JSON.stringify(opts.body||{})} : undefined);
+  if(!r.ok){ let msg = r.status; try{ msg = (await r.json()).detail || msg }catch(e){}
+    throw new Error(typeof msg==='string'? msg : JSON.stringify(msg)); }
+  const ct = r.headers.get('content-type')||'';
+  return ct.includes('json') ? r.json() : r.text();
+}
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');
+  ['review','exp','corpus','usage'].forEach(t =>
+    $('#tab-'+t).style.display = t===b.dataset.tab ? '' : 'none');
+  if(b.dataset.tab==='corpus') loadCorpus();
+  if(b.dataset.tab==='usage') loadUsage();
+  if(b.dataset.tab==='exp') loadExps();
+  if(b.dataset.tab==='review') initReview();
+});
+
+// ── 盲评 ────────────────────────────────────────────────
+// 批次可从 URL 指定：?batch=s30；默认当前批次
+// s30 = 分层抽样批（对"候选胜"过采样，让 κ 有统计功效）
+const BATCH = new URLSearchParams(location.search).get('batch') || 's30';
+// CTX_SCOPE：near（默认，只给最近一段）/ scene（回溯到场景起点）。
+// 2026-09-17 集霸反馈"太折磨了"：实测单题要读 ≈4100 字，其中上文占 3970 字（97%），
+// A/B 两段只有 137 字——阅读成本几乎全在上文。默认改 near，URL 可覆盖：?ctx=scene
+const CTX_SCOPE = new URLSearchParams(location.search).get('ctx') || 'near';
+// 跨语料混合批（一批的题分属多个实验）必须走 /review/next?batch=：
+// 单实验路径按 experiment_id 过滤，会在第一个实验的题判完后**误报"本批已全部判定"**
+// （2026-09-17 实测 x50：斗罗 3 题判完即显示完成，而实际还有 39 题）。
+// ⚠ 这段逻辑曾被 2026-09-16 的 UI 重写覆盖掉一次，改 UI 时注意别删。
+let batchMulti = false;
+// 上文默认收起：场景回溯可能长达数十段，展开会把 A/B 挤出屏幕（用户 2026-09-14 反馈）。
+// 只在用户主动展开过之后才记住"展开"。
+let ctxCollapsed = localStorage.getItem('rv_ctx_collapsed') !== '0';
+const WIN_LABEL = {A:'A 更好', B:'B 更好', tie:'无差别', both_bad:'都差', cant_judge:'无法判'};
+const FONT_STEPS = [15, 16.5, 18.5, 21];
+    let fontIdx = (()=>{ const i = FONT_STEPS.indexOf(parseFloat(localStorage.getItem('rv_font')||''));
+      return i >= 0 ? i : 2;   // 默认 18.5：高级感先行靠字号与留白
+    })();
+let lastCtx = '', lastCtxMode = '';
+let sessionHistory = [];      // 本会话已判题快照（改判 / 复盘用，刷新即丢）
+let rejudge = null;           // 非 null = 正在改判：{id, prev, server?}
+let queueMode = 'pending';    // 队列卡片：待判 / 已判
+
+function applyFont(){
+  document.documentElement.style.setProperty('--rv-font', FONT_STEPS[fontIdx]+'px');
+  localStorage.setItem('rv_font', String(FONT_STEPS[fontIdx]));
+}
+function stepFont(d){
+  fontIdx = Math.max(0, Math.min(FONT_STEPS.length-1, fontIdx+d));
+  applyFont();
+  toast(`正文字号 ${FONT_STEPS[fontIdx]}px`);
+}
+applyFont();
+
+// ── 显示设置：主题 / 密度 / 差异高亮（localStorage 持久化）──────────────
+// 令牌两层结构下，主题切换只改 <html data-theme>，组件代码一行不动。
+let diffOn = false;            // 差异高亮开关（默认关：有呈现偏倚）
+let diffSpans = {A:null, B:null};
+let diffStale = true;          // curRaw 变了需要重算 diff
+
+function currentTheme(){
+  const t = localStorage.getItem('rv_theme');
+  return (t === 'light' || t === 'dark') ? t
+    : ((window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light');
+}
+function currentDensity(){
+  return localStorage.getItem('rv_density') === 'compact' ? 'compact' : 'cozy';
+}
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  localStorage.setItem('rv_theme', t);
+  document.querySelectorAll('#rv-settings [data-st]').forEach(b=>{
+    b.classList.toggle('on', b.dataset.st === t);
+  });
+  const tb = document.getElementById('rv-theme-btn');
+  if(tb) tb.textContent = t === 'dark' ? '☀' : '☾';
+}
+// 头部一键日间/夜间（设置弹层里的选择保留；这个按钮是给高频切换的手势）
+function toggleThemeCycle(){
+  setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+}
+function applyDensity(d){
+  const root = document.documentElement.style;
+  root.setProperty('--rv-pad', d === 'compact' ? '14px' : '20px');
+  root.setProperty('--rv-line', d === 'compact' ? '1.85' : '2.05');
+  localStorage.setItem('rv_density', d);
+  document.querySelectorAll('#rv-settings [data-sd]').forEach(b=>{
+    b.classList.toggle('on', b.dataset.sd === d);
+  });
+}
+function setTheme(t){ applyTheme(t); toast(t === 'dark' ? '已切换夜读主题' : '已切换纸感主题'); }
+function setDensity(d){ applyDensity(d); toast(d === 'compact' ? '已切换紧凑密度' : '已切换舒适密度'); }
+function toggleSettings(e){
+  if(e) e.stopPropagation();
+  $('#rv-settings').classList.toggle('open');
+}
+document.addEventListener('click', e=>{
+  if(!e.target.closest('.spop-wrap')) $('#rv-settings').classList.remove('open');
+});
+
+// 差异高亮：A 栏标「被改掉的」、B 栏标「新写的」。
+// 呈现偏倚是已知的（改动少的一侧显得更稳），所以做成 opt-in 开关而不是默认行为。
+function toggleDiff(){
+  diffOn = !diffOn;
+  localStorage.setItem('rv_diff', diffOn ? '1' : '0');
+  diffStale = true;
+  const btn = $('#rv-diff-btn');
+  btn.classList.toggle('on', diffOn);
+  btn.textContent = diffOn ? '差异：开' : '差异：关';
+  $('#rv-dlegend').style.display = diffOn ? '' : 'none';
+  renderMarks();
+  if(diffOn) toast('差异高亮：A 栏=被改掉的，B 栏=新写的；改动少的一侧可能显得更稳');
+}
+
+async function initReview(){
+  sessionHistory = []; rejudge = null; updateRjUI(); lockChips();
+  try{
+    const info = await api('/review/batch/'+BATCH);
+    curExp = info.experiment_id; batchTotal = info.total; batchDone = info.done;
+    batchMulti = (info.experiments || []).length > 1;
+    $('#rv-batch').textContent = info.batch;
+    $('#rv-exp-label').textContent = batchMulti
+      ? `· ${info.experiments.length} 个实验（跨语料批）` : '· ' + info.experiment_id;
+    $('#qtab-done-n').textContent = info.done;
+    // 实验下拉：本批实验置顶
+    const exps = await api('/experiments');
+    const others = exps.filter(e => e.id !== curExp && e.review_pending > 0);
+    $('#rv-exp').innerHTML =
+      `<option value="${curExp}">${curExp}（本批 ${info.pending} 待评）</option>` +
+      others.map(e=>`<option value="${e.id}">${e.id} · ${e.review_pending} 待评</option>`).join('');
+    renderProgress();
+    applyCtxState();
+    loadNext();
+  }catch(e){
+    $('#rv-batch').textContent = BATCH;
+    showDone('未找到批次 ' + BATCH, e.message, 'err');
+  }
+}
+
+function renderProgress(){
+  $('#rv-count').textContent = `${batchDone} / ${batchTotal} 题`;
+  $('#rv-pct').textContent = batchTotal ? Math.round(batchDone/batchTotal*100) + '%' : '';
+  $('#rv-bar').style.width = batchTotal ? (batchDone/batchTotal*100).toFixed(1)+'%' : '0';
+}
+
+function applyCtxState(forceCollapsed){
+  const c = $('#rv-context');
+  const coll = (forceCollapsed === undefined) ? ctxCollapsed : forceCollapsed;
+  c.classList.toggle('collapsed', coll);
+}
+function toggleCtx(){
+  ctxCollapsed = !ctxCollapsed;
+  localStorage.setItem('rv_ctx_collapsed', ctxCollapsed ? '1':'0');
+  applyCtxState();
+}
+
+function chipClass(t){
+  if(t.startsWith('human_upset')) return 'chip up';
+  if(t.startsWith('judge_disagreement')||t.startsWith('judge_uncertainty')||t.startsWith('judges_abstain')) return 'chip dis';
+  if(t.startsWith('novel')||t.startsWith('over_polish')) return 'chip nov';
+  return 'chip';
+}
+// 信号标签在判定前是锚定源（分数 / 层位会左右判断），判定后才显示（2026-09-16 审查修）
+function lockChips(){
+  $('#rv-reasons').innerHTML = '<span class="chip lock">🔒 本题信号将在判定后显示</span>';
+}
+function unlockChips(tags){
+  $('#rv-reasons').innerHTML = (tags && tags.length)
+    ? tags.map(t=>`<span class="${chipClass(t)}">${esc(t)}</span>`).join('')
+    : '<span class="chip">本题无信号标签</span>';
+}
+
+function showDone(title, sub, kind){
+  $('#rv-ab').style.display='none'; $('#rv-context').style.display='none';
+  $('#rv-dock').style.display='none'; $('#rv-mark-hint').style.display='none';
+  $('#rv-dlegend').style.display='none';
+  $('#rv-rj').style.display='none';
+  hidePop();
+  $('#rv-hint').innerHTML = `<div class="done-panel${kind==='err'?' err':''}"><div class="big">${esc(title)}</div>
+    <div class="sub">${esc(sub||'')}</div></div>`;
+}
+function showLive(){
+  $('#rv-ab').style.display=''; $('#rv-dock').style.display='';
+  $('#rv-context').style.display=''; $('#rv-mark-hint').style.display='';
+  $('#rv-dlegend').style.display = diffOn ? '' : 'none';
+  $('#rv-hint').innerHTML = `判定标准：哪一段更像成熟人类作者写的——不看信息对错，只看语感。
+    键盘 <kbd>A</kbd>/<kbd>B</kbd> 更好、<kbd>E</kbd> 无差别、<kbd>X</kbd> 都差、<kbd>?</kbd> 无法判、<kbd>S</kbd> 跳过。
+    选中 A/B 里的句子可标出「坏了的地方」；本题信号标签在判定后才会显示（防锚定）。`;
+}
+
+// 切题骨架屏：取题期间正文区 shimmer 占位，避免白屏 → 突然填字的闪烁
+function showSkeleton(){
+  const line = w => `<div class="sk" style="width:${w}%"></div>`;
+  $('#rv-a').innerHTML = line(96) + line(88) + line(72);
+  $('#rv-b').innerHTML = line(92) + line(80) + line(66);
+  $('#mk-a').innerHTML = ''; $('#mk-b').innerHTML = '';
+  $('#rv-mark-hint').textContent = '';
+  $('#rv-ctx-body').textContent = '';
+  $('#rv-state').textContent = '';
+}
+
+let ctxNear = '', ctxFull = '', ctxShowingFull = false;
+
+function setCtx(item){
+  const ctx = $('#rv-context');
+  ctxNear = item.context || '';          // 服务端按 ctx_scope 给的那份（默认近段）
+  ctxFull = item.context_full || ctxNear;
+  ctxShowingFull = false;
+  if(!ctxNear){ ctx.style.display='none'; return; }
+  ctx.style.display='';
+  renderCtx();
+}
+
+function renderCtx(){
+  $('#rv-ctx-body').textContent = ctxShowingFull ? ctxFull : ctxNear;
+  const extra = ctxFull.length > ctxNear.length
+    ? `（全场景 ${ctxFull.length} 字可展开）` : '';
+  $('#rv-ctx-meta').textContent =
+    `· ${ctxShowingFull ? '全场景' : '近段'} · ${(ctxShowingFull?ctxFull:ctxNear).length} 字${extra}`;
+  $('#rv-ctx-btn').textContent = (ctxFull.length > ctxNear.length)
+    ? (ctxShowingFull ? '只看近段' : '看全场景') : '收起';
+  // 全场景才需要限高滚动；近段短，直接全显
+  applyCtxState(ctxShowingFull ? ctxCollapsed : false);
+}
+
+function toggleCtxScope(){
+  if(ctxFull.length <= ctxNear.length){ toggleCtx(); return; }
+  ctxShowingFull = !ctxShowingFull;
+  renderCtx();
+}
+
+async function loadNext(){
+  rejudge = null; submitting = false; skipPending = false; updateRjUI();
+  const exp = curExp; if(!exp) return;
+  showLive();
+  showSkeleton();
+  setDockDisabled(false); $('#rv-state').textContent = '';
+  try{
+    const item = await api(batchMulti
+      ? `/review/next?batch=${BATCH}&ctx=${CTX_SCOPE}`
+      : `/experiments/${exp}/review/next?batch=${BATCH}&ctx=${CTX_SCOPE}`);
+    curReview = item.review_id;
+    curRaw = {A: item.text_a || '', B: item.text_b || ''};
+    diffStale = true;
+    lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
+    marks = {A: [], B: []};
+    markSeq = 0;
+    renderMarks();
+    hidePop();
+    lockChips();
+    setCtx(item);
+    // 换题入场微动：重播两卡浮起动画（去掉→强制 reflow→加回，才能重复触发）
+    const abEl = $('#rv-ab'); abEl.classList.remove('fresh'); void abEl.offsetWidth; abEl.classList.add('fresh');
+    document.querySelectorAll('#rv-ab .ab-card').forEach(c=>c.classList.remove('win-a','win-b'));
+  }catch(e){
+    const done = /清空/.test(e.message);
+    if(done){
+      batchDone = batchTotal; renderProgress();
+      showDone('本批 ' + batchTotal + ' 题已全部判定', '接下来跑 scripts/judge_matrix.py 并表 Human Prediction Matrix。');
+    } else { showDone('取题失败', e.message, 'err'); }
+  }
+}
+
+function setDockDisabled(v){
+  document.querySelectorAll('#rv-dock .vb').forEach(b=>b.disabled=v);
+}
+
+function deepCopyMarks(m){ return JSON.parse(JSON.stringify(m)); }
+
+function pushHistory(entry){
+  sessionHistory.push(entry);
+  if(sessionHistory.length > 40) sessionHistory.shift();
+  updateRjUI();
+}
+function updateHistory(id, w, tags){
+  const h = sessionHistory.find(x=>x.id===id);
+  if(h){ h.winner = w; h.marks = deepCopyMarks(marks); h.tags = tags || h.tags; }
+  else pushHistory({id, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
+                    ctx:lastCtx, tags:tags||[], marks:deepCopyMarks(marks), winner:w});
+}
+
+let submitting = false;   // 交卷进行中：防连点/连按造成重复提交（第二次会被记成 rejudged）
+let skipPending = false;  // 跳过进行中：此时交卷会落到正被跳过的题上
+
+async function sendVerdict(w){
+  if(!curReview){ toast('先取题'); return; }
+  if(submitting || skipPending) return;
+  submitting = true;
+  const inRj = !!rejudge;
+  const btn = document.querySelector(`#rv-dock .vb[data-v="${w}"]`);
+  if(btn) btn.classList.add('picked');
+  const cardId = w==='A' ? 'rv-a' : (w==='B' ? 'rv-b' : null);
+  if(cardId) $('#'+cardId).closest('.ab-card').classList.add(w==='A' ? 'win-a' : 'win-b');
+  setDockDisabled(true); $('#rv-state').textContent = '记录中…';
+  try{
+    // 批注随判定一起提交；side 用匿名 A/B，服务端再翻译成 human/candidate
+    const annotations = [];
+    for(const side of ['A','B']){
+      for(const m of marks[side]){
+        annotations.push({side, start:m.start, end:m.end, text:m.text, kind:m.kind, note:''});
+      }
+    }
+    const resp = await api('/review/'+curReview+'/verdict',
+              {body:{winner:w, reasons:[], annotations}});
+    unlockChips(resp.tags||[]);
+    const note = annotations.length ? ` · ${annotations.length} 处批注` : '';
+    if(inRj){
+      updateHistory(rejudge.id, w, resp.tags||[]);
+      $('#rv-state').textContent = `改判完成 ✓（${WIN_LABEL[w]}${note}）`;
+    } else {
+      pushHistory({id:curReview, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
+                   ctx:lastCtx, tags:resp.tags||[], marks:deepCopyMarks(marks), winner:w});
+      batchDone = Math.min(batchDone+1, batchTotal); renderProgress();
+      $('#rv-state').textContent = `已记录：${WIN_LABEL[w]}${note}`;
+    }
+    curReview = null;
+    setTimeout(loadNext, 820);
+  }catch(e){
+    submitting = false;
+    if(btn) btn.classList.remove('picked');
+    document.querySelectorAll('#rv-ab .ab-card').forEach(c=>c.classList.remove('win-a','win-b'));
+    setDockDisabled(false); $('#rv-state').textContent='';
+    toast(e.message);
+    // 映射丢失的已判题改判会被服务端拒绝（409）：回到正常流，别卡在改判态
+    if(inRj && /已判过/.test(e.message||'')){
+      rejudge = null; updateRjUI(); lockChips();
+      setTimeout(loadNext, 1000);
+    }
+  }
+}
+
+function skipItem(){
+  if(!curReview || submitting) return;
+  skipPending = true;
+  // 不落任何判定；服务端批次轮换游标会自动换到下一题，不会重复同一题
+  setDockDisabled(true); hidePop();
+  $('#rv-state').textContent = '跳过 · 取下一题…';
+  setTimeout(loadNext, 220);
+}
+
+// ── 改判 ────────────────────────────────────────────────
+function updateRjUI(){
+  const b = $('#rv-rj');
+  if(rejudge){
+    b.style.display='flex';
+    $('#rv-rj-prev').textContent = WIN_LABEL[rejudge.prev] || (rejudge.prev || '—');
+  } else {
+    b.style.display='none';
+  }
+  $('#rv-rejudge-btn').style.display =
+    (!rejudge && sessionHistory.some(e=>e.batch===BATCH && e.exp===curExp)) ? '' : 'none';
+}
+
+function rejudgeLast(){
+  if(rejudge){ toast('已在改判模式'); return; }
+  for(let i=sessionHistory.length-1; i>=0; i--){
+    const e = sessionHistory[i];
+    if(e.batch===BATCH && e.exp===curExp){ enterRejudge(e); return; }
+  }
+  toast('本会话在当前批次还没有判定记录；可展开下方「已判」列表选一题改判');
+}
+
+function enterRejudge(entry){
+  // 本会话快照里 A/B 位与原始一致，映射仍在服务端内存里，直接复用
+  rejudge = {id: entry.id, prev: entry.winner};
+  curReview = entry.id;
+  curRaw = {A: entry.a, B: entry.b};
+  diffStale = true;
+  marks = deepCopyMarks(entry.marks || {A:[], B:[]});
+  markSeq = 0;
+  for(const side of ['A','B']) for(const m of marks[side]) markSeq = Math.max(markSeq, m.id||0);
+  showLive();
+  const ctx = $('#rv-context');
+  if(entry.ctx){ ctx.style.display=''; $('#rv-ctx-body').textContent = entry.ctx;
+    $('#rv-ctx-meta').textContent = '· 改判'; }
+  else ctx.style.display='none';
+  applyCtxState();
+  unlockChips(entry.tags||[]);
+  renderMarks(); hidePop();
+  setDockDisabled(false);
+  $('#rv-state').textContent = '改判模式：改完直接提交即覆盖原判';
+  updateRjUI();
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+function exitRejudge(){
+  rejudge = null;
+  loadNext();
+}
+
+async function rejudgeFromDone(id){
+  // 已判但不在本会话快照里（服务重启过 / 更早的题）：走服务端重端，
+  // A/B 会重新随机，旧批注由服务端按新 A/B 位翻译后回填
+  if(rejudge){ toast('请先退出当前改判'); return; }
+  try{
+    const item = await api(`/experiments/${curExp}/review/${id}/serve`);
+    curReview = item.review_id;
+    curRaw = {A: item.text_a || '', B: item.text_b || ''};
+    diffStale = true;
+    lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
+    marks = {A: [], B: []};
+    markSeq = 0;
+    for(const a of ((item.prev||{}).annotations)||[]){
+      if(a.side!=='A' && a.side!=='B') continue;
+      marks[a.side].push({id:++markSeq, start:a.start, end:a.end,
+                          text:a.text||'', kind:a.kind||'其他'});
+    }
+    rejudge = {id: item.review_id, prev: (item.prev||{}).winner_side, server: true};
+    showLive();
+    setCtx(item);
+    unlockChips(item.tags||[]);
+    renderMarks(); hidePop();
+    setDockDisabled(false);
+    $('#rv-state').textContent = '改判模式：A/B 已重新打乱，旧批注已按新位置回填';
+    updateRjUI();
+    window.scrollTo({top:0, behavior:'smooth'});
+  }catch(e){ toast(e.message); }
+}
+
+// ── 噪点批注 ────────────────────────────────────────────
+// 集霸的观察：有些段落整体其实还可以，但总有几处坏的把整段拖垮。
+// 只给 A/B 一个胜负会丢掉这个信息——批注是**用户亲手指认的缺陷位置**。
+const MARK_KINDS = ['用词','解释过度','情绪直给','节奏','逻辑','意象','其他'];
+let marks = {A: [], B: []};
+let curRaw = {A: '', B: ''};
+let markSeq = 0;
+let pendingSel = null;
+
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function buildMarkedHtml(text, list){
+  // 按 start 排序渲染；与前者重叠的跳过（避免嵌套 mark 破坏 offset 语义）
+  const sorted = [...list].sort((a,b)=>a.start-b.start);
+  let out = '', pos = 0;
+  for(const m of sorted){
+    // 先夹到合法区间，再用夹过的 s 判重叠——
+    // 直接用 m.start 判会让负偏移被误判成"与 pos 重叠"而整条丢掉。
+    const s = Math.max(0, Math.min(m.start, text.length));
+    const e = Math.max(s, Math.min(m.end, text.length));
+    if(e <= s) continue;
+    if(s < pos) continue;
+    out += escHtml(text.slice(pos, s));
+    const ki = Math.max(0, MARK_KINDS.indexOf(m.kind));
+    out += `<mark class="k${ki}" data-mid="${m.id}" title="${escHtml(m.kind)}（点击删除）">`
+         + escHtml(text.slice(s, e)) + '</mark>';
+    pos = e;
+  }
+  out += escHtml(text.slice(pos));
+  return out;
+}
+
+function renderMarks(){
+  for(const side of ['A','B']){
+    const box = side==='A' ? $('#rv-a') : $('#rv-b');
+    const listEl = side==='A' ? $('#mk-a') : $('#mk-b');
+    box.innerHTML = buildMarkedHtml(curRaw[side], marks[side]);
+    listEl.innerHTML = marks[side].map(m =>
+      `<div class="mi"><b>${escHtml(m.kind)}</b>
+         <span class="tx">「${escHtml(m.text.slice(0,24))}${m.text.length>24?'…':''}」</span>
+         <span class="del" data-del="${m.id}">删除</span></div>`).join('');
+  }
+  const n = marks.A.length + marks.B.length;
+  $('#rv-mark-hint').textContent = n
+    ? `已标 ${n} 处噪点（A ${marks.A.length} / B ${marks.B.length}）`
+    : '提示：选中 A 或 B 里任何一句，可标出「坏了的地方」——整段还行但有几处拖垮全段时特别有用。';
+}
+
+/** 计算 Range 端点在容器纯文本中的字符偏移（与 textContent 对齐）。 */
+function offsetOf(container, node, off){
+  const r = document.createRange();
+  r.selectNodeContents(container);
+  try{ r.setEnd(node, off); }catch(e){ return 0; }
+  return r.toString().length;
+}
+
+function onTextMouseUp(side, ev){
+  const sel = window.getSelection();
+  if(!sel || sel.isCollapsed || sel.rangeCount===0){ return; }
+  const container = side==='A' ? $('#rv-a') : $('#rv-b');
+  const range = sel.getRangeAt(0);
+  if(!container.contains(range.startContainer) || !container.contains(range.endContainer)) return;
+  const start = offsetOf(container, range.startContainer, range.startOffset);
+  const end = offsetOf(container, range.endContainer, range.endOffset);
+  if(end - start < 2) return;
+  pendingSel = {side, start, end, text: curRaw[side].slice(start, end)};
+  showPop(ev.clientX, ev.clientY);
+}
+
+function showPop(x, y){
+  const pop = $('#mark-pop');
+  $('#mark-pop-sel').textContent = '「' + pendingSel.text.slice(0,40)
+    + (pendingSel.text.length>40 ? '…' : '') + '」';
+  // 种类按钮只渲染一次
+  const row = pop.querySelector('.row1');
+  row.querySelectorAll('.k').forEach(b=>b.remove());
+  const cancel = row.querySelector('.cancel');
+  MARK_KINDS.forEach((k, i)=>{
+    const b = document.createElement('button');
+    b.className = 'k'; b.textContent = k;
+    b.onclick = ()=> applyMark(k);
+    row.insertBefore(b, cancel);
+  });
+  pop.style.display = 'block';
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(x - w/2, window.innerWidth - w - 8)) + 'px';
+  pop.style.top  = Math.max(8, Math.min(y - h - 12, window.innerHeight - h - 8)) + 'px';
+}
+
+function hidePop(){ $('#mark-pop').style.display='none'; pendingSel = null; }
+function cancelMark(){ hidePop(); window.getSelection().removeAllRanges(); }
+
+function applyMark(kind){
+  if(!pendingSel) return;
+  marks[pendingSel.side].push({id: ++markSeq, start: pendingSel.start,
+                               end: pendingSel.end, text: pendingSel.text, kind});
+  hidePop();
+  window.getSelection().removeAllRanges();
+  renderMarks();
+}
+
+function deleteMark(id){
+  for(const side of ['A','B']) marks[side] = marks[side].filter(m=>m.id!==id);
+  renderMarks();
+}
+
+// 选中 / 点删的委托
+let lastTouchTs = 0;
+document.addEventListener('mouseup', ev => {
+  if($('#tab-review').style.display === 'none') return;
+  if(ev.target.closest('#mark-pop')) return;
+  const mid = ev.target.closest('mark[data-mid]');
+  if(mid){ deleteMark(+mid.dataset.mid); return; }
+  const del = ev.target.closest('.del[data-del]');
+  if(del){ deleteMark(+del.dataset.del); return; }
+  const a = ev.target.closest('#rv-a'), b = ev.target.closest('#rv-b');
+  if(a || b){
+    // 触屏结束后浏览器会补发一次合成 mouseup，与 touchend 重复，交给 touchend 处理
+    if(Date.now() - lastTouchTs < 900) return;
+    onTextMouseUp(a ? 'A' : 'B', ev);
+  }
+});
+document.addEventListener('mousedown', ev => {
+  if(!ev.target.closest('#mark-pop') && !ev.target.closest('#rv-a') && !ev.target.closest('#rv-b'))
+    hidePop();
+});
+// 移动端选区在 touchend 之后才稳定；等一下再取，并按触点定位弹层
+document.addEventListener('touchend', ev => {
+  if($('#tab-review').style.display === 'none') return;
+  if(ev.target.closest('#mark-pop')) return;
+  const a = ev.target.closest('#rv-a'), b = ev.target.closest('#rv-b');
+  if(!(a||b)) return;
+  const t = ev.changedTouches[0];
+  if(!t) return;
+  lastTouchTs = Date.now();
+  setTimeout(()=>{ onTextMouseUp(a ? 'A' : 'B', {clientX:t.clientX, clientY:t.clientY}); }, 260);
+}, {passive:true});
+
+document.addEventListener('keydown', e => {
+  if($('#tab-review').style.display === 'none') return;
+  if(e.key === 'Escape'){ cancelMark(); return; }
+  if(e.metaKey||e.ctrlKey||e.altKey) return;
+  const tag = (e.target.tagName||'').toLowerCase();
+  if(tag==='input'||tag==='select'||tag==='textarea') return;
+  if(!curReview) return;
+  // 正在选文本 / 批注弹层开着时，别把 A/B 当判定键——否则标噪点会误交卷
+  const sel = window.getSelection();
+  if($('#mark-pop').style.display === 'block') return;
+  if(sel && !sel.isCollapsed) return;
+  const k = e.key.toLowerCase();
+  const map = {'a':'A','b':'B','e':'tie','x':'both_bad','?':'cant_judge','/':'cant_judge'};
+  if(map[k]){ e.preventDefault(); sendVerdict(map[k]); }
+  else if(k==='s'){ e.preventDefault(); skipItem(); }
+  else if(k==='arrowright'){
+    // 光标在 A/B 正文里时，→ 是移动插入点，不能抢成跳过
+    const anchor = sel && sel.anchorNode;
+    if(anchor && $('#rv-ab').contains(anchor)) return;
+    e.preventDefault(); skipItem();
+  }
+});
+
+// 差异高亮复用块内渲染：先让被测试钉住的 renderMarks 按老路径画完
+// （批注列表 / hint 都用它，buildMarkedHtml 一字不动），diff 开启时再用
+// composer 覆写两个正文框。composer 只加内联标签，剥标签后与原文逐字相等，
+// 选区偏移体系（offsetOf / textContent）完全不受影响，划选批注照常可用。
+const renderMarksPlain = renderMarks;
+renderMarks = function(){
+  renderMarksPlain();
+  if(!diffOn || typeof DiffLite === 'undefined') return;
+  if(diffStale){ diffSpans = DiffLite.highlightSpans(curRaw.A, curRaw.B); diffStale = false; }
+  $('#rv-a').innerHTML = DiffLite.composeHtml(curRaw.A, marks.A, diffSpans.A, MARK_KINDS);
+  $('#rv-b').innerHTML = DiffLite.composeHtml(curRaw.B, marks.B, diffSpans.B, MARK_KINDS);
+};
+
+function switchBatch(){ toast('已切换到 ' + $('#rv-exp').value); curExp = $('#rv-exp').value; loadNext(); }
+
+function queueTab(mode){
+  queueMode = mode;
+  $('#qtab-pending').classList.toggle('on', mode==='pending');
+  $('#qtab-done').classList.toggle('on', mode==='done');
+  if($('#rv-q-wrap').style.display !== 'none'){
+    if(mode==='pending') loadReviewQueue(); else loadDoneList();
+  }
+}
+function toggleQueue(){
+  const w = $('#rv-q-wrap');
+  const open = w.style.display === 'none';
+  w.style.display = open ? '' : 'none';
+  $('#rv-q-btn').textContent = open ? '收起' : '展开';
+  if(open) queueTab(queueMode);
+}
+async function loadReviewQueue(){
+  const exp = curExp; if(!exp) return;
+  try{
+    const rows = await api(`/experiments/${exp}/review?limit=100`);
+    const mine = rows.filter(r => (r.reasons||[]).includes('batch_'+BATCH));
+    const list = mine.length ? mine : rows;
+    $('#rv-table').innerHTML =
+      `<thead><tr><th>priority</th><th>入队原因</th><th>review_id</th></tr></thead><tbody>` +
+      list.map(r =>
+        `<tr><td>${r.priority}</td>
+         <td>${(r.reasons||[]).filter(x=>!x.startsWith('batch_')).map(esc).join('；')}</td>
+         <td class="kv">${r.id}</td></tr>`).join('') +
+      `</tbody>`;
+  }catch(e){ toast(e.message); }
+}
+function verdictChip(w){
+  const m = {human:['Human 更好','chip nov'], candidate:['候选更好','chip dis'],
+             tie:['无差别','chip'], both_bad:['都差','chip up'],
+             cant_judge:['无法判','chip']};
+  const [t,c] = m[w] || [w||'—','chip'];
+  return `<span class="${c}">${esc(t)}</span>`;
+}
+async function loadDoneList(){
+  try{
+    const d = await api('/review/batch/'+BATCH+'/done');
+    $('#qtab-done-n').textContent = d.done;
+    $('#rv-table').innerHTML =
+      `<thead><tr><th>判定</th><th>批注</th><th>时间</th><th>review_id</th><th></th></tr></thead><tbody>` +
+      d.items.map(it =>
+        `<tr><td>${verdictChip(it.winner)}${it.rejudged?' <span class="chip">改</span>':''}</td>
+         <td>${it.n_annotations||0}</td>
+         <td class="muted">${(it.reviewed_at||'').slice(5,16).replace('T',' ')}</td>
+         <td class="kv">${it.id}</td>
+         <td><button class="act" onclick="rejudgeFromDone('${it.id}')">改判</button></td></tr>`).join('') +
+      `</tbody>`;
+  }catch(e){
+    $('#rv-table').innerHTML = `<thead><tr><th>该批次还没有已判题</th></tr></thead>`;
+  }
+}
+
+// ── 实验 ────────────────────────────────────────────────
+async function loadExps(){
+  const rows = await api('/experiments');
+  $('#exp-table tbody').innerHTML = rows.map(e =>
+    `<tr><td class="kv">${e.id}</td>
+     <td><span class="tag ${e.status}">${e.status}</span></td>
+     <td>${e.current_stage||''}</td><td>${e.n_segments}</td>
+     <td>${(e.granularities||[]).join(',')}</td><td>${e.created_at||''}</td>
+     <td><button class="act" onclick="showExp('${e.id}')">详情</button></td></tr>`).join('');
+}
+
+async function createExp(){
+  const body = {
+    n_segments: +$('#f-nseg').value,
+    granularities: $('#f-grans').value.split(',').map(x=>x.trim()).filter(Boolean),
+    temperatures: $('#f-temps').value.split(',').map(Number).filter(x=>!isNaN(x)),
+    samples_per_pair: +$('#f-samples').value,
+    concurrency: +$('#f-conc').value,
+    recon_models: $('#f-models').value.split(',').map(x=>x.trim()).filter(Boolean),
+    judge_models: $('#f-judges').value.split(',').map(x=>x.trim()).filter(Boolean),
+  };
+  if($('#f-work').value) body.work_ids = [$('#f-work').value];
+  try{
+    const exp = await api('/experiments', {body});
+    toast('已创建 '+exp.id+'，启动中…');
+    await api('/experiments/'+exp.id+'/run', {body:{}});
+    loadExps(); showExp(exp.id); autoRefresh(exp.id);
+  }catch(e){ toast('创建失败: '+e.message); }
+}
+
+async function runExp(id){ await api('/experiments/'+id+'/run',{body:{}}); toast('已启动'); }
+function autoRefresh(id){ clearInterval(autoTimer);
+  autoTimer = setInterval(()=>{ if(curExp) showExp(curExp, true); }, 5000); }
+
+async function showExp(id, quiet){
+  try{
+    const e = await api('/experiments/'+id);
+    $('#exp-detail').style.display='';
+    $('#d-id').textContent = id + ' · ' + e.status;
+    const stages = e.stats && e.stats.stages || {};
+    $('#d-stages').innerHTML = Object.entries(e.job_states||{}).map(([k,v]) =>
+      `<div class="stage-cell"><b>${k.replace('stage:','')}
+        <span class="tag ${v.status}">${v.status}</span></b>
+        ${stages[k.replace('stage:','')] ?
+          Object.entries(stages[k.replace('stage:','')]).filter(([x])=>x!=='done')
+            .map(([a,b])=>`${a}=${typeof b==='object'?JSON.stringify(b):b}`).join(' ') : ''}
+        ${v.last_error? `<div style="color:var(--bad)">${v.last_error.slice(0,120)}</div>`:''}
+      </div>`).join('');
+    $('#d-stats').textContent = JSON.stringify(e.stats||{}, null, 2).slice(0, 4000);
+    if(!quiet && e.status==='done') loadReport(id);
+    if(e.status==='done' || e.status==='failed') clearInterval(autoTimer);
+  }catch(err){ if(!quiet) toast(err.message); }
+}
+
+function mdLite(md){
+  return esc(md)
+    .replace(/^# (.*)$/gm, '<h2 class="md-head">$1</h2>')
+    .replace(/^## (.*)$/gm, '<h3 class="md-head" style="margin-top:18px">$1</h3>')
+    .replace(/^### (.*)$/gm, '<h4 class="md-head">$1</h4>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^\|(.+)\|$/gm, (m)=> '<div class="kv">'+m.split('|').filter(Boolean)
+        .map(c=>c.trim()).join('  │  ')+'</div>')
+    .replace(/\n{2,}/g, '<br>');
+}
+async function loadReport(id){
+  try{
+    const md = await api('/experiments/'+id+'/report');
+    $('#report-card').style.display='';
+    $('#report-body').innerHTML = mdLite(md);
+    $('#report-card').scrollIntoView({behavior:'smooth'});
+  }catch(e){ toast('报告未就绪: '+e.message); }
+}
+
+// ── 语料 ────────────────────────────────────────────────
+async function loadCorpus(){
+  const st = await api('/corpus/stats');
+  $('#corpus-stats').innerHTML = Object.entries(st).map(([k,v])=>`${k}: ${v}`).join(' · ');
+  const works = await api('/works');
+  $('#work-table tbody').innerHTML = works.map(w =>
+    `<tr><td class="kv">${w.id}</td><td>${esc(w.title)}</td><td>${esc(w.author||'')}</td>
+     <td>${w.segments}</td><td class="kv" style="font-size:11px">${esc(w.source)}</td>
+     <td class="muted">${esc(w.note||'')}</td></tr>`).join('');
+  $('#f-work').innerHTML = '<option value="">全部语料</option>' +
+    works.map(w=>`<option value="${w.id}">${esc(w.title)}（${w.segments}段）</option>`).join('');
+  const segs = await api('/segments?limit=8');
+  $('#seg-list').innerHTML = segs.map(s =>
+    `<div style="margin-bottom:8px">[${s.id}] ${esc(s.text)}</div>`).join('');
+}
+async function importInbox(){ const r = await api('/corpus/import-inbox',{body:{}});
+  toast(JSON.stringify(r)); loadCorpus(); }
+async function importFile(){ const p = $('#imp-path').value.trim(); if(!p) return;
+  try{ const r = await api('/corpus/import-file',{body:{path:p}});
+    toast(r.error||('导入 '+r.segments+' 段')); loadCorpus(); }catch(e){ toast(e.message); } }
+
+// ── 用量 ────────────────────────────────────────────────
+async function loadUsage(){
+  const st = await api('/llm/stats');
+  $('#mode-tag').textContent = 'mode: '+st.mode;
+  $('#usage-table tbody').innerHTML = Object.entries(st.by_purpose)
+    .sort((a,b)=>b[1].tokens-a[1].tokens)
+    .map(([k,v])=>`<tr><td>${k}</td><td>${v.calls}</td><td>${v.tokens}</td><td>${v.failed}</td></tr>`)
+    .join('');
+}
+
+// 设置面板初值：主题（已在 <head> 无闪烁应用过，这里只同步按钮态）、密度、差异开关
+(function initSettings(){
+  applyTheme(currentTheme());
+  applyDensity(currentDensity());
+  if(localStorage.getItem('rv_diff') === '1'){
+    diffOn = true; diffStale = true;
+    $('#rv-diff-btn').classList.add('on');
+    $('#rv-diff-btn').textContent = '差异：开';
+    $('#rv-dlegend').style.display = '';
+  }
+})();
+
+initReview(); loadUsage();
+</script>
+</body>
+</html>

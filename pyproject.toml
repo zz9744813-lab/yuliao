@@ -1,0 +1,9 @@
+[project]
+name = "language-genome"
+version = "0.1.0"
+description = "SemanticFrame Calibration Lab — 标定 Language Genome 的核心中间表示"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

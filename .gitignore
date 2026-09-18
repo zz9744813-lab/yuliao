@@ -1,0 +1,10 @@
+# 数据/产物不进版本库（510MB，且是实验产物不是代码）
+data/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+websrc/

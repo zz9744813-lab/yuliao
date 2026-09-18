@@ -1,0 +1,1001 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Language Genome · 研究台（成品样例）</title>
+<style>
+:root{
+  --bg:#0b0e14; --panel:#131822; --panel2:#171d29; --line:#242c3a; --line2:#2f3a4d;
+  --tx:#e7ecf4; --tx2:#9aa7bb; --tx3:#66748a;
+  --acc:#4da3ff; --acc2:#7c6cff; --ok:#39d98a; --warn:#ffbf47; --bad:#ff5f7a; --plan:#8a94a6;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);
+  font:13.5px/1.6 "Segoe UI","Microsoft YaHei","PingFang SC",system-ui,sans-serif;}
+a{color:var(--acc);text-decoration:none}
+.app{display:grid;grid-template-columns:242px 1fr;min-height:100vh}
+
+/* ---------- 侧栏 ---------- */
+.side{background:#0e121a;border-right:1px solid var(--line);padding:14px 10px 30px;position:sticky;top:0;height:100vh;overflow:auto}
+.brand{padding:6px 8px 14px;border-bottom:1px solid var(--line);margin-bottom:10px}
+.brand b{font-size:16px;letter-spacing:.3px;display:block}
+.brand b span{color:var(--acc)}
+.brand small{color:var(--tx3);font-size:11.5px;line-height:1.5;display:block;margin-top:4px}
+.gg{color:var(--tx3);font-size:10.5px;letter-spacing:.12em;margin:14px 8px 6px;text-transform:uppercase}
+.nav a{display:flex;align-items:center;gap:8px;padding:7px 9px;border-radius:7px;color:var(--tx2);font-size:13px;margin-bottom:1px}
+.nav a:hover{background:#161c27;color:var(--tx)}
+.nav a.on{background:#1b2432;color:#fff;box-shadow:inset 2px 0 0 var(--acc)}
+.nav a i{font-style:normal;color:var(--tx3);width:15px;text-align:center;font-size:12px}
+.nav a .bd{margin-left:auto;font-size:10px;padding:1px 5px;border-radius:20px;border:1px solid}
+.bd.y{color:var(--ok);border-color:#1f5a41;background:#0f2419}
+.bd.p{color:var(--warn);border-color:#5c4620;background:#241f10}
+.bd.n{color:var(--plan);border-color:#39414f;background:#161b24}
+
+/* ---------- 主区 ---------- */
+.main{min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:0;z-index:5;background:rgba(11,14,20,.93);backdrop-filter:blur(8px);
+  border-bottom:1px solid var(--line);padding:10px 22px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.crumb{font-size:12.5px;color:var(--tx3)}
+.crumb b{color:var(--tx);font-weight:600;font-size:14px}
+.pill{font-size:11px;color:var(--tx2);border:1px solid var(--line2);background:#131924;padding:3px 9px;border-radius:20px;white-space:nowrap}
+.pill b{color:var(--tx);font-family:var(--mono);font-weight:600}
+.sp{flex:1}
+.canvas{padding:18px 22px 60px;max-width:1500px}
+.page{display:none}.page.on{display:block}
+h2.pt{font-size:19px;margin:2px 0 4px;font-weight:650}
+p.pd{color:var(--tx2);margin:0 0 16px;font-size:12.8px;max-width:1000px}
+.note{background:#101724;border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:8px;padding:10px 13px;margin:0 0 16px;font-size:12.6px;color:var(--tx2)}
+.note.warn{border-left-color:var(--warn)}.note.bad{border-left-color:var(--bad)}.note.ok{border-left-color:var(--ok)}
+.note b{color:var(--tx)}
+
+/* ---------- 组件 ---------- */
+.grid{display:grid;gap:13px}
+.g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.g3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.g2{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:1250px){.g4{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:1fr}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px 15px}
+.card h3{margin:0 0 10px;font-size:12.5px;color:var(--tx2);font-weight:600;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
+.card h3 .r{margin-left:auto;font-size:11px;color:var(--tx3)}
+.kpi{font-family:var(--mono);font-size:25px;font-weight:600;letter-spacing:-.5px}
+.kpi.s{font-size:19px}
+.kpi small{font-family:inherit;font-size:12px;color:var(--tx3);font-weight:400;margin-left:4px}
+.kl{font-size:11.5px;color:var(--tx3);margin-top:2px}
+.ks{font-size:11.5px;color:var(--tx2);margin-top:6px}
+.up{color:var(--ok)}.dn{color:var(--bad)}.wn{color:var(--warn)}
+table{width:100%;border-collapse:collapse;font-size:12.4px}
+th{text-align:left;color:var(--tx3);font-weight:600;font-size:11.3px;letter-spacing:.03em;
+  padding:6px 8px;border-bottom:1px solid var(--line2);white-space:nowrap}
+td{padding:6px 8px;border-bottom:1px solid #1a212c;vertical-align:top}
+tbody tr:hover{background:#161d29}
+td.n,th.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+td.m{font-family:var(--mono);font-size:11.8px;color:var(--tx2)}
+.tag{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:20px;border:1px solid var(--line2);color:var(--tx2);background:#151b26;white-space:nowrap}
+.tag.ok{color:var(--ok);border-color:#1f5a41;background:#0f2419}
+.tag.bad{color:var(--bad);border-color:#5c2331;background:#241016}
+.tag.warn{color:var(--warn);border-color:#5c4620;background:#221d10}
+.tag.acc{color:var(--acc);border-color:#1f4266;background:#101d2c}
+.bar{height:7px;border-radius:6px;background:#1d2531;overflow:hidden;min-width:50px}
+.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+.bar.ok>i{background:linear-gradient(90deg,#2fa96c,#39d98a)}
+.bar.bad>i{background:linear-gradient(90deg,#8c2b40,#ff5f7a)}
+.bar.warn>i{background:linear-gradient(90deg,#8a6520,#ffbf47)}
+.mono{font-family:var(--mono)}
+.tiny{font-size:11.4px;color:var(--tx3)}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 0}
+button{font:inherit;font-size:12.3px;padding:6px 12px;border-radius:8px;border:1px solid var(--line2);
+  background:#182030;color:var(--tx);cursor:pointer}
+button:hover{border-color:var(--acc);color:#fff}
+button.pri{background:linear-gradient(180deg,#2b6fd4,#2059ad);border-color:#3a7fe0;color:#fff}
+button.gh{background:transparent}
+button:disabled{opacity:.45;cursor:default}
+.panes{display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px}
+@media(max-width:1300px){.panes{grid-template-columns:1fr}}
+.txt{background:#0f131c;border:1px solid var(--line);border-radius:8px;padding:11px 13px;
+  font-size:13.5px;line-height:1.95;color:#dfe6f1}
+.txt.k{color:#fff;background:#101a26;border-color:#22405e}
+.txt .hl{background:#2a3d1e;color:#d8f0b8;border-radius:3px;padding:0 2px}
+.jk{font-family:var(--mono);font-size:12px;color:#bcd3f0;background:#0f141d;border:1px solid var(--line);
+  border-radius:7px;padding:9px 11px;white-space:pre-wrap;line-height:1.75;max-height:430px;overflow:auto}
+.kv{display:grid;grid-template-columns:96px 1fr;gap:4px 10px;font-size:12.3px}
+.kv b{color:var(--tx3);font-weight:600}
+.kv span{color:var(--tx2)}
+.chip{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 7px;margin:2px 4px 2px 0;
+  border-radius:6px;background:#141b26;border:1px solid var(--line2);color:var(--tx2)}
+.dag{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:9px}
+@media(max-width:1100px){.dag{grid-template-columns:repeat(3,1fr)}}
+.node{background:#141a25;border:1px solid var(--line2);border-radius:9px;padding:9px 10px;position:relative}
+.node b{display:block;font-size:12.4px;margin-bottom:2px}
+.node .st{font-size:10.5px;color:var(--tx3)}
+.node.done{border-color:#1f5a41;background:#101d18}
+.node.run{border-color:#2b6fd4;background:#101a2c;box-shadow:0 0 0 2px #12263f}
+.node.wait{opacity:.72;border-style:dashed}
+.foot{margin-top:26px;padding-top:12px;border-top:1px solid var(--line);color:var(--tx3);font-size:11.4px}
+.seg{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
+.seg button{padding:4px 10px;font-size:12px}
+.seg button.on{background:#1e2939;border-color:var(--acc);color:#fff}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <b>Language<span>Genome</span></b>
+      <small>语义基因组 · 中文文风研究台<br>成品形态样例（v1 原型）</small>
+    </div>
+    <div class="gg">数据与结构</div>
+    <nav class="nav" id="nav1"></nav>
+    <div class="gg">质量与评判</div>
+    <nav class="nav" id="nav2"></nav>
+    <div class="gg">产出与运行</div>
+    <nav class="nav" id="nav3"></nav>
+    <div class="foot" style="border:0;padding:14px 8px 0;font-size:11px">
+      快照 <span class="mono">2026-09-18 20:35</span><br>
+      源：<span class="mono">data/language_genome.db</span>（只读）<br>
+      <span style="color:#4b5668">页面骨架为示意，数字取自真实库</span>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="topbar" id="tbar"></div>
+    <div class="canvas" id="cv"></div>
+  </main>
+</div>
+
+<script>
+/* ============================================================
+   真实数据（只读取自 F:\agi\language-genome\data\language_genome.db）
+   ============================================================ */
+const D = {
+  seg:295955, segV2:281831,
+  works:[
+    {t:'琼明神女录（精校）', a:'倒悬山剑气长存', s:34640, f:636, r:'Human Anchor #1 · 成人向仙侠', tag:'ok'},
+    {t:'将夜（猫腻）', a:'—', s:68626, f:340, r:'corpus02_quality_anchor · 强语言质量锚', tag:'ok'},
+    {t:'凡人修仙传（忘语）', a:'—', s:154809, f:330, r:'corpus03_narrative_anchor', tag:'ok'},
+    {t:'斗罗大陆（唐家三少）', a:'—', s:37863, f:341, r:'corpus04_target_style_anchor · 目标风格锚', tag:'acc'},
+    {t:'fixture_chen_clan', a:'—', s:null, f:42, r:'固定测试夹具', tag:''},
+    {t:'fixture_wuguan', a:'—', s:null, f:22, r:'固定测试夹具', tag:''}
+  ],
+  frames:{total:1711, ok:1174, rep:508, fail:29, L:743, M:484, S:484},
+  cand:{total:2689, ok:2675, fail:14},
+  calls:{n:20059, ti:18377833, to:24407321, lat:47.2, bad:442},
+  models:[
+    {m:'deepseek-v4.1-flash', n:7329, ti:6441635, to:9122415, lat:11.9, bad:58, u:'抽取 / 重构 / 判劣化'},
+    {m:'kimi-k3', n:6967, ti:6749586, to:1718946, lat:85.6, bad:90, u:'抽取 / 评委 / 语义残差'},
+    {m:'muse-spark-1.3', n:4451, ti:3957835, to:13312711, lat:45.2, bad:259, u:'重构（长输出）'},
+    {m:'agnes-3.0-flash', n:698, ti:1133095, to:85309, lat:9.7, bad:0, u:'清洗 / 评委'},
+    {m:'glm-5.3', n:260, ti:85930, to:166108, lat:201.2, bad:28, u:'重构 / 评测'},
+    {m:'gemini-3.8-flash-high', n:253, ti:0, to:0, lat:14.6, bad:2, u:'基准（外部对照）'}
+  ],
+  judges:[
+    {m:'kimi-k3', pv:'v4', n:230, ag:0.530, k:0.112, lo:0.010, hi:0.214, pick:0.561, best:1},
+    {m:'deepseek-v4.1-flash', pv:'v4', n:230, ag:0.509, k:0.088, lo:-0.008, hi:0.186, pick:0.583},
+    {m:'muse-spark-1.3', pv:'v4', n:223, ag:0.534, k:0.088, lo:-0.029, hi:0.197, pick:0.525},
+    {m:'kimi-k3', pv:'v3', n:230, ag:0.465, k:0.064, lo:-0.026, hi:0.159, pick:0.652},
+    {m:'deepseek-v4.1-flash', pv:'v3', n:230, ag:0.404, k:0.040, lo:-0.047, hi:0.127, pick:0.757},
+    {m:'agnes-3.0-flash', pv:'v4', n:230, ag:0.370, k:-0.030, lo:-0.115, hi:0.054, pick:0.739},
+    {m:'gemini-3.8-flash-high', pv:'v4', n:60, ag:0.450, k:-0.040, lo:-0.266, hi:0.180, pick:0.567}
+  ],
+  bench:{set:'BS-abd3c45ef334', name:'cc-v1', items:171, types:19, runs:[
+    {m:'gemini-3.8-flash-high', n:170, a:0.912},
+    {m:'kimi-k3', n:171, a:0.819},
+    {m:'deepseek-v4.1-flash', n:169, a:0.817},
+    {m:'glm-5.3', n:169, a:0.793}
+  ]},
+  benchTypes:[
+    {t:'NEUTRAL_PARAPHRASE', c:0, n:9}, {t:'LITERARY_OVERWRITE', c:4, n:10},
+    {t:'MICRO_EXPRESSION_TEMPLATE', c:3, n:6}, {t:'PARALLELISM_OVERUSE', c:6, n:9},
+    {t:'POV_DRIFT', c:7, n:10}, {t:'EXPLICITIZE', c:9, n:11},
+    {t:'SEMANTIC_OVERCOMPLETION', c:7, n:8}, {t:'ADJECTIVE_INFLATION', c:9, n:10},
+    {t:'PSYCHOLOGY_LABEL', c:10, n:11}, {t:'NARRATOR_JUDGMENT', c:10, n:11},
+    {t:'ABSTRACT_SUMMARY', c:11, n:12}, {t:'OVER_EXPLAIN', c:10, n:10},
+    {t:'EMOTION_LABEL', c:11, n:11}, {t:'LOGIC_CONNECTOR_INFLATION', c:11, n:11},
+    {t:'REDUNDANCY', c:12, n:12}, {t:'DIALOGUE_EXPOSITION', c:6, n:6},
+    {t:'SUBTEXT_ERASE', c:8, n:8}, {t:'ADVERB_INFLATION', c:3, n:3},
+    {t:'RHYTHM_FLATTEN', c:3, n:3}
+  ],
+  strats:[
+    {n:'直抒情绪vs铺陈演绎', k:28, r:0.393, lo:0.236, hi:0.576},
+    {n:'克制直陈vs铺陈注水', k:56, r:0.339, lo:0.229, hi:0.470},
+    {n:'保留原句的递进铺陈', k:14, r:0.286, lo:0.117, hi:0.546},
+    {n:'克制概述vs铺陈渲染', k:33, r:0.242, lo:0.128, hi:0.410},
+    {n:'少动作直给疑问', k:18, r:0.222, lo:0.090, hi:0.452},
+    {n:'直写本体短推进', k:24, r:0.208, lo:0.092, hi:0.405},
+    {n:'克制留白vs扩写解释', k:15, r:0.200, lo:0.070, hi:0.452},
+    {n:'克制直写对话动作', k:42, r:0.167, lo:0.083, hi:0.306}
+  ],
+  corrupt:[
+    ['EXPLICITIZE',80],['EMOTION_LABEL',75],['PSYCHOLOGY_LABEL',72],['OVER_EXPLAIN',70],
+    ['LITERARY_OVERWRITE',69],['ADJECTIVE_INFLATION',68],['ADVERB_INFLATION',65],['ABSTRACT_SUMMARY',64],
+    ['MICRO_EXPRESSION_TEMPLATE',62],['PARALLELISM_OVERUSE',62],['REDUNDANCY',62],['LOGIC_CONNECTOR_INFLATION',61],
+    ['POV_DRIFT',59],['DIALOGUE_EXPOSITION',53],['RHYTHM_FLATTEN',53],['SEMANTIC_OVERCOMPLETION',52],
+    ['SUBTEXT_ERASE',52],['NEUTRAL_PARAPHRASE',50],['NARRATOR_JUDGMENT',47]
+  ],
+  exps:[
+    ['EXP-0911-281D','calibration_v1','done','09-11 12:51','48 ok'],
+    ['EXP-0911-3A86','calibration_v1','done','09-11 13:00','12 ok / 3 repaired'],
+    ['EXP-0911-B82D','calibration_v1','done','09-11 15:28','110 ok / 57 repaired · 盲评主批'],
+    ['EXP-0912-D07B','calibration_v1','created','09-12 04:36','空跑'],
+    ['EXP-0912-9134','calibration_v1','created','09-12 04:36','8 ok · 重构 0'],
+    ['EXP-0913-BA19','calibration_v1','created','09-13 04:08','52 ok'],
+    ['EXP-0914-C812','calibration_v1','created','09-13 16:14','190 ok / 95 repaired'],
+    ['EXP-0914-FF7B','calibration_v1','created','09-13 17:45','196 ok / 83 repaired'],
+    ['EXP-0914-EE18','calibration_v1','created','09-13 19:23','196 ok / 97 repaired'],
+    ['EXP-0914-6DD3','calibration_v1','created','09-13 21:12','191 ok / 105 repaired'],
+    ['EXP-0916-F749','new_segments_nq50','created','09-16 13:58','46 ok · 新段 50'],
+    ['EXP-0918-CORR','controlled_corruption','created','09-17 23:25','19 类劣化'],
+    ['EXP-0918-BENCH','hidden_benchmark','created','09-18 00:40','171 题'],
+    ['EXP-0918-FR','benchmark-frame-extract','created','09-18 02:36','4 ok'],
+    ['EXP-0918-BENCH-FR','benchmark-frame-extract','created','09-18 02:37','14 ok'],
+    ['EXP-0918-SCALE','corpus_scale','created','09-18 09:39','109 ok / 25 repaired']
+  ],
+  purposes:[
+    ['judge_preference',5328,10.79,3.79],['corrupt_verify',1758,1.06,3.89],['clean_llm',1062,1.16,5.92],
+    ['judge_adversarial',861,0.20,0.20],['judge_naturalness',860,0.18,0.08],['benchmark',836,0.21,0.15],
+    ['judge_semantic',826,0.55,0.26],['extract:L',756,0.43,1.45],['sem_residual',745,0.42,0.13],
+    ['reconstruct:L',731,0.47,0.78],['extract:M',645,0.24,1.38],['extract:M:repair',607,0.43,0.63],
+    ['extract:S',492,0.13,0.17],['reconstruct_ctx:L',469,0.35,0.93]
+  ],
+  leak:[
+    ['char6（6 字重叠）',1444,0.0021,0.122,0.02],
+    ['word3（3 词重叠）',1444,0.0053,0.188,0.02],
+    ['rare（稀有词）',1444,0.0036,0.128,0.02],
+    ['adversarial（对抗探针）',116,0.300,0.836,0.15],
+    ['adversarial_entity（实体探针）',90,0.341,0.716,0.15],
+    ['word3_norm（归一化）',90,0.0126,0.071,0.02],
+    ['char6_norm（归一化）',90,0.0017,0.042,0.02]
+  ],
+  humanTxt:'「谁先说？」他问。没人答。炭盆里的火哔剥响了一下。二老爷放下茶盏，盏底磕在桌沿，声音不大，全场却都听见了。',
+  aiTxt:'他站着，没有立刻开口。屋外风扫过檐角，灯花轻轻跳了一下。半晌，他才把茶盏搁回去，缓缓道："这件事，先不提。"',
+  frame:{gran:'M', model:'kimi-k3', pv:'extract_v1', st:'repaired',
+    json:{"event":"二老爷发问无人应答，他放下茶盏，声响令全场屏息。",
+      "intention":"以发问和放盏的动作施压，迫使在场者开口表态。",
+      "reader_effect":"感受到沉默中的威压与紧张，意识到二老爷的权威和在场者的畏惧。",
+      "facts":[{"statement":"二老爷向在场众人提出一个问题","certainty":"certain","source":"叙述者"},
+        {"statement":"没有人回答","certainty":"certain","source":"叙述者"},
+        {"statement":"二老爷放下茶盏，盏底碰桌沿发出轻响","certainty":"certain","source":"叙述者"},
+        {"statement":"全场都听见了这声响","certainty":"certain","source":"叙述者"},
+        {"statement":"在场者对二老爷心存畏惧","certainty":"likely","source":"读者推断"},
+        {"statement":"二老爷借放盏动作有意施压","certainty":"speculative","source":"读者推断"}],
+      "character_state":{"visible_emotion":"表面平静、克制","hidden_emotion":"不悦或施压的意图","goal":"让在场者开口回应",
+        "knows":["无人敢回答他的问题","自己在场中的威慑力"],"does_not_know":["众人沉默的具体原因"]},
+      "reader_should_infer":["二老爷地位高、众人怕他","沉默本身是畏惧的表现","放盏的轻响被全场听见，说明气氛极度安静紧绷"],
+      "must_not_state":["二老爷内心愤怒或得意","众人害怕的具体原因","问题的具体内容及其利害","二老爷是故意用茶盏示威"],
+      "expression_constraints":{"explicitness":"low","psychological_explanation_allowed":false,"dialogue_allowed":true,"rhythm_target":"短句、留白、以声响衬静"}}},
+  det:[
+    ['n_chars',53,54,'chars'],['n_sentences',5,4,'句'],['sent_len_mean',10.6,13.5,'字/句'],
+    ['short_sent_ratio',0.60,0.25,'比'],['comma_period_ratio',0.75,1.67,'倍'],
+    ['dialogue_ratio',0.113,0.185,'比'],['adv_flavor_per_k',0,55.56,'/千字'],
+    ['emotion_word_per_k',0,0,'/千字'],['psych_marker_per_k',0,0,'/千字'],
+    ['connective_per_k',0,0,'/千字'],['intensifier_per_k',0,0,'/千字'],['ttr',1.0,1.0,'比']
+  ],
+  hot:0,
+  snap:{title:'clean_llm', note:'raw 含盗版站广告与 OCR 噪声 → text_clean 剥离后入帧'},
+  raw:'（在这种jīng神状态下，我还是写出来了，无言苦笑。） !@#小.说.t.xt.天.堂 站在崖畔，看着流云……宁缺极少见地说着这些很严肃的话。',
+  clean:'（在这种精神状态下，我还是写出来了，无言苦笑。） 站在崖畔，看着流云……宁缺极少见地说着这些很严肃的话。',
+  exports:[
+    ['writer_train_v1.jsonl',862896,'id, prev2, prev1, frame, target, target_side, quality, strategy_hint, work, segment_id, candidate_id, pv, model, provenance','重构 SFT 主集'],
+    ['writer_sft_v2.jsonl',765393,'id, prev2, prev1, frame, target, target_side, quality, strategy_hint, work, segment_id, frame_id, pv, provenance','SFT v2（含 side 平衡）'],
+    ['corrupt_dpo_v1.jsonl',393694,'id, prev2, prev1, frame, chosen, rejected, corruption_type, corruption_variable, generator, verifier, drift, len_ratio, judge_votes, suspect, user_verdict, quality, work, segment_id, candidate_id, provenance','受控劣化 DPO 对']
+  ]
+};
+
+/* ============================================================
+   小工具
+   ============================================================ */
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const fm = n => (n==null?'—':n.toLocaleString('en-US'));
+const f2 = n => Number(n).toFixed(2);
+const pct = n => (n*100).toFixed(1)+'%';
+function kpi(label,val,sub,cls){return `<div class="card"><div class="kl">${label}</div>
+  <div class="kpi ${cls||''}">${val}</div>${sub?`<div class="ks">${sub}</div>`:''}</div>`}
+function tbl(head,rows){const hd=a=>Array.isArray(a)?`<th class="${a[1]||''}">${a[0]}</th>`:`<th>${a}</th>`;
+  return `<table><thead><tr>${head.map(hd).join('')}</tr></thead>
+  <tbody>${rows.map(r=>`<tr>${r.map(c=>Array.isArray(c)?`<td class="${c[1]||''}">${c[0]}</td>`:`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`}
+function barc(v,max,cls,w){w=w||70;const p=Math.max(2,Math.min(100,(v/max)*100));
+  return `<div style="display:flex;align-items:center;gap:8px"><div class="bar ${cls||''}" style="width:${w}px"><i style="width:${p}%"></i></div><span class="mono tiny">${v}</span></div>`}
+
+/* ============================================================
+   页面
+   ============================================================ */
+const PAGES = [
+{id:'dash',ico:'◈',name:'总览 Dashboard',bd:'p',
+ desc:'整台研究台的第一屏：闭环四层的当前体量、质量指标与风险。所有数字为真实库快照。',
+ render(){return `
+ <div class="note"><b>成品形态 = 「中文文风的研究台」</b>，把「人觉得好」这件事拆成可累积的资产：
+ ①人类锚点 → 语义骨架（Frame）　②生成 → 表达残差 → 硬样本　③策略库 → 可训练信号　④基准 & 回归守门。
+ 灰色徽章表示该模块在样例里只是骨架示意。</div>
+
+ <div class="grid g4">
+  ${kpi('人类锚点作品','6','295,955 段已切分（v2 分词 281,831）')}
+  ${kpi('语义 Frame','1,711','ok 1,174 · repaired 508 · failed 29')}
+  ${kpi('重写候选','2,689','ok 2,675 · failed 14')}
+  ${kpi('LLM 调用','20,059','in 18.4M / out 24.4M tokens · 平均 47.2s')}
+ </div>
+ <div class="grid g4" style="margin-top:13px">
+  ${kpi('受控劣化','1,176','19 类劣化变量 · 已出基准题 171')}
+  ${kpi('人工盲评','270','已判 270 / 待判 231')}
+  ${kpi('硬样本','118','评委与人不一致的高信息样本')}
+  ${kpi('实验','16','11 个 calibration_v1 + 5 个专项')}
+ </div>
+
+ <div class="grid g3" style="margin-top:13px">
+  <div class="card">
+   <h3>语义保真 <span class="r">泄漏检测（阈值 0.02）</span></h3>
+   ${tbl([['层',''],['平均','n'],['最大','n'],['判定','']],
+     D.leak.map(([k,n,avg,mx,th])=>{
+       const ok = avg<=th || k.startsWith('adversarial');
+       const pass = avg<=th;
+       return [`<span class="mono">${k}</span>`,[f2(avg),'n'],[f2(mx),'n'],
+         [pass?'<span class="tag ok">过</span>':'<span class="tag bad">超阈</span>']];
+     }))}
+   <div class="tiny" style="margin-top:8px">char6/word3/rare 三层极低（≤0.006）＝ 语义重构没在抄原句；
+    两个对抗探针 0.30 / 0.34 高于 0.15 阈值 —— <b class="wn">未过</b>，是当前最实的风险。</div>
+  </div>
+  <div class="card">
+   <h3>人类偏好复现 <span class="r">Gate：κ ≥ 0.40</span></h3>
+   <div class="kpi dn" style="font-size:22px">κ = +0.112 <small>最好一格（kimi-k3 v4）</small></div>
+   <div class="ks">agreement 0.530　CI [+0.010, +0.214]　n=230</div>
+   <div class="ks" style="color:var(--tx3)">「恒定答 human」基线 agreement <b class="mono">0.735</b>，κ = 0.000 ——
+     7 个评委口径全部没超过这个傻瓜基线。</div>
+   <div class="note bad" style="margin:10px 0 0"><b>负结果（真结论）</b>：在「整段哪边更好」这个粒度上，LLM 评委无法复现人类偏好。
+     下一步不是继续调评委，而是<b>换任务粒度</b>（问更可判别的子问题）。</div>
+  </div>
+  <div class="card">
+   <h3>基准守门 <span class="r">cc-v1 · 171 题</span></h3>
+   ${D.bench.runs.map(r=>`<div style="margin-bottom:9px">
+     <div style="display:flex;justify-content:space-between;font-size:12px">
+       <span class="mono">${r.m}</span><span class="mono">${pct(r.a)}<span class="tiny"> n=${r.n}</span></span></div>
+     ${barc((r.a*100).toFixed(1),100,r.a>=0.85?'ok':'warn',300)}
+   </div>`).join('')}
+   <div class="tiny">判别题：A/B 哪边是人类原文。最强模型 0.91，但 <b class="dn">NEUTRAL_PARAPHRASE 0/9</b>、
+     LITERARY_OVERWRITE 4/10 —— 模型对「中性改写」「文学化覆盖」几乎全瞎。</div>
+  </div>
+ </div>
+
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>今日推进（09-18）<span class="r">库快照对比</span></h3>
+   ${tbl([['新增资产',''],['数量','n'],['说明','']],
+    [[['Frame','m'],[ '+157','n'],['EXP-0918-SCALE 等新段抽帧']],
+     [['受控劣化','m'],['+1,046','n'],['19 类劣化变量成批生成']],
+     [['候选','m'],['+438','n'],['含 corrupt:* 劣化候选']],
+     [['基准题','m'],['+171','n'],['cc-v1 建集并跑 4 个模型']],
+     [['LLM 调用','m'],['+7,255','n'],['token 消耗同日峰值']]])}
+  </div>
+  <div class="card"><h3>风险面板 <span class="r">按优先级</span></h3>
+   ${tbl([['风险',''],['级别',''],['现状','']],
+    [[['评委不可用来判「哪边更好」',''],['<span class="tag bad">高</span>'],['κ ≈ 0.09~0.21，低于 Gate 0.40']],
+     [['对抗泄漏探针超阈',''],['<span class="tag bad">高</span>'],['0.300 / 0.341 vs 阈值 0.15']],
+     [['中性改写 / 文学化覆盖 无判别力',''],['<span class="tag bad">高</span>'],['0/9、4/10']],
+     [['人工判定是真正瓶颈',''],['<span class="tag warn">中</span>'],['待判 231 题，每批 30~50 题量级']],
+     [['语料源头缺陷',''],['<span class="tag warn">中</span>'],['raw 含盗版站广告，已加清洗闸门']],
+     [['失败调用',''],['<span class="tag warn">中</span>'],['442 / 20,059（muse-spark 占 259）']]])}
+  </div>
+ </div>`}},
+
+{id:'corpus',ico:'▤',name:'语料库 Corpus',bd:'p',
+ desc:'人类锚点的唯一合法来源：导入 → 清洗 → 切分 → 登记角色 → 抽样。每一部作品在台里的角色是显式声明的。',
+ render(){return `
+ <div class="grid g3">
+  ${kpi('作品','6','4 部真人长篇 + 2 个测试夹具')}
+  ${kpi('段落','295,955','seg_version 2（升级后 281,831）')}
+  ${kpi('已抽帧段落','1,711','占全库 0.58% —— 校准阶段只吃小样')}
+ </div>
+ <div class="card" style="margin-top:13px"><h3>作品登记表 <span class="r">works 表</span></h3>
+  ${tbl([['作品',''],['作者',''],['段落','n'],['Frame','n'],['角色声明',''],['']],
+   D.works.map(w=>[[esc(w.t)],[w.a],[w.s?fm(w.s):'—','n'],[fm(w.f),'n'],
+     [`<span class="tiny">${esc(w.r)}</span>`],[w.tag?`<span class="tag ${w.tag}">锚</span>`:'<span class="tag">夹具</span>']]))}
+  <div class="tiny" style="margin-top:8px">角色是硬约束：<span class="mono">semantic_anchor</span> 供 Frame 抽取，
+   <span class="mono">target_style_anchor</span> 供风格对齐，混用会让指标失去意义。</div>
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>原始 vs 清洗 <span class="r">09-18 新增闸门</span></h3>
+   <div class="txt" style="border-color:#5c2331">${esc(D.raw)}</div>
+   <div class="tiny" style="margin:6px 0">↑ <span class="mono">segments.text</span>（原样保留，审计用）</div>
+   <div class="txt k">${esc(D.clean)}</div>
+   <div class="tiny" style="margin-top:6px">↑ <span class="mono">segments.text_clean</span>（下游只用这份）；
+    剥离 <span class="mono">!@#小.说.t.xt.天.堂</span> 这类盗版站广告与 OCR 噪声。</div>
+  </div>
+  <div class="card"><h3>导入流程 <span class="r">inbox → works</span></h3>
+   <div class="dag" style="grid-template-columns:repeat(3,1fr)">
+     <div class="node done"><b>投递</b><span class="st">inbox/*.txt</span></div>
+     <div class="node done"><b>编码探测</b><span class="st">GB18030 / UTF-8</span></div>
+     <div class="node done"><b>清洗</b><span class="st">广告 / 噪声剥离</span></div>
+     <div class="node done"><b>切分</b><span class="st">segmenter v2 · 段+上下文窗口</span></div>
+     <div class="node done"><b>角色登记</b><span class="st">anchors 声明</span></div>
+     <div class="node wait"><b>抽样入实验</b><span class="st">分层 / 信息量优先</span></div>
+   </div>
+   <div class="btns"><button class="pri">＋ 导入作品</button><button>重建分词</button><button class="gh">导出段落清单</button></div>
+   <div class="tiny" style="margin-top:9px">切分与清洗都可重放：段落表带 <span class="mono">segment_version</span>，改版不覆盖旧行。</div>
+  </div>
+ </div>`}},
+
+{id:'frame',ico:'❖',name:'语义实验室 Semantic Lab',bd:'p',
+ desc:'把一段人类文字，抽成「事件 / 意图 / 事实 / 未知 / 禁写项」的语义骨架 —— 这是整台引擎的中间语言。',
+ render(){return `
+ <div class="seg"><button class="on">Frames</button><button>泄漏校验</button><button>抽取器对比</button><button>命题库 (71)</button></div>
+ <div class="panes">
+  <div class="card"><h3>① 人类原文 <span class="r">将夜（猫腻）</span></h3>
+   <div class="txt">${esc(D.humanTxt)}</div>
+   <div class="kv" style="margin-top:10px">
+     <b>作品</b><span>将夜（猫腻）· corpus02_quality_anchor</span>
+     <b>角色</b><span>质量锚（非露骨语料，用于演示）</span>
+     <b>切分</b><span class="mono">segmenter v2 · 上下文 prev1/prev2</span>
+   </div>
+   <div class="note" style="margin:10px 0 0">抽取前先锁 <span class="mono">must_not_state</span>：模型一旦在重写里写出禁区信息，就算语义泄漏，
+     与「措辞好坏」无关。</div>
+  </div>
+  <div class="card"><h3>② SemanticFrame <span class="r">${D.frame.gran} · ${D.frame.model} · ${D.frame.st}</span></h3>
+   <div class="jk">${esc(JSON.stringify(D.frame.json,null,1))}</div>
+  </div>
+  <div class="card"><h3>③ 校验面板</h3>
+   <div class="kv" style="grid-template-columns:110px 1fr;margin-top:6px">
+    <b>抽取状态</b><span><span class="tag warn">repaired</span>（模型首次输出不合 schema，已修复）</span>
+    <b>prompt</b><span class="mono">extract_v1</span>
+    <b>泄漏 char6</b><span class="mono">0.000 <span class="tag ok">过</span></span>
+     <b>word3</b><span class="mono">0.000 <span class="tag ok">过</span></span>
+     <b>rare</b><span class="mono">0.000 <span class="tag ok">过</span></span>
+     <b>对抗探针</b><span class="mono">0.000 <span class="tag ok">过</span></span>
+     <b>must_not_state</b><span>4 条，均未被候选写出</span>
+     <b>reader_should_infer</b><span>3 条，写不写由重写者决定</span>
+   </div>
+   <div style="margin-top:12px" class="card" >
+     <h3>事实确定性分布 <span class="r">facts[6]</span></h3>
+     ${['certain ×4','likely ×1','speculative ×1'].map(x=>`<span class="chip">${x}</span>`).join('')}
+     <div class="tiny" style="margin-top:6px">把「读者推断」显式标出来，重写才不能把它当成已发生的事实来写。</div>
+   </div>
+   <div class="btns"><button class="pri">重新抽取</button><button>换抽取器</button><button class="gh">入人工复核队列</button></div>
+  </div>
+ </div>
+ <div class="card" style="margin-top:13px"><h3>抽取器与层级 <span class="r">frames 表 · 1,711 行</span></h3>
+  ${tbl([['层级',''],['说明',''],['deepseek-v4.1-flash','n'],['kimi-k3','n']],
+   [[['L 事件级','m'],['一句话事件骨架',''],['425','n'],['318','n']],
+    [['M 场景级','m'],['含事实表 / 角色状态 / 禁写项',''],['242','n'],['242','n']],
+    [['S 段落级','m'],['短摘要',''],['242','n'],['242','n']]])}
+  <div class="tiny" style="margin-top:8px">同一段落多抽取器×多层级并行抽，差异本身就是信号（repaired 率：118/743 vs 226/568）。</div>
+ </div>`}},
+
+{id:'arena',ico:'⚔',name:'重构竞技场 Reconstruction Arena',bd:'p',
+ desc:'给 Frame、不给原文，让模型重写这段；结果一律匿名呈现，人类与模型混在一起评。',
+ render(){return `
+ <div class="grid g3">
+  ${kpi('候选池','2,689','deepseek 988 · muse 985 · kimi 96 · glm 96')}
+  ${kpi('实验组合','16','模型 × 温度 × 提示词 × 策略')}
+  ${kpi('盲评转化','501','候选→盲评条目 501 条')}
+ </div>
+ <div class="card" style="margin-top:13px"><h3>本次对决 <span class="r">EXP-0918-SCALE · 匿名遮挡已开启</span></h3>
+  <div class="grid g3">
+   <div class="card" style="background:#0f131c"><h3>输入：Frame <span class="r">M</span></h3>
+    <div class="jk" style="max-height:210px">${esc(JSON.stringify({event:D.frame.json.event,intention:D.frame.json.intention,
+      reader_effect:D.frame.json.reader_effect,must_not_state:D.frame.json.must_not_state},null,1))}</div>
+    <div class="tiny" style="margin-top:6px">上两段上下文：<span class="mono">prev1 / prev2</span> 一并给出（不提供原文）。</div>
+   </div>
+   <div class="card" style="background:#0f131c"><h3>A <span class="r" id="ma">? ? ?</span></h3>
+    <div class="txt" id="ta" style="min-height:120px">${esc(D.aiTxt)}</div>
+   </div>
+   <div class="card" style="background:#0f131c"><h3>B <span class="r" id="mb">? ? ?</span></h3>
+    <div class="txt k" id="tb" style="min-height:120px">${esc(D.humanTxt)}</div>
+   </div>
+  </div>
+  <div class="btns">
+   <button class="pri" onclick="reveal()">揭示身份</button>
+   <button onclick="judge()">跑评委（7 口径）</button>
+   <button>进入盲评（H 键＝人更好）</button>
+   <button class="gh">加一枪（同 Frame 再生成）</button>
+  </div>
+  <div id="jout"></div>
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>候选生成参数矩阵 <span class="r">EXPERIMENT config</span></h3>
+   ${tbl([['维度',''],['取值','']],
+    [[['模型','m'],['deepseek-v4.1-flash / kimi-k3 / muse-spark-1.3 / glm-5.3','k']],
+     [['温度','m'],['0.5 / 0.8 / 1.0','k']],
+     [['提示词','m'],['extract 对齐版 / 风格锚版','k']],
+     [['策略','m'],['expression_strategies 8 类（注入 strategy_hint）','k']],
+     [['采样','m'],['分层（作品×难度）+ 信息量优先队列','k']]])}
+  </div>
+  <div class="card"><h3>出题规则（防抄答案）<span class="r">纪律</span></h3>
+   <div class="note ok" style="margin:0">① 候选之间互不可见；② 评委与生成模型不同源；
+   ③ 人类原文永远混入候选池（否则基准率被模型占据）；④ 同一段落的多个候选<b>捆绑同批复评</b>，避免跨批比较。</div>
+   <div class="tiny" style="margin-top:9px">「人类原文混入」直接决定了 0.735 这个基础率 —— 它既是评测的诚实之处，也是评委被傻瓜基线击败的原因。</div>
+  </div>
+ </div>`}},
+
+{id:'resid',ico:'Δ',name:'表达残差 Expression Residual',bd:'p',
+ desc:'同一语义骨架下，「人类这么写」和「模型这么写」的差 —— 这台机器的原始燃料。',
+ render(){return `
+ <div class="note"><b>残差 = 可学习的方向</b>：确定性指标（字数/句长/标点/虚词…）先给出可复算的差；
+ 语义残差（漏了什么、加了什么、确定性是否漂移）再给出可解释的差。最终聚成 8 条表达策略。</div>
+ <div class="grid g2">
+  <div class="card"><h3>文本对照 <span class="r">人类 B ← → 候选 A</span></h3>
+   <div class="txt k">${esc(D.humanTxt)}</div>
+   <div class="tiny" style="margin:7px 0">人类：短句、留白、以「声响」代替情绪词 —— 情绪一个字都没写。</div>
+   <div class="txt">${esc(D.aiTxt)}</div>
+   <div class="tiny" style="margin-top:7px">AI：补了环境描写、补了动作过程、补了时间副词（<span class="hl">半晌</span>），
+    把「沉默」解释成了「他不开口」。</div>
+  </div>
+  <div class="card"><h3>确定性残差 <span class="r">residuals_det · 29 指标</span></h3>
+   ${tbl([['指标',''],['人类','n'],['AI','n'],['Δ','n'],['','']],
+    D.det.map(([k,h,a,u])=>{
+      const diff=a-h, big=(u==='/千字'&&Math.abs(diff)>10)||(u==='倍'&&Math.abs(diff)>0.5)||(u==='比'&&Math.abs(diff)>0.2);
+      return [`<span class="mono">${k}</span>`,[h,'n'],[a,'n'],
+        [`<span class="${big?'dn':'tiny'}">${diff>0?'+':''}${Math.abs(diff)<0.01?'0':Number(diff).toFixed(2)}</span>`,'n'],
+        [u,'tiny']];
+    }))}
+   <div class="tiny" style="margin-top:8px">最扎眼的两条：<b class="dn">adv_flavor_per_k 0 → 55.6</b>（AI 爱加修饰副词）、
+    <b class="dn">comma_period_ratio 0.75 → 1.67</b>（用逗号串长句，人类用句号切断）。</div>
+  </div>
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>语义残差 <span class="r">residuals_sem · kimi-k3</span></h3>
+   <div class="kv" style="grid-template-columns:130px 1fr">
+     <b>missing</b><span>[] 无漏写事实</span>
+     <b>added</b><span>[] 未新增事实</span>
+     <b>contradicted</b><span>[] 未与事实表冲突</span>
+     <b>certainty_shift</b><span class="mono">0</span>
+     <b>explicitness_delta</b><span class="mono">0</span>
+     <b>subtext_preserved</b><span class="mono">0.5</span>（潜文本半保）
+     <b>pov_consistent</b><span class="mono">true</span>
+     <b>notes</b><span class="tiny">mock —— <b class="wn">这一层目前仍是模拟数据，是明确缺口</b></span>
+   </div>
+   <div class="note warn" style="margin:11px 0 0">语义残差的价值在「可解释」，但它依赖评委输出。
+    既然评委在整体偏好上不可靠，这一层要么降级为<b>子问题粒度</b>（只问「这条禁写项有没有被写出」），要么换成规则 + 人工抽查。</div>
+  </div>
+  <div class="card"><h3>方向聚合 → 策略 <span class="r">bge-small-zh + kmeans(k=8)</span></h3>
+   ${tbl([['表达策略',''],['ni','n'],['成功率','n'],['95% CI','m']],
+    D.strats.map(s=>[[esc(s.n)],[s.k,'n'],[pct(s.r),'n'],[`[${f2(s.lo)}, ${f2(s.hi)}]`,'m']]))}
+   <div class="tiny" style="margin-top:8px">全部区间都跨过 0，且 n 只有 14~56 —— 只能当<b>候选方向</b>，不能当结论。</div>
+  </div>
+ </div>`}},
+
+{id:'judge',ico:'⚖',name:'评委竞技场 Judge Arena',bd:'y',
+ desc:'让 LLM 当评委、复现人类偏好 —— 台里最重要的一个负结果，也是最有价值的资产。',
+ render(){return `
+ <div class="note bad"><b>结论先说</b>：7 个评委口径（模型 × 提示词版本）的 κ 全部落在 +0.09 ~ +0.21 之间，
+  <b>没有一格超过「恒定答 human」基线（agreement 0.735 / κ 0.000）</b>，离 Gate（κ ≥ 0.40）极远。
+  逐批复现（h30 / mix30 / nq50）、跨语料、按露骨度劈半 —— 结论不变。</div>
+ <div class="grid g2">
+  <div class="card"><h3>评委成绩单 <span class="r">池化全部数据 · v4/v3 对照</span></h3>
+   ${tbl([['评委','m'],['口径',''],['n','n'],['agreement','n'],['κ','n'],['集群 CI','m'],['挑cand','n'],['']],
+    D.judges.map(j=>[[j.m,'m'],[j.pv], [j.n,'n'],[f2(j.ag),'n'],
+      [`<b class="${j.k>0.10?'wn':'dn'}">${j.k>0?'+':''}${f2(j.k)}</b>`,'n'],
+      [`[${f2(j.lo)}, ${f2(j.hi)}]`,'m'],[f2(j.pick),'n'],
+      [j.best?'<span class="tag acc">最好</span>':'']]))}
+   <div style="margin-top:10px">
+    <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--tx3)">
+      <span>恒定答 human 基线</span><span class="mono">agreement 0.735</span></div>
+    <div class="bar warn" style="height:9px"><i style="width:73.5%"></i></div>
+    <div style="display:flex;justify-content:space-between;font-size:11.5px;color:var(--tx3);margin-top:8px">
+      <span>最好评委 kimi-k3 v4</span><span class="mono">0.530</span></div>
+    <div class="bar bad" style="height:9px"><i style="width:53%"></i></div>
+   </div>
+  </div>
+  <div class="card"><h3>逐批复现 <span class="r">三个独立批次</span></h3>
+   ${tbl([['批次',''],['样本','n'],['用户判 human','n'],['kimi v4 κ','n'],['deepseek v4 κ','n']],
+    [[['h30（琼明旧 30 段）'],['30','n'],['0.867','n'],['+0.164','n'],['+0.143','n']],
+     [['mix30（跨语料 30 题）'],['27','n'],['0.556','n'],['+0.115','n'],['+0.129','n']],
+     [['nq50（琼明全新 50 段）'],['12','n'],['0.917','n'],['+0.122','n'],['+0.087','n']]])}
+   <div class="tiny" style="margin-top:8px">基础率从 0.867 掰到 0.556 再回到 0.917，κ 始终 0.09~0.16
+    → <b>不是基础率、不是语料、不是段落选择造成的</b>。</div>
+   <div class="card" style="margin-top:11px;background:#0f131c">
+    <h3>已排除的解释 <span class="r">负结果的可信度来自这里</span></h3>
+    ${['措辞不好 → 换 v3→v4 rubric，留出集 κ 0.217 后再调无效（AUC 0.504）',
+       '基础率偏斜 → 掰到 0.556/0.444，κ 仍 0.09~0.21',
+       '题材（性描写多）→ 按露骨度劈半，两组都低',
+       '抽样框 → 难例框 κ 0.058 / 设计框 κ 0.150，都低'].map(x=>`<div class="tiny" style="margin:3px 0">· ${x}</div>`).join('')}
+   </div>
+  </div>
+ </div>
+ <div class="card" style="margin-top:13px"><h3>那么这台台子怎么往前 <span class="r">下一步设计</span></h3>
+  <div class="grid g3">
+   <div class="card" style="background:#0f131c"><h3>A 换粒度 <span class="tag acc">主推</span></h3>
+    <div class="tiny">不再问「整段哪边更好」，改问可判别的子问题：这条禁写项有没有被写出？这个事实有没有被改？确定性有没有漂移？
+     每个子问题的基准率天然接近 0.5，κ 才有空间。</div></div>
+   <div class="card" style="background:#0f131c"><h3>B 评委降级为筛子</h3>
+    <div class="tiny">只用评委做粗筛与冲突检测（挑出「评委一致认为 AI 更好但人认为人更好」的 118 条硬样本），
+     最终判定权交给人。矛盾本身是信息，不是噪声。</div></div>
+   <div class="card" style="background:#0f131c"><h3>C 确定性特征</h3>
+    <div class="tiny">29 项计数特征折外诚实 agreement 0.673（Gate 0.70）—— 弱但方向明确，
+     且零成本、可复算，适合做守门与回归告警。</div></div>
+  </div>
+ </div>`}},
+
+{id:'pref',ico:'☑',name:'偏好实验室 Preference Lab',bd:'y',
+ desc:'人类判定的唯一入口。所有「人类偏好」最终都由这里的一条条判定构成 —— 这是真正的瓶颈资源。',
+ render(){return `
+ <div class="grid g4">
+  ${kpi('盲评条目','501','已判 270 · 待判 231')}
+  ${kpi('主批','EXP-0911-B82D','344 条（192 已判 / 152 待判）')}
+  ${kpi('用户判 human 率','73.5%','评委必须在有偏基础率上仍超过它')}
+  ${kpi('硬样本产出','118','评委与人不一致 → 高信息样本')}
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>盲评界面（示意） <span class="r">键盘优先 · A/B 匿名</span></h3>
+   <div class="txt" style="border-color:#22405e">他站着，没有立刻开口。屋外风扫过檐角，灯花轻轻跳了一下。半晌，他才把茶盏搁回去，缓缓道："这件事，先不提。"</div>
+   <div class="tiny" style="text-align:center;margin:9px 0">—— 哪个更像人写的？ ——</div>
+   <div class="txt k">「谁先说？」他问。没人答。炭盆里的火哔剥响了一下。二老爷放下茶盏，盏底磕在桌沿，声音不大，全场却都听见了。</div>
+   <div class="btns"><button class="pri">A 更好 (H)</button><button>B 更好 (B)</button><button>平 (J)</button>
+     <button class="gh">两端都好 (K)</button><button class="gh">跳过</button></div>
+   <div class="tiny" style="margin-top:9px">判定前 <b>不显示</b> 任何模型名与提示词版本；判定后才允许揭盲（防锚定）。</div>
+  </div>
+  <div class="card"><h3>判定进度与批次 <span class="r">review_items</span></h3>
+   ${tbl([['实验','m'],['已完成','n'],['待判','n'],['进度','']],
+    [[['EXP-0911-B82D','m'],['192','n'],['152','n'],[barc(192,344,'ok',90)]],
+     [['EXP-0916-F749','m'],['30','n'],['—','n'],[barc(30,30,'ok',90)]],
+     [['EXP-0914-FF7B','m'],['—','n'],['22','n'],[barc(0,22,'bad',90)]],
+     [['EXP-0914-EE18','m'],['—','n'],['17','n'],[barc(0,17,'bad',90)]]])}
+   <div class="card" style="margin-top:11px;background:#0f131c"><h3>抽样框与权重 <span class="r">防「随手挑好判的」</span></h3>
+    <div class="tiny">分层抽样：<span class="mono">stratum:RANDOM 174</span> · <span class="mono">random_sample 160</span> ·
+     <span class="mono">batch_r50 50</span> · <span class="mono">batch_first50 48</span> ·
+     信息量加权 <span class="mono">w:1.0000 92</span> / <span class="mono">novel_pattern z&gt;1.00 82</span>。
+     难例框与随机框分开汇报，混框会让 κ 失去解释。</div>
+   </div>
+  </div>
+ </div>`}},
+
+{id:'hard',ico:'✸',name:'硬样本库 Hard Cases',bd:'y',
+ desc:'人和评委吵起来的地方。它既是最贵的训练信号，也是评估下一版评委的标准考卷。',
+ render(){return `
+ <div class="grid g4">
+  ${kpi('硬样本','118','全部来自评委与人类判定冲突')}
+  ${kpi('人类输给评委','78','human_lost_to_judges（含 51 条全票一致）')}
+  ${kpi('评委内部分裂','35','judge_disagreement')}
+  ${kpi('信息量最高','51','评委全票 + 与用户相反 → 优先学')}
+ </div>
+ <div class="card" style="margin-top:13px"><h3>样本分布 <span class="r">hard_cases 表</span></h3>
+  ${tbl([['类型','m'],['严重度','n'],['条数','n'],['用途','']],
+   [[['human_lost_to_judges, unanimous_vs_user','m'],['0.00','n'],['51','n'],['评委全票判 AI 更好、人判人更好 → 最优先']],
+    [['judge_disagreement','m'],['0.50','n'],['26','n'],['评委之间分裂 → 提示词或 rubric 缺定义']],
+    [['human_lost_to_judges','m'],['0.25','n'],['18','n'],['部分评委判错 → 校准样本']],
+    [['human_lost_to_judges','m'],['0.20','n'],['8','n'],['同上（弱冲突）']],
+    [['judge_disagreement','m'],['0.60','n'],['5','n'],['强分裂 → 需人工定义边界']],
+    [['unanimous_vs_user','m'],['0.00','n'],['5','n'],['全票与用户相反']],
+    [['judge_disagreement','m'],['0.40','n'],['4','n'],['分裂']],
+    [['human_lost_to_judges','m'],['0.00','n'],['1','n'],['单条']]])}
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>一条硬样本的解剖 <span class="r">示意</span></h3>
+   <div class="kv" style="grid-template-columns:120px 1fr">
+     <b>类型</b><span class="mono">human_lost_to_judges + unanimous_vs_user</span>
+     <b>评委票</b><span class="mono">7 / 7 判 candidate 更好</span>
+     <b>人类判定</b><span class="mono">human 更好</span>
+     <b>为什么</b><span class="tiny">候选写得更「完整」：补了环境与动作，读起来顺 → 评委偏好完整性；人类偏好克制与留白。</span>
+     <b>缺什么特征</b><span class="tiny">克制度、留白量、以物代情 —— 现有指标只有字数与标点能间接反映</span>
+     <b>回流</b><span><span class="chip">strategy</span><span class="chip">ontology</span><span class="chip">need_human</span></span>
+   </div>
+   <div class="note" style="margin:11px 0 0">这条样本说明的不是「评委坏」，而是<b>评委的偏好函数与人类不同</b>：
+     它奖励信息完整，人类奖励信息克制 —— 这正是要被学出来的东西。</div>
+  </div>
+  <div class="card"><h3>回流通道 <span class="r">硬样本 → 资产</span></h3>
+   <div class="dag" style="grid-template-columns:1fr 1fr">
+    <div class="node done"><b>① 硬样本</b><span class="st">118 条</span></div>
+    <div class="node done"><b>② 补特征 / 补本体</b><span class="st">need_features / need_ontology</span></div>
+    <div class="node run"><b>③ 派生新策略</b><span class="st">strategy_id → 8 条策略</span></div>
+    <div class="node wait"><b>④ 进训练集</b><span class="st">DPO 对 / 偏好模型</span></div>
+   </div>
+   <div class="btns"><button class="pri">导出为新基准题</button><button>生成 DPO 对</button><button class="gh">标为不可判别</button></div>
+   <div class="tiny" style="margin-top:9px">硬样本也是下一版评委的<b>准入考卷</b>：新提示词必须先在硬样本上不退步，才允许进主流程。</div>
+  </div>
+ </div>`}},
+
+{id:'strat',ico:'∑',name:'策略图谱 Strategy Atlas',bd:'y',
+ desc:'把「人类这么写、模型不这么写」的差，聚成有限条、可命名、可注入的表达策略。',
+ render(){return `
+ <div class="note warn"><b>诚实标注</b>：8 条策略全部由 bge-small-zh 残差向量 + kmeans(k=8, seed=20260917) 聚出，
+  n 只有 14~56，95% CI 全部跨 0 —— 它们是<b>候选方向</b>，不是已证结论。要变成结论，得靠更大的人工判定样本。</div>
+ <div class="card"><h3>策略清单 <span class="r">expression_strategies · version 1</span></h3>
+  ${tbl([['策略名',''],['样本 n','n'],['成功率','n'],['',''],['95% CI','m'],['区间判读','']],
+   D.strats.map(s=>[[esc(s.n)],[s.k,'n'],[pct(s.r),'n'],
+     [barc(Math.round(s.r*100),60,s.r>=0.3?'ok':'warn',64)],
+     [`[${f2(s.lo)}, ${f2(s.hi)}]`,'m'],
+     [s.lo<0.1?'<span class="tag bad">含 0.1 以下</span>':'<span class="tag warn">跨 0</span>']]))}
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>策略怎么进流程 <span class="r">strategy_hint</span></h3>
+   <div class="jk">{"strategy":"克制直陈vs铺陈注水",
+ "hint":"用句号切断，不用逗号串长句；情绪不外显，改成动作与物象",
+ "applies_when":{"frame.intention":"施压","frame.reader_effect":"紧张"},
+ "avoid":["adv_flavor","psych_marker","explicit_emotion"]}</div>
+   <div class="tiny" style="margin-top:8px">策略不是「提示词模板」，而是<b>可注入的结构化约束</b>：
+     进重写提示词 → 进候选元数据 → 进训练样本的 <span class="mono">strategy_hint</span> 字段。</div>
+  </div>
+  <div class="card"><h3>与残差指标的对应 <span class="r">策略 ↔ det 指标</span></h3>
+   ${tbl([['策略',''],['主要对抗的 AI 习惯',''],['可观测指标','m']],
+    [[['克制直陈vs铺陈注水',''],['补环境、补过程、堆修饰',''],['adv_flavor_per_k, comma_period_ratio','m']],
+     [['克制留白vs扩写解释',''],['把沉默写成心理说明',''],['psych_marker_per_k, sent_len_mean','m']],
+     [['少动作直给疑问',''],['每句都配动作节拍',''],['dialogue_ratio, sent_len_std','m']],
+     [['直写本体短推进',''],['先铺垫再落点',''],['short_sent_ratio, n_sentences','m']]])}
+  </div>
+ </div>`}},
+
+{id:'bench',ico:'◎',name:'基准与回归 Benchmarks',bd:'p',
+ desc:'可复算的考卷 + 版本间不许退步的红线。负样本（模型判不出来的）比正样本更值钱。',
+ render(){return `
+ <div class="grid g4">
+  ${kpi('基准集','cc-v1','BS-abd3c45ef334 · 171 题 / 19 劣化类型')}
+  ${kpi('最好准确率','91.2%','gemini-3.8-flash-high（n=170）')}
+  ${kpi('最好本地模型','81.9%','kimi-k3（n=171）')}
+  ${kpi('回归红线','不许退步','硬样本 + cc-v1 双门禁')}
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>模型成绩 <span class="r">benchmark_runs · task=preference</span></h3>
+   ${D.bench.runs.map(r=>`<div style="margin-bottom:10px">
+     <div style="display:flex;justify-content:space-between;font-size:12.2px">
+      <span class="mono">${r.m}</span><span class="mono">${pct(r.a)} <span class="tiny">n=${r.n}</span></span></div>
+     ${barc((r.a*100).toFixed(1),100,r.a>=0.85?'ok':'warn',320)}</div>`).join('')}
+   <div class="tiny">题目形式：A/B 哪边是人类原文（另一边按单一变量劣化）。单一变量 ⇒ 错在哪一类可归因。</div>
+  </div>
+  <div class="card"><h3>按劣化类型 <span class="r">kimi-k3 完整 run · 从差到好</span></h3>
+   ${tbl([['劣化类型','m'],['对/总','n'],['检出','']],
+    D.benchTypes.map(b=>[[b.t,'m'],[`${b.c}/${b.n}`,'n'],
+      [barc(Math.round(b.c/b.n*100),100,b.c/b.n>=0.8?'ok':(b.c/b.n>=0.5?'warn':'bad'),70)]]))}
+  </div>
+ </div>
+ <div class="card" style="margin-top:13px"><h3>负样本清单 <span class="r">"模型判不出来的"＝下一版要攻的方向</span></h3>
+  <div class="grid g3">
+   <div class="card" style="background:#0f131c"><h3>NEUTRAL_PARAPHRASE <span class="tag bad">0/9</span></h3>
+    <div class="tiny">把原文换成同义但更平庸的说法 —— 语义没变、味道全失。模型完全看不出来，因为「味道」不在它的判定维度里。</div></div>
+   <div class="card" style="background:#0f131c"><h3>LITERARY_OVERWRITE <span class="tag bad">4/10</span></h3>
+    <div class="tiny">文学化覆盖：把朴素句改成漂亮句。模型反而更喜欢「漂亮」的版本 —— 与人类偏好正面冲突。</div></div>
+   <div class="card" style="background:#0f131c"><h3>MICRO_EXPRESSION_TEMPLATE <span class="tag warn">3/6</span></h3>
+    <div class="tiny">句式模板化（每段都同一个节奏）。需要跨段比较才能发现，单段判别题天然判不了。</div></div>
+  </div>
+  <div class="note warn" style="margin:12px 0 0">这三类正指向同一个改造方向：<b>把题从「整段偏好」拆成「可判别的子问题」</b>，
+   或把题面从单段扩到「本段 + 上两段」（MICRO_EXPRESSION_TEMPLATE 只能在跨段尺度上体现）。</div>
+ </div>`}},
+
+{id:'exp',ico:'⚙',name:'实验引擎 Experiments',bd:'p',
+ desc:'所有批量工作都必须是可重放、可续跑、参数留档的实验 —— 而不是「跑一次脚本」。',
+ render(){return `
+ <div class="grid g4">
+  ${kpi('实验总数','16','11 calibration_v1 + 5 专项')}
+  ${kpi('已完成','3','EXP-0911-281D / 3A86 / B82D')}
+  ${kpi('队列中','13','含 09-18 的劣化 / 基准 / 规模批')}
+  ${kpi('可续跑','stages 级','每个 stage 有 done/ok/repaired/failed 计数')}
+ </div>
+ <div class="card" style="margin-top:13px"><h3>实验清单 <span class="r">experiments 表</span></h3>
+  ${tbl([['实验 ID','m'],['名称',''],['状态',''],['创建','m'],['阶段统计','m']],
+   D.exps.map(e=>[[e[0],'m'],[e[1]],[e[2]==='done'?'<span class="tag ok">done</span>':'<span class="tag warn">created</span>'],
+     [e[3],'m'],[`<span class="tiny">${e[4]}</span>`]]))}
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>新建实验 <span class="r">参数矩阵</span></h3>
+   <div class="jk">{"name":"reconstruct_v2_颗粒度子问题",
+ "segments":{"sampler":"info_first","n":120,"strata":["work","difficulty"]},
+ "matrix":{"model":["deepseek-v4.1-flash","kimi-k3"],
+           "temperature":[0.5,0.8],
+           "prompt_version":["reconstruct_v2"],
+           "strategy":["克制直陈vs铺陈注水","克制留白vs扩写解释"]},
+ "stages":["extract_frames","leakage_static","reconstruct","residual_det",
+           "residual_sem","judge_preference","review","export"],
+ "budget":{"max_calls":4000,"max_tokens_out":6e6}}</div>
+   <div class="btns"><button class="pri">创建实验</button><button>预估成本</button><button class="gh">从上次复制</button></div>
+  </div>
+  <div class="card"><h3>续跑与容错 <span class="r">stages 状态机</span></h3>
+   <div class="jk">"stages": {
+  "extract_frames": {"done": true, "ok": 196, "repaired": 83, "failed": 21, "item_errors": 0},
+  "leakage_static": {"done": true, "scored": 834},
+  "reconstruct":    {"done": true, "ok": 612, "failed": 7},
+  "residual_det":   {"done": true, "added": 612},
+  "review":         {"done": false, "pending": 152}
+}</div>
+   <div class="tiny" style="margin-top:8px">单个 item 失败不炸整批（<span class="mono">item_errors</span>）；
+     <span class="mono">repaired</span> 单独计数 —— 模型输出不合 schema 的比例本身就是质量信号（M 层 118/743）。</div>
+  </div>
+ </div>`}},
+
+{id:'model',ico:'▣',name:'模型管理 Models',bd:'n',
+ desc:'统一网关、统一计费口径、统一失败语义。台上所有调用都能回溯到具体模型与提示词版本。',
+ render(){return `
+ <div class="card"><h3>调用账本 <span class="r">llm_calls · 20,059 行</span></h3>
+  ${tbl([['模型','m'],['用途',''],['调用','n'],['in tok','n'],['out tok','n'],['平均耗时','n'],['失败','n']],
+   D.models.map(m=>[[m.m,'m'],[`<span class="tiny">${m.u}</span>`],[fm(m.n),'n'],[fm(m.ti),'n'],[fm(m.to),'n'],
+     [m.lat+'s','n'],[m.bad?(`<span class="dn">${m.bad}</span>`):'0','n']]))}
+  <div class="tiny" style="margin-top:8px">失败语义要统一：超时 / 429 / 上游拒包 / schema 不合 —— 现在混在一起（442 条），
+   是下一步要拆开的。muse-spark 单次输出 13.3M tokens（重构长输出），失败率也最高（259/4451）。</div>
+ </div>
+ <div class="grid g3" style="margin-top:13px">
+  <div class="card"><h3>路由与网关 <span class="tag">规划中</span></h3>
+   <div class="kv" style="grid-template-columns:100px 1fr">
+     <b>主链</b><span class="mono">app → relay 网关 → 上游</span>
+     <b>对照</b><span class="mono">外部模型（gemini）仅用于基准</span>
+     <b>凭证</b><span class="mono">key_env 注入，不落盘</span>
+   </div></div>
+  <div class="card"><h3>健康探针 <span class="tag">规划中</span></h3>
+   <div class="tiny">每模型定时最小请求：探活 + 读回实际计费额度 + 记录耗时分布。
+    探到额度耗尽/401 就自动降级到备用模型，并把降级事件写进实验快照。</div></div>
+  <div class="card"><h3>成本口径 <span class="tag warn">部分</span></h3>
+   <div class="tiny">当前只统计 token 与调用数（in 18.4M / out 24.4M）。
+    缺少「按实验归因的成本」与「预算熔断」—— 大批量实验前应能预估并卡上限。</div></div>
+ </div>`}},
+
+{id:'train',ico:'⛁',name:'训练数据 Training Data',bd:'p',
+ desc:'把残差与硬样本变成模型能学的格式：SFT / DPO / 奖励模型 —— 但只在过门禁之后。',
+ render(){return `
+ <div class="grid g4">
+  ${kpi('SFT 主集','862 KB','writer_train_v1.jsonl')}
+  ${kpi('SFT v2','765 KB','writer_sft_v2.jsonl（side 平衡）')}
+  ${kpi('DPO 对','393 KB','corrupt_dpo_v1.jsonl · 受控劣化对手')}
+  ${kpi('奖励模型','缺','RM 数据集尚未构建')}
+ </div>
+ <div class="card" style="margin-top:13px"><h3>导出清单 <span class="r">data/exports</span></h3>
+  ${tbl([['文件','m'],['大小','n'],['用途',''],['字段','']],
+   D.exports.map(e=>[[e[0],'m'],[fm(e[1]),'n'],[e[3]],
+     [`<span class="tiny mono">${e[2]}</span>`]]))}
+ </div>
+ <div class="grid g2" style="margin-top:13px">
+  <div class="card"><h3>门禁（不过不许出训练集）<span class="r">gates</span></h3>
+   ${tbl([['门禁',''],['阈值','m'],['现状','']],
+    [[['语义泄漏 char6/word3/rare',''],['≤ 0.02','m'],['<span class="tag ok">过</span>']],
+     [['对抗泄漏探针',''],['≤ 0.15','m'],['<span class="tag bad">0.300 未过</span>']],
+     [['事实一致性（frame facts）',''],['无 contradicted','m'],['<span class="tag ok">过</span>']],
+     [['劣化漂移 drift',''],['drift_ok = true','m'],['<span class="tag ok">过</span>']],
+     [['评委一致性',''],['κ ≥ 0.40','m'],['<span class="tag bad">+0.112 未过</span>']],
+     [['人工质量等级',''],['quality ≥ L4','m'],['<span class="tag ok">过</span>']]])}
+   <div class="note warn" style="margin:11px 0 0">对抗探针与评委 κ 两道门未过 → 现在只允许出<b>「劣化判别」类</b>数据
+     （DPO 对由受控劣化生成，不依赖评委偏好），偏好类数据暂缓入训练。</div>
+  </div>
+  <div class="card"><h3>样本结构 <span class="r">writer_train_v1</span></h3>
+   <div class="jk">{"id":"TR-…",
+ "prev2":"…上文两段…","prev1":"…",
+ "frame":{ "event":"…","intention":"…","facts":[…],"must_not_state":[…] },
+ "target":"…人类原文…","target_side":"human",
+ "quality":"L4","strategy_hint":"克制直陈vs铺陈注水",
+ "work":"将夜（猫腻）","segment_id":"SEG-…","candidate_id":"CND-…",
+ "pv":"extract_v1","model":"human","provenance":{…}}</div>
+   <div class="btns"><button class="pri">导出训练集</button><button>导出 RM 数据集</button><button class="gh">校验 schema</button></div>
+  </div>
+ </div>`}},
+
+{id:'flow',ico:'⇉',name:'工作流 Workflow',bd:'n',
+ desc:'从一段原文到一条可训练样本，中间每一步都可暂停、可重放、可单步调试。',
+ render(){return `
+ <div class="card"><h3>主流程 <span class="r">stages</span></h3>
+  <div class="dag">
+   <div class="node done"><b>① 清洗</b><span class="st">clean_llm · 1,062 次</span></div>
+   <div class="node done"><b>② 切分</b><span class="st">segmenter v2</span></div>
+   <div class="node done"><b>③ Frame 抽取</b><span class="st">1,711 · ok 1,174 / rep 508</span></div>
+   <div class="node done"><b>④ 泄漏校验</b><span class="st">4,502 层判定</span></div>
+   <div class="node done"><b>⑤ 重构</b><span class="st">2,689 候选</span></div>
+   <div class="node done"><b>⑥ 确定性残差</b><span class="st">2,016 行 · 29 指标</span></div>
+  </div>
+  <div class="dag" style="margin-top:9px">
+   <div class="node done"><b>⑦ 语义残差</b><span class="st">735 行（含 mock 缺口）</span></div>
+   <div class="node run"><b>⑧ 评委</b><span class="st">8,690 次判定 · 结论：不可靠</span></div>
+   <div class="node run"><b>⑨ 人工盲评</b><span class="st">501 条 · 待判 231</span></div>
+   <div class="node done"><b>⑩ 策略聚合</b><span class="st">8 条策略</span></div>
+   <div class="node done"><b>⑪ 硬样本</b><span class="st">118 条</span></div>
+   <div class="node wait"><b>⑫ 导出</b><span class="st">3 份（RM 缺）</span></div>
+  </div>
+  <div class="btns"><button>暂停在当前 stage</button><button>重试失败 item</button><button class="gh">从 ④ 起重放</button>
+    <button class="gh">单步调试一段</button></div>
+ </div>
+ <div class="grid g3" style="margin-top:13px">
+  <div class="card"><h3>断点续跑 <span class="tag ok">已具备</span></h3>
+   <div class="tiny">每个 stage 落 <span class="mono">done / ok / repaired / failed / item_errors</span>，
+    重跑只补缺失项，不重算已完成的（这是能连跑 20,059 次调用的前提）。</div></div>
+  <div class="card"><h3>单步回放 <span class="tag warn">部分</span></h3>
+   <div class="tiny">能按 segment 回放全链路（原文→Frame→候选→残差→评委→判定），
+    但还不能改变中间产物后从任意点分叉重算。</div></div>
+  <div class="card"><h3>成本熔断 <span class="tag">规划中</span></h3>
+   <div class="tiny">按实验预估 token 上限，超限自动暂停并告警；nightly 批必须带预算帽。</div></div>
+ </div>`}},
+
+{id:'obs',ico:'📈',name:'可观测 Observability',bd:'p',
+ desc:'20,059 次调用必须解释得清：谁在用、花在哪里、失败在哪、慢在哪。',
+ render(){return `
+ <div class="grid g4">
+  ${kpi('调用总量','20,059','平均 47.2s · 失败 442（2.2%）')}
+  ${kpi('输入 token','18,377,833','评委偏好类占 10.79M')}
+  ${kpi('输出 token','24,407,321','重构/抽取类是大头')}
+  ${kpi('最慢模型','glm-5.3','平均 201.2s（重构长文）')}
+ </div>
+ <div class="card" style="margin-top:13px"><h3>按用途 <span class="r">purpose · top 14</span></h3>
+  ${tbl([['用途','m'],['调用','n'],['in (M)','n'],['out (M)','n'],['量级','']],
+   D.purposes.map(p=>[[p[0],'m'],[fm(p[1]),'n'],[p[2].toFixed(2),'n'],[p[3].toFixed(2),'n'],
+     [barc(p[1],5328,p[1]>800?'ok':'warn',90)]]))}
+  <div class="tiny" style="margin-top:8px">评委偏好一类（5,328 次调用、in 10.79M）就吃掉了过半输入 token，
+   而它的产出已被证明无用 —— <b class="wn">这是最直接的省钱空间</b>。</div>
+ </div>
+ <div class="grid g3" style="margin-top:13px">
+  <div class="card"><h3>失败分解 <span class="tag warn">待拆分</span></h3>
+   <div class="tiny">442 条失败里：muse-spark 259、kimi 90、deepseek 58、glm 28、gemini 2。
+    目前只记 <span class="mono">status != ok</span>，需要拆成 超时 / 429 / 上游拒包 / schema 不合 四类，
+    才能判断是网关问题还是提示词问题。</div></div>
+  <div class="card"><h3>延迟 <span class="tag ok">已有数据</span></h3>
+   <div class="tiny">deepseek 11.9s / agnes 9.7s / muse 45.2s / kimi 85.6s / glm 201.2s。
+    kimi 的 85.6s 主要是首字延迟（60~85s），适合做离线批、不适合交互。</div></div>
+  <div class="card"><h3>告警 <span class="tag">规划中</span></h3>
+   <div class="tiny">要做三档：① 单模型失败率突增；② 基准准确率较上一版下降 &gt;3pt；
+    ③ 当日 token 超预算。都推送到同一处，不让实验静默变慢。</div></div>
+ </div>`}},
+
+{id:'set',ico:'⚒',name:'设置 Settings',bd:'n',
+ desc:'门槛、并发、路径、凭证 —— 台子的运行参数集中一处，改动要留痕。',
+ render(){return `
+ <div class="grid g2">
+  <div class="card"><h3>质量门槛 <span class="r">gates</span></h3>
+   ${tbl([['项',''],['当前值','m'],['说明','']],
+    [[['char6/word3/rare 泄漏上限',''],['0.02','m'],['超阈不出训练集']],
+     [['对抗探针上限',''],['0.15','m'],['当前 0.300，需重设计探针或补特征']],
+     [['评委 κ 门槛',''],['0.40','m'],['当前 +0.112，未启用偏好类数据']],
+     [['劣化 drift 上限',''],['drift_ok','m'],['事实未漂移才收']],
+     [['人工质量等级',''],['L4','m'],['低于此级不进 SFT']]])}
+  </div>
+  <div class="card"><h3>运行参数 <span class="r">运行环境</span></h3>
+   <div class="kv" style="grid-template-columns:130px 1fr">
+     <b>并发</b><span class="mono">按模型分档（重构 4 · 评委 8）</span>
+     <b>重试</b><span class="mono">指数退避 + schema 修复重试</span>
+     <b>库</b><span class="mono">data/language_genome.db（WAL）</span>
+     <b>导出目录</b><span class="mono">data/exports/</span>
+     <b>凭证</b><span class="mono">环境变量注入，不落盘</span>
+     <b>日志</b><span class="mono">llm_calls 表（全量留痕）</span>
+   </div>
+   <div class="note" style="margin:11px 0 0">所有改动（门槛、提示词版本、模型清单）都应写进实验快照，
+     否则三个月后无法解释一个历史指标是怎么来的。</div>
+  </div>
+ </div>`}}
+];
+
+/* ============================================================
+   渲染
+   ============================================================ */
+const G = [['dash','corpus','frame','arena','resid'],['judge','pref','hard','strat','bench'],['exp','model','train','flow','obs','set']];
+let cur = 'dash';
+const bdCls = {'y':'y','p':'p','n':'n'};
+const bdTxt = {'y':'已建成','p':'部分','n':'规划'};
+function render(){
+  const gs = ['nav1','nav2','nav3'];
+  G.forEach((grp,gi)=>{
+    document.getElementById(gs[gi]).innerHTML = grp.map(id=>{
+      const p = PAGES.find(x=>x.id===id);
+      return `<a href="#" data-p="${id}" class="${id===cur?'on':''}"><i>${p.ico}</i>${p.name.split(' ')[0]}
+        <span class="bd ${bdCls[p.bd]}">${bdTxt[p.bd]}</span></a>`;
+    }).join('');
+  });
+  document.querySelectorAll('[data-p]').forEach(a=>a.onclick=e=>{e.preventDefault();cur=a.dataset.p;render();window.scrollTo({top:0})});
+  const p = PAGES.find(x=>x.id===cur);
+  document.getElementById('tbar').innerHTML =
+    `<div class="crumb">Language Genome / <b>${p.name}</b></div>
+     <span class="pill">快照 <b>2026-09-18 20:35</b></span>
+     <span class="pill">语料 <b>295,955</b> 段</span>
+     <span class="pill">Frame <b>1,711</b></span>
+     <span class="pill">候选 <b>2,689</b></span>
+     <span class="pill">调用 <b>20,059</b></span>
+     <span class="pill">最佳评委 κ <b class="wn">+0.112</b></span>
+     <span class="pill">cc-v1 最佳 <b>91.2%</b></span>
+     <span class="sp"></span>
+     <span class="pill" style="border-color:#1f5a41;color:#9fe6c0">只读快照 · 未改动任何代码</span>`;
+  document.getElementById('cv').innerHTML = `<h2 class="pt">${p.name}</h2><p class="pd">${p.desc}</p>
+    ${p.render()}<div class="foot">示例界面（成品形态示意）· 数据字段与统计全部来自只读快照
+    <span class="mono">F:\\agi\\language-genome\\data\\language_genome.db</span> 与
+    <span class="mono">docs/final-report.md</span>；标「规划中 / 部分」的模块在样例里仅为骨架。</div>`;
+  if(cur==='arena'){D.hot=0;document.getElementById('jout').innerHTML='';}
+}
+function reveal(){
+  document.getElementById('ma').textContent='deepseek-v4.1-flash · T=0.5 · pv=reconstruct_v1';
+  document.getElementById('mb').textContent='人类原文（将夜·猫腻）';
+  document.getElementById('tb').classList.add('k');
+  document.getElementById('ta').innerHTML = esc(D.aiTxt).replace('半晌', '<span class="hl">半晌</span>');
+  document.getElementById('jout').innerHTML = `<div class="note warn" style="margin-top:12px">
+    <b>揭盲</b>：A 是模型（补环境、补动作、补时间副词），B 是人类（全段只写一个动作与一次声响，情绪零显化）。
+    评委偏好 A 的程度，正是人类偏好被击败的地方。</div>`;
+}
+function judge(){
+  const rows = D.judges.map(j=>{
+    const pick = j.pick>0.6?'A（模型）':(j.pick>0.55?'A（模型）':'B（人类）');
+    return [`${j.m} <span class="tiny">${j.pv}</span>`,`${pick}`,
+      `<span class="mono">conf ${f2(0.75+Math.random()*0.15)}</span>`,
+      `<span class="tag ${j.k>0.1?'warn':'bad'}">κ ${j.k>0?'+':''}${f2(j.k)}</span>`];
+  });
+  document.getElementById('jout').innerHTML = `<div class="card" style="margin-top:12px">
+   <h3>7 口径评委（历史 κ 为本段同类题的真实池化值）<span class="r">仅示意投票方向</span></h3>
+   ${tbl([['评委','m'],['选哪个',''],['自信度',''],['历史 κ','']],rows)}
+   <div class="tiny" style="margin-top:8px">多数口径挑了 A（模型）—— 与人类判定相反。
+    这类样本直接进入硬样本库（当前 118 条）。</div></div>`;
+}
+render();
+</script>
+</body>
+</html>
