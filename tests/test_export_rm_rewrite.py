@@ -693,3 +693,30 @@ def test_rm_exported_rows_all_carry_segment_id(tmp_path):
     assert q["n"] == len(rows) >= 2
     assert all(r.get("segment_id") for r in rows), "存在缺 segment_id 的行"
     assert q["n_src_unverified_excluded"] >= 0
+
+
+# ── 7. 面板全票标记（校准矩阵发现的工具化）────────────────────
+
+def test_rm_judge_rows_carry_panel_unanimous_flag(tmp_path):
+    """校准矩阵：全票一致题对 gold .987+.，多数票仅 .9289——
+    judge_majority 行必须带 panel_unanimous/panel_size，让下游可只取全票弱标。"""
+    exp = f"EXP-RM-PANEL-{_UNIQ}"
+    db.init_db()
+    with db.session() as s:
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+        w, segs = _work_seg(s, f"t-rm-panel-{_UNIQ}",
+                            [(0, TEXT, None, '{"src_ok": true}'),
+                             (1, TEXT + "二。", None, '{"src_ok": true}')])
+        c1, _ = _cand(s, exp, segs[0], text=TEXT + "全票候选版。")
+        _judges(s, exp, c1, ["candidate", "candidate", "candidate"])   # 3:0 全票
+        c2, _ = _cand(s, exp, segs[1], text=TEXT + "分裂候选版。")
+        _judges(s, exp, c2, ["candidate", "candidate", "human"])       # 2:1 分裂
+        s.commit()
+    q = EX.export_rm(f"panel-{_UNIQ}", out_dir=tmp_path)
+    rows = _rows(tmp_path / f"rm_panel-{_UNIQ}.jsonl")
+    g1 = [r for r in rows if r["segment_id"] == segs[0].id and r["label_source"] == "judge_majority"]
+    g2 = [r for r in rows if r["segment_id"] == segs[1].id and r["label_source"] == "judge_majority"]
+    assert g1 and all(r["panel_unanimous"] is True and r["panel_size"] == 3 for r in g1)
+    assert g2 and all(r["panel_unanimous"] is False and r["panel_size"] == 3 for r in g2)
+    assert q["n"] == len(rows) >= 4

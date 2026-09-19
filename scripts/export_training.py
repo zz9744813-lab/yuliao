@@ -247,6 +247,16 @@ def _majority_winner(ws: list[str]) -> str:
     return leads[0] if len(leads) == 1 else "equal"
 
 
+def _panel_unanimous(ws: list[str]) -> bool:
+    """校准矩阵（docs/judge-calibration-natv1-20260920.md）的落地：
+    四评委**全票一致**的题对 gold .987–.993，远高于多数票整体 .9289——
+    该标记让下游可只取全票弱标（panel_unanimous=true）做高质量过滤。
+    无票/平票均非全票。"""
+    if not ws:
+        return False
+    return len(set(ws)) == 1
+
+
 def strategy_hints() -> list[str]:
     """把策略库里"该避免的 AI 习惯"读出来，作为训练样本的提示（§42 的 ExpressionStrategy 输入）。"""
     con = sqlite3.connect(he.DB)
@@ -655,7 +665,9 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                 }
 
                 def emit(side: str, text: str, score: float, src: str,
-                         weak: bool, suspect: bool = False) -> None:
+                         weak: bool, suspect: bool = False,
+                         panel_unanimous: bool = False,
+                         panel_size: int = 0) -> None:
                     nonlocal n_text_empty
                     if not (text or "").strip():
                         n_text_empty += 1
@@ -670,6 +682,8 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                         "corruption_type": (cc.corruption_type if cc else ""),
                         "corruption_variable": (cc.variable if cc else ""),
                         "provenance": RM_PROVENANCE[src],
+                        "panel_unanimous": panel_unanimous,
+                        "panel_size": panel_size,
                     })
                     pending.append(row)
 
@@ -691,8 +705,12 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                 mj = _majority_winner(votes.get(cid, []))
                 msc = SCORE_MAP.get(mj)
                 if msc:
-                    emit("human", htext, msc[0], "judge_majority", weak=True)
-                    emit("candidate", cand.text, msc[1], "judge_majority", weak=True)
+                    panel = votes.get(cid, [])
+                    uni = _panel_unanimous(panel)
+                    emit("human", htext, msc[0], "judge_majority", weak=True,
+                         panel_unanimous=uni, panel_size=len(panel))
+                    emit("candidate", cand.text, msc[1], "judge_majority", weak=True,
+                         panel_unanimous=uni, panel_size=len(panel))
 
     # 军师 P1-6：同段同文本多来源分数冲突的处理规则——按来源优先级保留一条
     # （user_verdict 强标签 > corruption_variable 构造性 > judge_majority 弱标），
