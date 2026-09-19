@@ -22,8 +22,8 @@
 > | 9 Strategy Atlas（工作流 D） | ✅ `scripts/strategy_discovery.py` + `expression_strategies` |
 > | 10 Hard Case（工作流 E） | ✅ `scripts/hard_case_mining.py` + `hard_cases` |
 > | **6 Controlled Corruption（工作流 B）** | ✅ `scripts/controlled_corruption.py`（18 类单变量劣化 + 1 控制臂）；**且已用集霸裁定验过方向**，见 §0.5④ |
-> | **11 Benchmark（§14）** | ⚠️ 有了**第一块能跑的**：Hidden Set + Runner + Leaderboard（`benchmark_build.py` / `benchmark_run.py`，171 题）；另 11 项子基准仍缺 |
-> | 13 Training Export（§42） | ⚠️ SFT 219（`--from-frames`，**不需要人工标签**）+ DPO 244（`--pairs`）/ 严格 1（`--strict`）+ 负面库 108；RM/Rewrite 缺 |
+> | **11 Benchmark（§14）** | ✅（可建部分，T5）corruption 检测 171 题 + **按类型子基准 19 集合 214 题** + **nat-v1 自然度 201 题**（控制臂已排除）；其余子基准待解锁清单见 `benchmark_build.py` docstring 状态表 |
+> | 13 Training Export（§42） | ✅（T6）SFT（`--from-frames`，**不需要人工标签**）· DPO（`--pairs`，默认方向**已被裁定否掉**）/ 严格 1（`--strict`）· 负面库 · **RM 1316**（`--rm`，正负比 0.953）· **Rewrite 845**（`--rewrite`）；摘要见 `data/exports/*_summary.json` |
 > | 7 Judge Arena | ⚠️ 评委**已证不可靠**：κ −0.04~+0.11，且**控制臂显示四家共享同一偏差**（§0.5③） |
 > | 12 Experiment Engine | ✅ `app/engine.py` + `scripts/run_experiment.py`（阶段状态机，可续跑/幂等/失败传播）|
 > | 14 Observability | ✅ `app/observability.py`（纯函数聚合）+ `GET /llm/stats?hours=24&exp=` + `scripts/observability_report.py`；窗口内 0 条显式 n=0，ISO 时间窗按字符串比较（tests/test_observability.py 钉住）|
@@ -194,6 +194,36 @@ bash scripts/serve_remote.sh                         # 起评审台（集霸批�
 
 **不要碰的东西**：`app/static/index.html`（先读 `tests/test_frontend_invariants.py`）、
 `BLIND_REVIEW_PROMPT_VERSIONS` 的抽样池语义（隔离靠它）、以及 §7 列过的已否路线。
+
+## 0.7 2026-09-19 白班交付（Hermes 调度队列 T1–T8 完成）
+
+夜间守夜 Hermes + ZCode agent 交付 T1/T4/T6（`c715851` / `7d1f342` / `7862666`），
+白班接续 T2/T3/T5/T7/T8。**每项全量 pytest 全绿后独立提交**，逐项记录在
+`F:\Hermes\team\gui_report.md`：
+
+| 任务 | 提交 | 交付物 | 证据 |
+|---|---|---|---|
+| T1 任务12 实验引擎 | `c715851` | `app/engine.py` 状态机（plan→source_check→extract→reconstruct→residual→judge→report；可续跑/幂等/失败传播）+ `scripts/run_experiment.py` | `tests/test_engine.py` |
+| T2 只读控制台 API | `0f19c0f` | `GET /console`（索引）+ `/console/<模块>`（§18 导航的 16 模块；白名单分发，未知 404）。`app/console.py` **全部只读**（回归钉住：全端点扫描前后全表行数逐表相等）；settings 显式白名单，令牌/密钥不进任何响应 | `tests/test_console.py`（20 项） |
+| T3 第二界面评审台 | `21729b0` | `/console/ui`——16 模块外壳：导航由索引驱动（不硬编码）、GET-only、读数不落 localStorage、取数失败显形。**index.html 一字未动**，其不变量测试原样全绿 | `tests/test_console_page.py`（5 项）+ 浏览器实测截图 |
+| T4 任务14 可观测 | `7d1f342` | `app/observability.py`（纯函数聚合）+ `GET /llm/stats?hours=` 窗口口径 + `scripts/observability_report.py` | `tests/test_observability.py` |
+| T5 任务11 子基准 | `178fd63` | **corruption_type**：19 个按类型冻结集合（214 题，类型一等公民，可单跑/回归对比）；**naturalness_pair**：nat-v1（201 题，问"哪边更自然"不问身份；控制臂 NEUTRAL_PARAPHRASE 不进答案键）。三种 kind 共用同一套闸门（src_ok/非病句/基准段）+ 同种子同位置可复现；runner 加 `--task naturalness`（NAT 模板），未知 task 响亮报错。**其余 §14 子基准待解锁**（human_vs_ai 缺基准段重建候选；Semantic Fidelity 等 6 项需构题器+可验证答案键；Preference Prediction / Reconstruction Quality 需基准段上的集霸裁定）——不装假仪器 | `docs/benchmark-subs-20260919.md`、`tests/test_benchmark_subs.py`、`benchmark_build.py` docstring 状态表 |
+| T6 任务13 RM/Rewrite | `7862666` | `--rm`：**RM 1316 条**（pos/neg 0.953；来源 user_verdict 362 / corruption_variable 190 / judge_majority 764 弱标；基准段隔离 266、控制臂排除 5）；`--rewrite`：**845 条**（instruction=帧要点 / output=人类原文） | `data/exports/rm_v1_summary.json`、`rewrite_v1_summary.json`、`tests/test_export_rm_rewrite.py` |
+| T7 硬 Gate 探路 | `d848fb7` | `scripts/judge_debias_probe.py`（只读）：corr24 数据面上对四家评委做 raw/位置基线/恒定human/反转投票/map偏移校正（控制臂转移矩阵+拉普拉斯平滑）五种变换，必报四样。**结论：不采信任何过线声明**——agnes 原始 1.000(n=5) 置换 p=0.0998 不显著；map 校正在劣化对照 16 题 0/4 全灭（N3 未过）→ 评委方向偏差在现有数据上**不可校正**，gold standard 仍是第一瓶颈（与 §0.5③ 一致） | `docs/judge-debias-report-20260919.md` |
+| T8 交付文档 | 本节 | 本节 + 任务表 11/13 行更新 + §12 待办表第 5 项更新 | — |
+
+**顺手修的（不占任务号）**：
+- `test_engine` 偶发红测加固（`8ab21e6`）：归账断言的 ">0" 隐含"采样段没校勘过"前提，
+  全库采样撞上别的测试写好的 integrity 时会静默归零——显式清空选中段 integrity 使前提自足。
+- 桥接子进程不弹控制台黑框（`e88da91`，朱十一要求；F:/Hermes/scripts 不可用时静默回退）。
+
+⚠ **未跟踪文件 `app/static/polish_kimi.css` 来历不明**（非本轮 agent 所建，09:4x 出现在
+工作区）——未动、未提交，等集霸认领或删除。
+
+📌 **集霸拍板的 4 项本日未动**（gold standard / 训练通道 / 换干净源文本 / 令牌轮换）——只记录不实现。
+
+**评审台新入口**：`<站点>/console/ui?t=<令牌>` —— 第二界面只读控制台（16 模块仪表），
+`?t=` 首次换 cookie 后即可去掉；**判题仍在第一界面 `/`**，写接口不经过第二界面。
 
 ## 1. 交接时点状态
 
@@ -1086,7 +1116,7 @@ ADVERB_INFLATION 初版指令是"尽量让每个动作都被副词修饰"，产�
 | 2 | 语料扩产继续推 | 接手 agent | `scale_corpus.py --run N`，**零人工**；目标 L 帧几千 |
 | 3 | corr24 的 24 条裁定灌进训练导出 | 接手 agent | 已加 `--strict`；目前只有 1 对被他背书 → 数据规模取决于第 1 项 |
 | 4 | 训练通道（本机无 GPU / 无微调管线） | **集霸决定** | §53 六条成功标准**一条都测不了**，卡在这里 |
-| 5 | 基准扩到其余 11 项子基准 | 接手 agent | §14 要求 Semantic Fidelity / Naturalness / Implicitness… 现只有 corruption 检测 |
+| 5 | 基准扩到其余 11 项子基准 | 接手 agent | 【T5 部分完成 2026-09-19】corruption_type（19 集合）+ naturalness_pair（nat-v1）已建；其余待解锁（human_vs_ai 缺基准段重建候选等，见 `benchmark_build.py` docstring 状态表与 `docs/benchmark-subs-20260919.md`） |
 | 6 | Experiment Engine（任务 12） | 接手 agent | 纯工程，`experiments` 表在但无引擎 |
 | 7 | 源文本换更干净的版本 | **集霸决定** | 斗罗 txt 系统性缺字（`千雪`应为`千仞雪` 347 段、`吴天`应为`昊天`） |
 | 8 | 评审台令牌轮换 | **集霸决定** | 曾在日志里明文出现过，我已脱敏但**未轮换**（轮换会让他手上的链接失效） |
