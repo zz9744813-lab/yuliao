@@ -161,7 +161,7 @@ def build(ver: str, n: int = N_DEFAULT, seed: int = 20260919,
         md.append("")
         md.append(r["text"])
         md.append("")
-    md_path = ROOT / "docs" / f"goldpick-候选清单-{ver}.md"
+    md_path = dest / f"goldpick-候选清单-{ver}.md"   # 跟随 out_dir（测试不污染 docs/）
     md_path.write_text("\n".join(md), encoding="utf-8")
     summary["md_path"] = str(md_path)
     return summary
