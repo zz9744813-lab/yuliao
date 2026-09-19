@@ -209,6 +209,71 @@ def build_naturalness_pairs(name: str, version: int = 1, seed: int = 20260918,
                 "segments": len({x[1].id for x in rows})}
 
 
+def build_human_vs_ai(name: str, version: int = 1, seed: int = 20260918,
+                      dry_run: bool = False) -> dict:
+    """human_vs_ai 子基准（§14 Human-vs-AI Discrimination，2026-09-19 解锁）。
+
+    题源：基准段上的**自由重建**候选（prompt_version 在盲评白名单里的
+    reconstruct_v1 / recon_ctx_v1，EXP-BENCH-RECON 的产物）——不是劣化变体。
+    与 corruption_detection 的差别：劣化版是"按单一变量改坏的原文"，
+    重建版是"模型从语义帧自由写出来的"——这才是真正的「人 vs AI」判别。
+    答案键来自构造：answer=人类原文侧。隔离：候选在基准段上，
+    训练导出与盲评池都已被 role='benchmark' 闸住。
+    """
+    from app.config import BLIND_REVIEW_PROMPT_VERSIONS
+    from app.models import Candidate
+    with db.session() as s:
+        bm = {x.id: x for x in s.query(Segment).filter(Segment.role == "benchmark").all()}
+        rows = []
+        for cand in (s.query(Candidate)
+                     .filter(Candidate.status == "ok").all()):
+            seg = bm.get(cand.segment_id)
+            if seg is None or not cand.text:
+                continue
+            if cand.prompt_version not in BLIND_REVIEW_PROMPT_VERSIONS:
+                continue
+            try:
+                integ = json.loads(seg.integrity or "{}")
+            except Exception:
+                integ = {}
+            if integ.get("src_ok") is not True:
+                continue
+            rows.append((cand, seg))
+        if dry_run:
+            return {"would_build": len(rows), "segments": len({x[1].id for x in rows})}
+        st = BenchmarkSet(id=new_id("BS"), name=name, version=version,
+                          kind="human_vs_ai", n_items=len(rows),
+                          spec={"source": "candidates_reconstruction",
+                                "segment_role": "benchmark",
+                                "prompt_versions": list(BLIND_REVIEW_PROMPT_VERSIONS),
+                                "require_src_ok": True,
+                                "position_seed": seed,
+                                "ctx": "near1",
+                                "answer_semantics": "answer=人类原文侧（构造性答案）"},
+                          note="人 vs AI 判别题：A/B 哪一边是**人类原文**（另一边是帧重建候选）")
+        s.add(st)
+        s.flush()
+        rng = random.Random(seed)
+        from app.context_ablation import scene_context
+        for cand, seg in rows:
+            human = seg.text_clean or seg.text
+            if rng.random() < 0.5:
+                a, b, ans = human, cand.text, "A"
+            else:
+                a, b, ans = cand.text, human, "B"
+            ctxs, _ = scene_context(s, seg)
+            s.add(BenchmarkItem(set_id=st.id, segment_id=seg.id,
+                                kind="human_vs_ai",
+                                context=(ctxs or [""])[-1] if ctxs else "",
+                                text_a=a, text_b=b, answer=ans,
+                                meta={"prompt_version": cand.prompt_version,
+                                      "recon_model": cand.model,
+                                      "temperature": cand.temperature}))
+        s.commit()
+        return {"set_id": st.id, "items": len(rows),
+                "segments": len({x[1].id for x in rows})}
+
+
 def scan() -> dict:
     with db.session() as s:
         sets = s.query(BenchmarkSet).all()
@@ -237,7 +302,8 @@ def main() -> None:
     ap.add_argument("--name", default="cc-v1", help="集合名（corruption_type 时作为前缀）")
     ap.add_argument("--version", type=int, default=1)
     ap.add_argument("--kind", default="corruption_detection",
-                    choices=("corruption_detection", "corruption_type", "naturalness_pair"))
+                    choices=("corruption_detection", "corruption_type", "naturalness_pair",
+                             "human_vs_ai"))
     ap.add_argument("--seed", type=int, default=20260918)
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
@@ -250,6 +316,8 @@ def main() -> None:
         out = build_corruption_type_sets(args.name, args.version, args.seed, args.dry_run)
     elif args.kind == "naturalness_pair":
         out = build_naturalness_pairs(args.name, args.version, args.seed, args.dry_run)
+    elif args.kind == "human_vs_ai":
+        out = build_human_vs_ai(args.name, args.version, args.seed, args.dry_run)
     else:
         out = build_corruption_detection(args.name, args.version, args.seed, args.dry_run)
     print(json.dumps(out, ensure_ascii=False))

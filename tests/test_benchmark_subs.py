@@ -151,3 +151,34 @@ def test_dry_run_touches_nothing():
     d2 = BB.build_naturalness_pairs("nat-dry", dry_run=True)
     assert isinstance(d1["would_build"], dict) and isinstance(d2["would_build"], int)
     assert BB.scan()["sets"] == before["sets"], "dry-run 建了集合——违反零副作用承诺"
+
+
+def test_human_vs_ai_builder_whitelist_and_answer():
+    """hvai：只收白名单口径的自由重建候选；答案=人类侧；文本冻结。"""
+    from app.config import BLIND_REVIEW_PROMPT_VERSIONS
+    with db.session() as s:
+        seg = s.query(Segment).filter_by(role="benchmark").first()
+        assert seg is not None
+        fr = s.query(Frame).filter_by(segment_id=seg.id).first()
+        for pv, status in (("reconstruct_v1", "ok"), ("recon_ctx_v1", "ok"),
+                           ("recon_ctxonly_v1", "ok"), ("reconstruct_v1", "failed")):
+            s.add(Candidate(experiment_id=EXP, frame_id=fr.id, segment_id=seg.id,
+                            anon_label="XH", model="recon-model", temperature=0.7,
+                            prompt_version=pv, status=status,
+                            text=f"重建候选（{pv}/{status}），长度足够长以通过任何过滤。"))
+        s.commit()
+    out = BB.build_human_vs_ai("hvai-sub", version=1, seed=5)
+    with db.session() as s:
+        st = s.get(BB.BenchmarkSet, out["set_id"])
+    assert st.kind == "human_vs_ai"
+    with db.session() as s:
+        items = s.query(BenchmarkItem).filter_by(set_id=out["set_id"]).all()
+    assert all(i.kind == "human_vs_ai" for i in items)
+    assert all((i.meta or {}).get("prompt_version") in BLIND_REVIEW_PROMPT_VERSIONS
+               for i in items), "非白名单口径混进 hvai 基准"
+    with db.session() as s:
+        seg_text = (s.get(Segment, items[0].segment_id).text_clean
+                    or s.get(Segment, items[0].segment_id).text)
+    for i in items:
+        human_side = i.text_a if i.answer == "A" else i.text_b
+        assert human_side == seg_text, "答案键不是人类原文侧——hvai 答案键被破坏"
