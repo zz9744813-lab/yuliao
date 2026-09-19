@@ -43,6 +43,7 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -447,6 +448,8 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
     path = dest / f"writer_sft_{ver}.jsonl"
     n = n_bad = n_bench = n_l4 = n_fixture = n_dirty = 0
     n_bench_content = 0
+    n_src_unv = 0
+    segs_covered: set = set()
     by_work: dict[str, int] = {}
     starts: dict = {}
     with db.session() as s, path.open("w", encoding="utf-8") as f:
@@ -468,6 +471,8 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
                 continue
             if reason in ("bad_src", "src_unverified"):
                 n_bad += 1
+                if reason == "src_unverified":
+                    n_src_unv += 1
                 continue
             if reason == "benchmark_content":    # P1-5：内容级隔离
                 n_bench_content += 1
@@ -479,6 +484,7 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
             if not text or len(text.strip()) < 20:
                 n_bad += 1
                 continue
+            segs_covered.add(seg.id)
             nb = neighbors(s, seg)
             work = s.get(Work, seg.work_id)
             rec = {
@@ -499,6 +505,7 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
             n += 1
             by_work[rec["work"]] = by_work.get(rec["work"], 0) + 1
     return {"path": str(path), "n": n, "n_skipped_bad_src": n_bad,
+            "n_segments_covered": len(segs_covered), "n_src_unverified_excluded": n_src_unv,
             "n_skipped_benchmark": n_bench, "n_skipped_fixture": n_fixture,
             "n_skipped_dirty": n_dirty, "by_work": by_work}
 
@@ -553,8 +560,8 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
         n_bench_content = 0
         by_source = {"corruption_variable": 0, "user_verdict": 0, "judge_majority": 0}
         pos = neg = neu = n_weak = 0
-        with path.open("w", encoding="utf-8") as f:
-            for cid in subjects:
+        pending: list[dict] = []
+        for cid in subjects:
                 cand = s.get(Candidate, cid)
                 if cand is None:
                     # 孤儿判定（候选行已不在库，verdict 里也没有原文）：跳过并计数，不许编文本
@@ -607,7 +614,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
 
                 def emit(side: str, text: str, score: float, src: str,
                          weak: bool, suspect: bool = False) -> None:
-                    nonlocal n, n_weak, pos, neg, neu, n_text_empty
+                    nonlocal n_text_empty
                     if not (text or "").strip():
                         n_text_empty += 1
                         return
@@ -621,16 +628,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                         "corruption_variable": (cc.variable if cc else ""),
                         "provenance": RM_PROVENANCE[src],
                     })
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                    n += 1
-                    n_weak += weak
-                    by_source[src] += 1
-                    if score > 0.5:
-                        pos += 1
-                    elif score < 0.5:
-                        neg += 1
-                    else:
-                        neu += 1
+                    pending.append(row)
 
                 # ② 集霸裁定（强标签，优先于变量标签）
                 sc = SCORE_MAP.get(uvs.get(cid, {}).get("winner_resolved"))
@@ -652,12 +650,43 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                 if msc:
                     emit("human", htext, msc[0], "judge_majority", weak=True)
                     emit("candidate", cand.text, msc[1], "judge_majority", weak=True)
+
+    # 军师 P1-6：同文本多来源分数冲突的处理规则——按来源优先级保留一条
+    # （user_verdict 强标签 > corruption_variable 构造性 > judge_majority 弱标），
+    # 其余丢弃并计数。**先定规则再混合**，不静默保留冲突分数。
+    prio = {"user_verdict": 3, "corruption_variable": 2, "judge_majority": 1}
+    def _norm_txt(t: str) -> str:
+        return "".join((t or "").split())
+    best: dict[tuple, dict] = {}
+    n_conflict_dropped = 0
+    for row in pending:
+        key = (row.get("segment_id"), _norm_txt(row["text"]))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = row
+            continue
+        n_conflict_dropped += 1
+        if prio.get(row["label_source"], 0) > prio.get(cur["label_source"], 0):
+            best[key] = row
+    rows = sorted(best.values(), key=lambda r: r["id"])
+    with path.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + chr(10))
+    n = len(rows)
+    n_weak = sum(1 for r in rows if r.get("weak"))
+    by_source = Counter(r["label_source"] for r in rows)
+    by_source = {k: by_source.get(k, 0) for k in
+                 ("corruption_variable", "user_verdict", "judge_majority")}
+    pos = sum(1 for r in rows if r["score"] > 0.5)
+    neg = sum(1 for r in rows if r["score"] < 0.5)
+    neu = n - pos - neg
     summary = {
         "path": str(path), "summary_path": str(sum_path),
         "n": n, "by_source": by_source,
         "pos": pos, "neg": neg, "neutral": neu,
         "pos_neg_ratio": (round(pos / neg, 3) if neg else None),
         "n_weak": n_weak,
+        "n_conflict_dropped": n_conflict_dropped,
         "n_skip_missing": n_skip_missing, "n_unresolved_verdict": n_unresolved,
         "n_text_empty": n_text_empty,
         "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
@@ -697,6 +726,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
     n = n_bench = n_ex = n_wm = n_fix = n_bad = 0
     n_bench_content = 0
     n_control = n_ungram = n_missing = 0
+    neg_segs: set = set()
     by_type: dict[str, int] = {}
     by_work: dict[str, int] = {}
     with db.session() as s:
@@ -759,6 +789,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                         ctx2 = txt
                 f.write(json.dumps({
                     "id": cc.id,
+                    "segment_id": cc.segment_id,
                     "failure_text": cc.text,
                     "failure_variable": cc.variable,
                     "failure_mode": cc.corruption_type,
@@ -770,10 +801,12 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                     "pv": cc.prompt_version,
                 }, ensure_ascii=False) + chr(10))
                 n += 1
+                neg_segs.add(cc.segment_id)
                 by_type[cc.corruption_type] = by_type.get(cc.corruption_type, 0) + 1
                 work = s.get(Work, seg.work_id)
                 by_work[(work.title if work else "∅")] = by_work.get(work.title if work else "∅", 0) + 1
     summary = {"path": str(path), "summary_path": str(sum_path), "n": n,
+               "n_source_segments": len(neg_segs),
                "by_type": by_type, "by_work": by_work,
                "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_extras_excluded": n_ex,
                "n_watermark_excluded": n_wm, "n_fixture_excluded": n_fix,

@@ -509,3 +509,26 @@ def test_normal_segment_not_flagged_by_content_guard():
         EX._BENCH_HASHES = None
         r = EX._excluded_reason(s, seg, starts, for_train=True)
     assert r == "", f"普通段被内容守卫误伤：{r}"
+
+
+def test_rm_conflict_rule_same_segment_same_text(tmp_path):
+    """军师 P1-6：同段同文本多来源冲突 → 按优先级保留一条
+    （user_verdict > corruption_variable > judge_majority），其余丢弃并计数。"""
+    exp = "EXP-RM-CONFLICT"
+    db.init_db()
+    with db.session() as s:
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+        w, segs = _work_seg(s, "t-rm-conflict", [(0, TEXT, None, '{"src_ok": true}')])
+        c, _ = _cand(s, exp, segs[0], text=TEXT + "候选。")
+        _judges(s, exp, c, ["candidate", "candidate", "human"])   # 弱标：candidate 1.0
+        _review(s, exp, c, "human")                               # 强标：human 侧 1.0
+        s.commit()
+    q = EX.export_rm("conflict", out_dir=tmp_path)
+    rows = _rows(tmp_path / "rm_conflict.jsonl")
+    # 同段同文本（TEXT）的两条冲突：强标 user_verdict 留，弱标 judge_majority 丢
+    human_rows = [r for r in rows if r["side"] == "human" and r["segment_id"] == segs[0].id
+                  and "".join(r["text"].split()) == "".join(TEXT.split())]
+    assert len(human_rows) == 1, f"同段同文本应只剩 1 条，实得 {len(human_rows)}"
+    assert human_rows[0]["label_source"] == "user_verdict", "强标必须压过弱标"
+    assert q["n_conflict_dropped"] >= 1, "被丢弃的冲突行必须计数"
