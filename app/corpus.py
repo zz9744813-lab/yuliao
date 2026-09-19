@@ -84,6 +84,14 @@ def add_work(session: Session, *, title: str, text: str, source: str,
         ))
     # autoflush=False：不再来一次 flush，同事务内的后续查询（如紧跟着建实验采样）会看不到段落
     session.flush()
+    # 入库闸门（T-CORPUS-V2）：扫错字表并记入 work.note——**只记录不改动**，
+    # 修复走 corpus_fix_v2.py 的版本化流程（不覆盖已入库文本）。
+    from .typo_map import hits as _typo_hits
+    _th = _typo_hits(text)
+    if _th:
+        _detail = "、".join(f"{k}×{v}" for k, v in sorted(_th.items()))
+        work.note = ((work.note + "；") if work.note else "") +             f"[typo_scan] {_detail}（见 app/typo_map，修复走 corpus_fix_v2）"
+        session.flush()
     return work
 
 

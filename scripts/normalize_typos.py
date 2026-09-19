@@ -33,12 +33,13 @@ from app import db  # noqa: E402
 from app.models import BenchmarkItem, BenchmarkSet, ControlledCorruption, Segment, Work  # noqa: E402
 from app.ids import new_id  # noqa: E402
 from scripts.source_check import rule_defects  # noqa: E402
+from app.typo_map import RULES as _TYPO_RULES  # noqa: E402  单一事实源（T-CORPUS-V2）
 
-# 频次自洽确认过的系统性错字（--scan 会重新验证并打印证据；works=允许修复的作品）
+# 频次自洽确认过的系统性错字（规则本体收敛到 app/typo_map.py；works=允许修复的作品）
 TYPO_TABLE = [
-    {"bad": "千雪", "good": "千仞雪", "lookbehind": "仞", "works": ("斗罗大陆",)},
-    {"bad": "吴天", "good": "昊天", "works": ("斗罗大陆", "将夜")},
-    {"bad": "了天斗罗", "good": "昊天斗罗", "works": ("斗罗大陆",)},
+    {**rule, "works": works}
+    for rule, works in zip(_TYPO_RULES, (
+        ("斗罗大陆",), ("斗罗大陆", "将夜"), ("斗罗大陆",)))
 ]
 
 
