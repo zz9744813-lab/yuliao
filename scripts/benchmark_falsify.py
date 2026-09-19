@@ -17,12 +17,13 @@ benchmark_runs 里的已有跑分做六项检验，**只读库、零 LLM 成本*
 · N4 长度基线（军师 P1-3）：与"只选较短文本"的简单规则配对比较——位置随机化了
   但长度没有，不显著优于它就不算真信号。
 · N5 长度分层正确率（指标硬化）：把已答题按「人类答案在更短侧 / 更长侧」分两层
-  （等长的单列）。两层各 ≥3 题时，"人类侧更长"层 acc < 0.5 ⇒ 模型在那半边接近
-  瞎猜，读数是纯长度驱动——不许 pass（只报总 acc 掩盖这个混淆）。
+  （等长单列 equal；lengths 缺 key 的题单列 missing 并显形，不伪装成 equal——
+  T-N5FIX①）。两层各 ≥10 题时（T-N5FIX②，原 3→10），"人类侧更长"层 acc < 0.5
+  ⇒ 模型在那半边接近瞎猜，读数是纯长度驱动——不许 pass（只报总 acc 掩盖这个混淆）。
 
 结论措辞是**分级的**（provisional 纪律）：
   pass  = N0 p<0.05 且 N2 波动 < 0.05 且 N1 |偏差| < 0.2 且 N3 >= 0.9
-          且显著优于"只选较短"基线，且（两层各 ≥3 题时）"人类侧更长"层 acc >= 0.5
+          且显著优于"只选较短"基线，且（两层各 ≥10 题时）"人类侧更长"层 acc >= 0.5
   weak  = N0 过但其它有一项存疑
   fail  = N0 未过
 用法：
@@ -48,7 +49,13 @@ FLIP_B = 20000          # 聚类置换重排次数
 CLUST_B = 5000          # 段级 bootstrap 次数
 SEED = 20260919         # 检验本身也要可复现
 GATE = {"perm_p": 0.05, "sensitivity": 0.05, "pos_bias": 0.2, "answered": 0.9,
-        "long_layer_acc": 0.5, "long_layer_min_n": 3}   # N5：长层下限与参与判定的最小层规模
+        "long_layer_acc": 0.5, "long_layer_min_n": 10}   # N5：长层判定的最小层规模
+# T-N5FIX②：long_layer_min_n 从 3 提到 10。理由：点估计 acc>=0.5 在 n=3 时，真实
+# acc≈0.4 有约 35%（P[X>=2|Binom(3,0.4)]）被误判为"过"（放行纯长度驱动 run）；n=10
+# 压到约 17%、n=15 约 9%。取 10：既显著收紧漏判，又保住"14 题 acc=0.43 仍判死"的
+# 保守口径（见 test_length_gate_alone_downgrades_pass_to_weak）。层规模 <10 时诚实
+# 判 None（不参与判定），而不是拿噪声样本假装过了门——fail-open 的口子只留给"数据
+# 不足"这一种可解释情形，且与 length_strat.missing 显形配合（见 T-N5FIX①）。
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -90,6 +97,22 @@ def _binom_two_sided(k: int, n: int) -> float:
         return comb(n, x) * (0.5 ** n)
     p0 = pm(k)
     return min(1.0, sum(pm(x) for x in range(n + 1) if pm(x) <= p0 + 1e-12))
+
+
+def _length_layer(la: int, lb: int, ans: str) -> str:
+    """按「人类答案落在更短侧 / 更长侧 / 等长」归层——N5 的唯一判层入口。
+
+    隐含约定（T-N5FIX⑤）：lengths[iid] = (len(text_A), len(text_B))，**第0元素=A侧、
+    第1元素=B侧**，与 meta 答案 'A'/'B' 同序。顺序若写反，(la<lb) 与 (ans=="A") 的
+    比较会整体翻转，short/long 两层对调——好 run 被判死、纯长度驱动反被放行。故把判层
+    收敛到这一个函数，并由 tests/test_benchmark_falsify.py::test_length_layer_convention
+    _pins_ab_order 用手算 fixture 锁死；ans 非 A/B 视为形状错误直接抛。
+    """
+    if ans not in ("A", "B"):
+        raise ValueError(f"长度判层要求答案为 'A'/'B'（与 lengths 同序），收到 {ans!r}")
+    if la == lb:
+        return "equal"
+    return "short" if (la < lb) == (ans == "A") else "long"
 
 
 def falsify_run(meta: dict, run: dict, n_items: int | None = None,
@@ -184,23 +207,33 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     # N5（指标硬化）长度分层正确率：把已答题按「人类答案在更短侧 / 更长侧」分两层
     # （等长的单列 equal）。总 acc 一高就把长度混淆盖住了——模型完全可能只在
     # "人类侧更短"的题上对（等价于免费"选短"规则）。分母 = 该层已答数。
-    strat_n = {"short": 0, "long": 0, "equal": 0}
-    strat_hit = {"short": 0, "long": 0, "equal": 0}
+    # T-N5FIX①：lengths 里缺 key 的题**不再默认 (0,0)** 落进 equal（那会让 short/long
+    # 被抽空 → length_strat=None → 与同文件 N4 fail-closed 口径相反的静默 fail-open）。
+    # 缺数据的题单独计 missing 桶并在报表显形（缺多少题、占比），不得伪装成 equal。
+    layers = ("short", "long", "equal", "missing")
+    strat_n = {g: 0 for g in layers}
+    strat_hit = {g: 0 for g in layers}
     length_strat = None
+    n_missing_len = 0
+    long_p = None
     if lengths:
         for iid, pick in answered.items():
-            la, lb = lengths.get(iid, (0, 0))
-            if la == lb:
-                layer = "equal"
-            elif (la < lb) == (meta[iid][1] == "A"):
-                layer = "short"                  # 人类答案在更短侧
+            if iid not in lengths:                 # 缺长度数据：单独成桶，显形
+                layer = "missing"
             else:
-                layer = "long"                   # 人类答案在更长侧
+                la, lb = lengths[iid]              # 解包本身即形状断言（须为 (A侧,B侧) 二元组）
+                layer = _length_layer(la, lb, meta[iid][1])
             strat_n[layer] += 1
             strat_hit[layer] += (pick == meta[iid][1])
+        n_missing_len = strat_n["missing"]
+        # 与 N0/N4 同一把尺子：对「人类侧更长」层做对 0.5 的双侧二项检验 p，报表显形
+        # （阈值/漏判概率见 GATE["long_layer_min_n"] 上方 T-N5FIX② 注释）。判死口径保持
+        # 保守点估计 acc<0.5（长层过半规模却低于机会线即视为长度驱动），p 只作透明披露。
+        if strat_n["long"]:
+            long_p = _binom_two_sided(strat_hit["long"], strat_n["long"])
         length_strat = {g: {"n": strat_n[g],
                             "acc": round(strat_hit[g] / strat_n[g], 4) if strat_n[g] else None}
-                        for g in ("short", "long", "equal")}
+                        for g in layers}
 
     # 两层都 ≥ long_layer_min_n 时参与判定：较长层（人类侧更长）acc < 0.5 ⇒
     # 模型在那半边接近瞎猜 = 纯长度驱动，不许 pass。任一层不足 ⇒ None 不参与。
@@ -223,7 +256,11 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     verdict = ("pass" if gate_ok
                else "fail" if not checks["perm_p"]
                else "weak")
-    return {"model": run["model"], "n_answered": n_ans, "acc": round(acc, 4),
+    # T-N5FIX④：原 dict 里有两处 "n_answered" 键（一处 = 由 picks 现算的 n_ans、
+    # 一处 = DB 的 run["n"]），后值静默覆盖前者。这是真 bug——n_ans 才是所有检验实际
+    # 用的已答数。现令 n_answered = n_ans，DB 值单独放 n_db 保留可比对，不再互相覆盖。
+    return {"model": run["model"], "n_answered": n_ans, "n_db": run["n"],
+            "acc": round(acc, 4),
             "wilson": [round(v, 4) for v in wilson(run["correct"], run["n"])],
             "cluster_ci": [round(lo, 4), round(hi, 4)],
             "perm_p": round(perm_p, 4), "flip_groups": len(segs),
@@ -236,7 +273,10 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
                                  "model_beat": model_beat, "baseline_beat": baseline_beat,
                                  "sign_p": round(beat_p, 4)},
             "length_strat": length_strat,
-            "checks": checks, "verdict": verdict, "n_answered": run["n"]}
+            "length_missing": None if length_strat is None else
+                {"n": n_missing_len, "rate": round(n_missing_len / n_ans, 4)},
+            "length_strat_long_p": None if long_p is None else round(long_p, 4),
+            "checks": checks, "verdict": verdict}
 
 
 def falsify_set(set_id: str) -> dict:
@@ -249,13 +289,18 @@ def falsify_set(set_id: str) -> dict:
 
 def _fmt_length_strat(strat: dict | None) -> str:
     """主表"分层acc(短/长)"单元格："0.95/0.60 (n=8/12)"；无长度数据或任一层
-    为空（acc 不可算）显示 —。"""
+    为空（acc 不可算）显示 —。T-N5FIX①：缺长度数据的题单独显形为"[缺长度 N]"，
+    提醒读数里有几题没进 short/long（不再被算进 equal 掩盖）。无缺失时格式不变。"""
     if not strat:
         return "—"
     s, l = strat["short"], strat["long"]
     if s["acc"] is None or l["acc"] is None:
         return "—"
-    return f"{s['acc']:.2f}/{l['acc']:.2f} (n={s['n']}/{l['n']})"
+    cell = f"{s['acc']:.2f}/{l['acc']:.2f} (n={s['n']}/{l['n']})"
+    miss = strat.get("missing", {}).get("n", 0)
+    if miss:
+        cell += f" [缺长度 {miss}]"
+    return cell
 
 
 def main() -> None:
