@@ -312,7 +312,38 @@ bash scripts/serve_remote.sh                         # 起评审台（集霸批�
     ✅ **corpus v2 已产出**（T-CORPUS-V2，2026-09-20）：斗罗/将夜各建新 Work
     （106,489 段 1:1 镜像，text=TYPO_MAP 修复后文本；v1 原样保留），
     映射 data/exports/corpus_v2_map.jsonl；入库闸门 app/typo_map 扫描
-    add_work 只记 note 不改文本。⚠ v1/v2 同文并存，实验建批用 work_ids 选边。
+    add_work 只记 note 不改文本。
+    ■ **corpus v2 口径（会审①收口 U0c，2026-09-20）**：
+      · **v2 段永不参与基准评选，基准只在 v1 侧维护。** v2 是 v1 的 TYPO_MAP
+        修复副本，同一内容在库里存在两份——任何评选/入池/gold 指认只认 v1 那一本。
+      · 权威标记 = **`Work.v2_of`（存来源 v1 Work.id）**，由 v1 work.id 派生，
+        是 build 的幂等键；标题后缀「（corpus v2）」只是人类可读 + 回填前历史行的
+        兼容通道。**幂等与追溯不认标题**（旧实现按 Work.title 查，同名多 Work 会
+        被第一本的 v2 顶掉、静默不产出）。
+      · 排除已实装（判定统一走 `app.models.exclude_corpus_v2_segments` /
+        `is_corpus_v2_work`，不再各处硬编码字面量）：`app/near_dup`
+        （train_sampling_pool + split_benchmark）、`scripts/scale_corpus.pick`、
+        `scripts/goldpick_build`、`scripts/export_training`（剔除原因 `corpus_v2`）、
+        `scripts/benchmark_build`（role 闸之外的第二道血缘闸）。
+        回归：`tests/test_corpus_v2_isolation.py`（7 条）+ `tests/test_corpus_fix_v2.py`。
+      · **存量收口**：`python scripts/corpus_fix_v2.py --backfill`（默认 dry-run
+        只报告）→ 加 `--apply` 写库：按段上的 `corpus_v2_source` 锚反查 v1 work
+        补 `v2_of`，并把 v2 段继承来的 role 显式清零（v1 侧一律不动）。
+        **2026-09-20 已对生产库执行**（写前备份 `F:\agi\_bak\language_genome_20260920_0456.db`）：
+        v2 段 `role='benchmark'` **224 → 0**（将夜 109 + 斗罗 115），全库 benchmark
+        **966 → 742**（−224，v1 侧 109/115 一根没动），两本 v2 Work 的 `v2_of`
+        由 null 回填为 `WK-a052258c` / `WK-8e8e0459284d`，`unresolved_lineage=[]`
+        （全部靠锚反查唯一命中，无需猜测）。审计行写入两本 v2 Work 的 note。
+        复核口径：v2 侧真实同文镜像段 ≈218 段 / 216 种文本（另有 1 个退化的
+        2 字段「……」在 v2 侧复现 3284 次，把 DISTINCT 计数撑到 3502，不是内容重复）
+        ——数量与"224 个继承 role 的段"基本吻合，证实污染就是 v1 基准的 1:1 复制。
+      · ⚠ **仍未收口的下游（在途 P0 文件，需协调后再动）**：
+        `scripts/controlled_corruption.py` 的选池（`Segment.role.is_(None)`，约 659 行）
+        与基准划定（约 731/1309 行 `role = "benchmark"`）不带 v2 排除——这是
+        v2 重新被标成基准段的**真复发路径**；`scripts/ai_ranking_build.py:81`
+        的 role 池同理（目前只是间接暴露：v2 段上没有候选）。补一行
+        `.filter(exclude_corpus_v2_segments())` 即可收口。
+      · 建批侧纪律不变：v1/v2 同文并存，实验用 `work_ids` 明确选边。
 11. **评审台令牌已轮换**（2026-09-19 集霸授权代行）：新令牌在
     `data/review_token.txt`（chmod 600，不外发）；旧令牌已在 1 个日志文件脱敏
     （`<TOKEN-REDACTED>`）并经远程模拟验证作废（401）；服务已重启，
