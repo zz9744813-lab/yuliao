@@ -1,11 +1,13 @@
-"""T-CORPUS-V2 回归：TYPO_MAP / 入库闸门 / corpus v2 版本化产出。
+"""T-CORPUS-V2 回归：TYPO_MAP / 入库闸门 / corpus v2 版本化产出 / 会审①收口。
 
 钉住：
 1. typo_map：lookbehind 正确（千仞雪 子串不误伤）、特异性优先、apply 计数；
 2. 入库闸门：add_work 对命中文本**只记 note 不改文本**（修复走版本化）；
 3. corpus v2：新 Work 1:1 镜像、text=修复后文本、v1 原样、integrity 带
    corpus_v2_source 映射锚、幂等（重跑跳过）、map 文件逐段落行；
-4. v2 段 integrity 逐字携带 v1 校勘结论（重判是 source_check 的职责）。
+4. v2 段 integrity 逐字携带 v1 校勘结论（重判是 source_check 的职责）；
+5. 会审①：v2 段任何分支都不继承 role；幂等键是 v1 work.id 派生的稳定键
+   （同名多 Work 各自镜像，不静默丢弃）；历史行可 backfill 收口。
 """
 from __future__ import annotations
 
@@ -147,22 +149,153 @@ def test_hits_none_and_empty():
 
 def test_corpus_v2_segments_do_not_inherit_role(tmp_path):
     """v1 里 role='benchmark' 的段若被 v2 原样继承，同一内容会双份入池/入 gold。
-    v2 段必须 role=None（docstring 承诺的行为）。"""
-    _seed_v1_work("斗罗大陆（唐家三少）-v2role")
+    v2 段必须 role=None（docstring 承诺的行为），且 v1 的标注原样保留。"""
+    v1_id = _seed_v1_work("斗罗大陆（唐家三少）-v2role")
     with db.session() as s:
         # 额外造一个 benchmark 角色的 v1 段
-        w = s.query(Work).filter(Work.title.like("斗罗大陆%v2role")).one()
-        s.add(Segment(work_id=w.id, ordinal=9, text="吴天宗的千雪又来了。",
+        s.add(Segment(work_id=v1_id, ordinal=9, text="吴天宗的千雪又来了。",
                       text_clean="吴天宗的千雪又来了。", role="benchmark",
                       integrity='{"src_ok": true}', n_sentences=1, n_chars=11))
         s.commit()
     import scripts.corpus_fix_v2 as CF
-    out = CF.build(only=("斗罗大陆",), map_path=tmp_path / "m-role.jsonl")
+    out = CF.build(only=("v2role",), map_path=tmp_path / "m-role.jsonl")
+    mine = [c for c in out["created"] if c["v1_work"] == v1_id]
+    assert len(mine) == 1
     with db.session() as s:
-        # 按本测试专属 v2 标题精确查（共享库里其它测试也建过 v2）
-        v2 = s.query(Work).filter(
-            Work.title == "斗罗大陆（唐家三少）-v2role（corpus v2）").one()
-        rows = s.query(Segment).filter(Segment.work_id == v2.id).all()
+        # 一律按 id 定位（行数只做旁证）：本测试专属 v2 work + 本测试专属 v1 work
+        v2_id = mine[0]["v2_work"]
+        rows = s.query(Segment).filter(Segment.work_id == v2_id).all()
+        v1_rows = s.query(Segment).filter(Segment.work_id == v1_id).all()
     assert len(rows) == 3
     assert all(r.role is None for r in rows), \
         "v2 段继承了 v1 的 role——同文双份入池/入 gold，基准被污染"
+    assert sum(1 for r in v1_rows if r.role == "benchmark") == 1, \
+        "v1 侧标注必须原样保留（基准只在 v1 侧维护）"
+
+
+# ── 5. 会审①收口：幂等键（稳定血缘键）+ 存量回填 ──────────────
+
+def test_corpus_v2_stable_key_mirrors_each_same_title_work(tmp_path):
+    """幂等键是 v1 work.id 派生的稳定键：同名多 Work 各自镜像，不静默丢弃。
+
+    旧实现按 Work.title 查已存在，第二本同名 Work 会被第一本的 v2 顶掉——
+    既不报错也不产出（会审①的第二条严重项）。
+    """
+    a = _seed_v1_work("斗罗大陆（唐家三少）-u0cdup")
+    b = _seed_v1_work("斗罗大陆（唐家三少）-u0cdup")        # 与 a 完全同名
+    import scripts.corpus_fix_v2 as CF
+    out = CF.build(only=("u0cdup",), map_path=tmp_path / "dup.jsonl")
+    assert out["same_title_v1_works"] == {"斗罗大陆（唐家三少）-u0cdup": 2}
+    assert len(out["created"]) == 2, "同名第二本 Work 被标题键静默跳过了"
+    assert {c["v1_work"] for c in out["created"]} == {a, b}
+    with db.session() as s:
+        rows = s.query(Work).filter(Work.v2_of.in_([a, b])).all()
+        assert len(rows) == 2, "每本 v1 各自有一本带稳定键的 v2"
+        assert {r.v2_of for r in rows} == {a, b}
+    out2 = CF.build(only=("u0cdup",), map_path=tmp_path / "dup2.jsonl")
+    assert out2["created"] == [] and len(out2["skipped"]) == 2, "重跑必须按稳定键幂等跳过"
+    assert all("v2_work" in sk for sk in out2["skipped"]), "跳过要报出命中了哪本 v2（不许静默）"
+
+
+def test_corpus_v2_build_adopts_legacy_row_instead_of_double_creating(tmp_path):
+    """历史行（回填前 v2_of 为空）：必须按「标题 + 锚点血缘」采纳，绝不再镜像一份。"""
+    v1_id = _seed_v1_work("斗罗大陆（唐家三少）-u0cadopt")
+    import scripts.corpus_fix_v2 as CF
+    CF.build(only=("u0cadopt",), map_path=tmp_path / "a1.jsonl")
+    with db.session() as s:
+        legacy = s.query(Work).filter(Work.v2_of == v1_id).one()
+        legacy_id = legacy.id
+        legacy.v2_of = None                 # 回到"回填前"的形态
+        s.commit()
+    out = CF.build(only=("u0cadopt",), map_path=tmp_path / "a2.jsonl")
+    assert out["created"] == [] and out["skipped"], "稳定键缺失时按血缘采纳，不许重复镜像"
+    with db.session() as s:
+        assert s.get(Work, legacy_id).v2_of == v1_id, "采纳时顺手补齐稳定键"
+        n = s.query(Work).filter(
+            Work.title == "斗罗大陆（唐家三少）-u0cadopt（corpus v2）").count()
+        assert n == 1
+
+
+def test_corpus_v2_backfill_clears_inherited_role_and_restores_key(tmp_path):
+    """只改生成器不回填 ≠ 修完：历史 v2 行的继承 role 要显式清零、稳定键要补上。"""
+    v1_id = _seed_v1_work("斗罗大陆（唐家三少）-u0cbf")
+    import scripts.corpus_fix_v2 as CF
+    out = CF.build(only=("u0cbf",), map_path=tmp_path / "b0.jsonl")
+    v2_id = [c for c in out["created"] if c["v1_work"] == v1_id][0]["v2_work"]
+    with db.session() as s:
+        # 复现污染现场：旧代码 role=seg.role 把 v1 的 benchmark 抄给了 v2
+        for seg in s.query(Segment).filter(Segment.work_id == v2_id).all():
+            seg.role = "benchmark"
+        w2 = s.get(Work, v2_id)
+        w2.v2_of = None                     # 回到回填前
+        for seg in s.query(Segment).filter(Segment.work_id == v1_id).all():
+            seg.role = "benchmark"          # v1 侧基准段（不许被动）
+        s.commit()
+
+    dry = CF.backfill(apply=False)
+    entry = [e for e in dry["v2_works"] if e["v2_work"] == v2_id][0]
+    assert entry["v2_of_before"] is None and entry["v2_of_after"] == v1_id, \
+        "稳定键靠段上的 corpus_v2_source 锚反查，不靠标题"
+    assert entry["role_before"] == {"benchmark": 2}
+    assert dry["role_cleared_total"].get("benchmark", 0) >= 2
+    with db.session() as s:
+        assert s.get(Work, v2_id).v2_of is None, "dry-run 一律不落库"
+        assert all(r.role == "benchmark" for r in
+                   s.query(Segment).filter(Segment.work_id == v2_id).all())
+
+    wet = CF.backfill(apply=True)
+    wentry = [e for e in wet["v2_works"] if e["v2_work"] == v2_id][0]
+    assert wentry["role_after"] == {} and wentry["lineage"] == "resolved"
+    with db.session() as s:
+        assert s.get(Work, v2_id).v2_of == v1_id, "apply 后稳定键必须落库"
+        assert all(r.role is None for r in
+                   s.query(Segment).filter(Segment.work_id == v2_id).all()), \
+            "回填后 v2 段仍带 role——基准侧仍是同文双份"
+        v1_roles = [r.role for r in s.query(Segment).filter(Segment.work_id == v1_id)
+                    .order_by(Segment.ordinal).all()]
+        assert v1_roles == ["benchmark", "benchmark"], "v1 侧基准段一律不动（基准只在 v1 维护）"
+        assert "[U0c backfill]" in (s.get(Work, v2_id).note or ""), "回填必须留痕可审计"
+    # 幂等：再跑一次没有新的可清
+    again = CF.backfill(apply=True)
+    aentry = [e for e in again["v2_works"] if e["v2_work"] == v2_id][0]
+    assert aentry["role_before"] == {} and aentry["v2_of_after"] == v1_id
+
+
+def test_corpus_v2_all_build_branches_leave_role_none(tmp_path):
+    """构造点唯一 + 覆盖所有分支：命中/未命中错字、integrity 缺失/非 JSON、带 role ——
+    v2 段一律 role=None，且 v1 标注原样。"""
+    db.init_db()
+    with db.session() as s:
+        w = Work(title="斗罗大陆（唐家三少）-u0cbranch", source="test:v2-seed")
+        s.add(w)
+        s.flush()
+        s.add_all([
+            Segment(work_id=w.id, ordinal=0, text="吴天宗的千雪来了。",
+                    text_clean="吴天宗的千雪来了。", integrity='{"src_ok": true}',
+                    role="benchmark", n_sentences=1, n_chars=11),
+            Segment(work_id=w.id, ordinal=1, text="干净的一段正文。",
+                    text_clean="干净的一段正文。", integrity=None,
+                    role="train", n_sentences=1, n_chars=8),
+            Segment(work_id=w.id, ordinal=2, text="另一段正文。",
+                    text_clean=None, integrity="{not json",
+                    role=None, n_sentences=1, n_chars=6),
+        ])
+        s.commit()
+        v1_id = w.id
+    import scripts.corpus_fix_v2 as CF
+    out = CF.build(only=("u0cbranch",), map_path=tmp_path / "br.jsonl")
+    mine = [c for c in out["created"] if c["v1_work"] == v1_id]
+    assert len(mine) == 1 and mine[0]["segments"] == 3
+    assert mine[0]["integrity_unparsed"] == 1, "非 JSON 分支要计数告警，不许静默"
+    with db.session() as s:
+        rows = (s.query(Segment).filter(Segment.work_id == mine[0]["v2_work"])
+                .order_by(Segment.ordinal).all())
+        assert [r.role for r in rows] == [None, None, None], \
+            "任一分支继承 role 都会让同文段双份入池/入基准"
+        assert rows[0].integrity is None or "corpus_v2_source" in rows[0].integrity
+        assert json.loads(rows[0].integrity)["corpus_v2_source"]
+        assert rows[1].integrity is None, "v1 integrity 缺失 → v2 也缺失"
+        assert rows[2].integrity == "{not json", "非 JSON 原样随行（人工补映射）"
+        v1_rows = (s.query(Segment).filter(Segment.work_id == v1_id)
+                   .order_by(Segment.ordinal).all())
+        assert [r.role for r in v1_rows] == ["benchmark", "train", None]
