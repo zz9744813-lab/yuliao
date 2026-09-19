@@ -660,6 +660,13 @@ def console_index():
     return {"modules": console.index()}
 
 
+@app.get("/console/ui", include_in_schema=False)
+def console_ui():
+    """第二界面评审台（T3）：16 模块只读外壳。写操作一律回第一界面。"""
+    return FileResponse(_STATIC / "console.html",
+                        headers={"Cache-Control": "no-store"})
+
+
 @app.get("/console/{module}")
 def console_module(module: str):
     """GET-only 数据面；聚合逻辑在 app/console.py（全部只读，回归测试钉住）。"""

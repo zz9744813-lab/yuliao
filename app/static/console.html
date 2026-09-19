@@ -1,0 +1,273 @@
+<!doctype html>
+<!-- 第二界面 · 评审台（总方案 §18 的 16 个模块页外壳，2026-09-19 T3）
+     只读：本页对后端只发 GET /console/*；任何写操作都回第一界面走既定流程。
+     导航不硬编码模块清单——从 GET /console 索引动态渲染（回归测试钉住），
+     后端加模块时本页自动出现新入口。数据全部现拉现渲，不落 localStorage。 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Language Genome · 第二界面评审台</title>
+<style>
+  :root{
+    --bg:#f6f2ea; --panel:#fffdf8; --ink:#2b2620; --dim:#8a8172;
+    --line:#e3dccd; --accent:#9a5b2d; --accent-ink:#fff;
+    --ok:#3e6b3f; --bad:#9c3d2e; --mono:ui-monospace,Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  a{color:var(--accent)}
+  header{display:flex;align-items:baseline;gap:14px;padding:14px 20px 10px;
+         border-bottom:1px solid var(--line)}
+  header h1{font-size:18px;margin:0;letter-spacing:.5px}
+  header .sub{color:var(--dim);font-size:12.5px}
+  header .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+  button{border:1px solid var(--line);background:var(--panel);color:var(--ink);
+         border-radius:6px;padding:5px 14px;font-size:13px;cursor:pointer}
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  #wrap{display:flex;min-height:calc(100vh - 58px)}
+  nav{width:200px;flex:none;border-right:1px solid var(--line);padding:12px 0;
+      background:var(--panel)}
+  nav .item{display:block;width:100%;text-align:left;border:0;background:none;
+            padding:8px 18px;font-size:14px;color:var(--ink);cursor:pointer;
+            border-left:3px solid transparent}
+  nav .item:hover{color:var(--accent)}
+  nav .item.on{border-left-color:var(--accent);color:var(--accent);
+               background:rgba(154,91,45,.07);font-weight:600}
+  nav .item .en{display:block;font-size:11px;color:var(--dim);font-family:var(--mono)}
+  main{flex:1;padding:18px 26px 60px;max-width:1100px}
+  #mod-title{margin:0 0 2px;font-size:17px}
+  #mod-slug{font-family:var(--mono);font-size:12px;color:var(--dim)}
+  #stamp{color:var(--dim);font-size:12px;margin:6px 0 14px}
+  #err{display:none;background:#f7e5e0;border:1px solid #dfb3a8;color:var(--bad);
+       border-radius:8px;padding:10px 14px;margin:10px 0;font-size:14px}
+  table{border-collapse:collapse;width:100%;margin:10px 0;background:var(--panel);
+        border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  th,td{border-bottom:1px solid var(--line);padding:6px 12px;text-align:left;
+        vertical-align:top;font-size:13.5px}
+  tr:last-child td{border-bottom:0}
+  th{background:rgba(154,91,45,.08);font-weight:600;white-space:nowrap}
+  td.k{width:220px;color:var(--dim);font-family:var(--mono);font-size:12.5px}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  .chip{display:inline-block;border:1px solid var(--line);border-radius:20px;
+        padding:1px 10px;margin:2px 4px 2px 0;font-size:12.5px;background:var(--panel)}
+  .chip b{font-family:var(--mono)}
+  .dim{color:var(--dim)}
+  .mono{font-family:var(--mono);font-size:12.5px}
+  .sec{margin:22px 0 6px;font-size:14px;color:var(--accent);font-weight:600;
+       letter-spacing:.5px;border-bottom:1px dashed var(--line);padding-bottom:4px}
+  .cell-long{max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .note{color:var(--dim);font-size:12.5px;margin:8px 0}
+  @media (max-width:760px){ nav{width:64px} nav .item .en,nav .item .zh{display:none}
+    main{padding:14px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>Language Genome · 第二界面评审台</h1>
+  <span class="sub">只读控制台 — 16 模块 · 数据现拉现渲</span>
+  <span class="right">
+    <span id="stamp" class="sub"></span>
+    <button id="btn-refresh" onclick="loadCurrent(true)">刷新本页</button>
+    <button onclick="loadAllPrefetch()" title="预取全部模块（只读 GET）">预取全部</button>
+  </span>
+</header>
+<div id="wrap">
+  <nav id="nav" aria-label="模块导航"></nav>
+  <main>
+    <div id="err"></div>
+    <h2 id="mod-title">加载中…</h2>
+    <div id="mod-slug"></div>
+    <div id="content"></div>
+    <p class="note">本界面只读。任何判定、导入、跑实验的操作请回
+      <a href="/">第一界面 · 盲评评审台</a>；写接口不经过这里，防止手滑改库。</p>
+  </main>
+</div>
+<script>
+// ── 基础工具 ────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let CURRENT = null;            // 当前 slug
+let INDEX = [];                // [{slug,title}] —— 全部来自 GET /console，不硬编码
+const CACHE = new Map();       // slug → {data, ts}；预取用，刷新时强制绕过
+
+async function getJSON(url){
+  const r = await fetch(url);
+  if(!r.ok){ throw new Error(`${url} → HTTP ${r.status}`); }
+  return r.json();
+}
+
+// ── 渲染器：JSON → HTML（一切值过 esc，不信任库内字符串）────
+const KEY_ZH = {
+  human_anchors:'人类段落(锚)', works:'作品数', semantic_frames:'语义帧',
+  candidates_ok:'候选(ok)', human_judged:'集霸已判', preference_pairs:'偏好对',
+  hard_cases:'硬例', benchmark_items:'基准条目', experiments:'实验',
+  active_experiments:'进行中', best_benchmark_model:'基准最佳模型',
+  llm_calls_total:'LLM调用总数', segments:'段落', chars_total:'总字数',
+  text_cleaned:'已清洗', integrity:'源完整性', roles:'段角色',
+  seg_versions:'切分版本', recent_works:'作品明细',
+  frames:'帧', by_granularity:'按粒度', by_status:'按状态',
+  by_extractor:'按抽取器', segments_covered:'覆盖段落', propositions:'命题分解',
+  leakage_scores:'泄漏分', candidates:'候选', by_model:'按模型',
+  by_prompt_version:'按口径', by_temperature:'按温度', tokens_total:'token 总量',
+  residuals_det:'确定性残差', residuals_sem:'语义残差',
+  strategies:'策略数', top_by_size:'最大簇', by_method:'按方法',
+  judge_runs:'评委判定', by_kind:'按类型', leaderboard:'排行榜',
+  abstain_total:'弃权数', winner_resolved:'胜方分布', batches:'批次',
+  review_items:'评审题', need_human:'需人工', need_ontology:'需本体',
+  need_strategy:'需策略', top_by_severity:'最严重', sets:'基准集',
+  runs:'运行次数', total:'总数', recent:'最近', reports:'报告文件',
+  registry:'模型登记表', usage_all_time:'用量(全时段)',
+  export_files:'导出文件', corruptions:'受控劣化', negative_pool_eligible:'负面库合格',
+  workflows:'工作流', jobs:'任务队列', window_hours:'窗口(时)',
+  snapshot:'观测快照', llm_mode:'LLM 模式', readonly:'只读',
+  modules:'模块', blind_review_prompt_versions:'盲评口径白名单',
+  servable_prompt_versions:'可端出口径',
+};
+
+const isPlain = v => v===null || ['string','number','boolean'].includes(typeof v);
+
+function cellHTML(v){
+  if(v===null || v===undefined || v==='') return '<span class="dim">—</span>';
+  if(typeof v==='boolean') return v?'<span style="color:var(--ok)">✓</span>'
+                                  :'<span class="dim">✗</span>';
+  if(typeof v==='number') return `<span class="num">${v}</span>`;
+  let s = esc(v);
+  if(s.length>140) s = `<span class="cell-long" title="${s}">${s}</span>`;
+  return s;
+}
+
+function tableHTML(rows, cols){
+  const thead = `<tr>${cols.map(c=>`<th>${esc(KEY_ZH[c]||c)}</th>`).join('')}</tr>`;
+  const tbody = rows.map(r =>
+    `<tr>${cols.map(c => `<td${isNumCol(r,c) ? ' class="num"' : ''}>${dictCell(r[c])}</td>`).join('')}</tr>`
+  ).join('');
+  return `<table><thead>${thead}</thead><tbody>${tbody}</tbody></table>`;
+}
+
+function isNumCol(r,c){ return typeof r[c]==='number'; }
+
+function dictCell(v){                       // 表格单元格里的标量/短数组
+  if(Array.isArray(v)) return v.length ? v.map(x=>cellHTML(x)).join(' ') : '<span class="dim">[]</span>';
+  return cellHTML(v);
+}
+
+function kvTable(obj){                      // dict → 键值表（嵌套递归）
+  const rows = Object.entries(obj).map(([k,v])=>{
+    if(isPlain(v)) return `<tr><td class="k">${esc(KEY_ZH[k]||k)}</td><td>${cellHTML(v)}</td></tr>`;
+    return `<tr><td class="k">${esc(KEY_ZH[k]||k)}</td><td>${render(v)}</td></tr>`;
+  });
+  return `<table><tbody>${rows.join('')}</tbody></table>`;
+}
+
+function listOfDicts(arr){
+  if(!arr.length) return '<span class="dim">[]</span>';
+  const cols = [...new Set(arr.slice(0,10).flatMap(r=>Object.keys(r)))];
+  return tableHTML(arr, cols);
+}
+
+function render(v){
+  if(Array.isArray(v)){
+    if(!v.length) return '<span class="dim">[]</span>';
+    if(v.every(isPlain)) return v.map(x=>`<span class="chip">${cellHTML(x)}</span>`).join('');
+    if(v.every(x=>x && typeof x==='object' && !Array.isArray(x))) return listOfDicts(v);
+    return v.map(x=>render(x)).join(' ');
+  }
+  if(v && typeof v==='object') return kvTable(v);
+  return cellHTML(v);
+}
+
+// 常见"数组 of dict"键位优先渲染成表，其余 dict 键值表
+const TABLE_KEYS = ['recent_works','top_by_size','leaderboard','top_by_severity',
+                    'sets','recent','usage_all_time','export_files','workflows'];
+
+function renderModule(data){
+  let html = '';
+  let scalars = {};                         // 连续标量合并成一张键值表（省纵向空间）
+  const flush = () => {
+    if(Object.keys(scalars).length){
+      html += kvTable(scalars);
+      scalars = {};
+    }
+  };
+  for(const [k,v] of Object.entries(data)){
+    const label = esc(KEY_ZH[k]||k);
+    if(TABLE_KEYS.includes(k) && Array.isArray(v)){
+      flush();
+      html += `<div class="sec">${label}</div>`;
+      html += v.length ? listOfDicts(v) : '<span class="dim">[]</span>';
+    } else if(typeof v==='string' && v.length>60){
+      flush();
+      html += `<div class="sec">${label}</div><div>${esc(v)}</div>`;
+    } else if(isPlain(v)){
+      scalars[k] = v;
+    } else {
+      flush();
+      html += `<div class="sec">${label}</div>` + render(v);
+    }
+  }
+  flush();
+  return html;
+}
+
+// ── 导航与取数 ──────────────────────────────────────────────
+function buildNav(){
+  $('nav').innerHTML = INDEX.map((m,i)=>
+    `<button class="item" data-slug="${esc(m.slug)}" onclick="loadModule('${esc(m.slug)}')">
+       <span class="zh">${esc(m.title)}</span><span class="en">${i+1}. ${esc(m.slug)}</span>
+     </button>`).join('');
+}
+
+function markNav(slug){
+  document.querySelectorAll('#nav .item').forEach(b=>
+    b.classList.toggle('on', b.dataset.slug===slug));
+}
+
+async function loadModule(slug, force){
+  markNav(slug); CURRENT = slug;
+  $('mod-title').textContent = '加载中…'; $('mod-slug').textContent = slug;
+  $('content').textContent = ''; $('err').style.display='none';
+  try{
+    const cached = CACHE.get(slug);
+    const body = (cached && !force) ? cached : await getJSON(`/console/${encodeURIComponent(slug)}`);
+    CACHE.set(slug, {data:body, ts:Date.now()});
+    $('mod-title').textContent = body.title || slug;
+    $('mod-slug').textContent = '/console/' + slug;
+    $('stamp').textContent = '数据时间 ' + new Date().toLocaleTimeString('zh-CN');
+    $('content').innerHTML = renderModule(body.data);
+  }catch(e){
+    // 取数失败必须显形（纪律④：静默失败比崩溃更糟）
+    $('err').textContent = '加载失败：' + e.message + '（可点「刷新本页」重试）';
+    $('err').style.display = 'block';
+    $('mod-title').textContent = slug;
+  }
+}
+
+function loadCurrent(force){ if(CURRENT) loadModule(CURRENT, true); }
+
+async function loadAllPrefetch(){          // 只读 GET 预取，加速翻页
+  for(const m of INDEX){
+    try{ CACHE.set(m.slug, {data: await getJSON('/console/'+encodeURIComponent(m.slug)), ts:Date.now()}); }
+    catch(e){ /* 预取失败不打断，进入该模块时会再试并显形 */ }
+  }
+  if(CURRENT) loadCurrent(true);
+}
+
+(async function init(){
+  try{
+    const idx = await getJSON('/console');
+    INDEX = idx.modules || [];
+    buildNav();
+    if(INDEX.length) await loadModule(INDEX[0].slug);   // 默认进 Dashboard
+    else throw new Error('GET /console 返回空模块表');
+  }catch(e){
+    $('err').textContent = '模块索引加载失败：' + e.message;
+    $('err').style.display = 'block';
+  }
+})();
+</script>
+</body>
+</html>
