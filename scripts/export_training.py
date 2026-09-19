@@ -603,6 +603,116 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
     return summary
 
 
+NEGATIVE_PROVENANCE = ("controlled_corruption（§7）——负面模式库：只标'不该这么写'，"
+                       "不假定原文即目标")
+
+
+def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
+    """负面模式库 —— 「只学避免哪些写法」的口径（§8 修订版路线 c，gold standard
+    未定前唯一可独立推进的训练路线）。
+
+    与 DPO 对（--pairs）的差别：不构造 chosen/rejected 偏好对（默认方向已被集霸
+    裁定否掉），只把**单变量劣化版**收成"不该这么写"的负面样例，原文附带作参照。
+
+    收录条件（2026-09-19 起 code 化——此前 v1 文件是临时命令写的、生产者未入库，
+    且早于病句重查的最终状态，混入已判病条目 = 变量污染）：
+    status=ok + drift_ok（与 DPO 对同款总闸；v2 复核前的老行 fact_consistent
+    只是缺省 False 不是判否，不单独设闸）+ 非 ungrammatical（§7.7）+
+    非控制臂 NEUTRAL_PARAPHRASE（§7.5 纪律 2）+ _excluded_reason(for_train=True)
+    隔离闸全过（§14 基准段/番外/水印/夹具/坏源）。
+
+    summary 同名落盘 `negatives_<ver>_summary.json`：条数 / 类型分布 / 语料分布。
+    """
+    dest = out_dir or OUT_DIR
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / f"corrupt_negatives_{ver}.jsonl"
+    sum_path = dest / f"negatives_{ver}_summary.json"
+    starts: dict = {}
+    n = n_bench = n_ex = n_wm = n_fix = n_bad = 0
+    n_control = n_ungram = n_missing = 0
+    by_type: dict[str, int] = {}
+    by_work: dict[str, int] = {}
+    with db.session() as s:
+        ccs = (s.query(ControlledCorruption)
+               .filter(ControlledCorruption.status == "ok")
+               .filter(ControlledCorruption.drift_ok == True)  # noqa: E712
+               .filter(ControlledCorruption.candidate_id.isnot(None)).all())
+        with path.open("w", encoding="utf-8") as f:
+            for cc in ccs:
+                seg = s.get(Segment, cc.segment_id)
+                if seg is None or not cc.text:
+                    n_missing += 1
+                    continue
+                reason = _excluded_reason(s, seg, starts, for_train=True)
+                if reason == "benchmark":
+                    n_bench += 1
+                    continue
+                if reason == "extras":
+                    n_ex += 1
+                    continue
+                if reason == "watermark":
+                    n_wm += 1
+                    continue
+                if reason == "fixture":
+                    n_fix += 1
+                    continue
+                if reason == "bad_src":
+                    n_bad += 1
+                    continue
+                if cc.corruption_type == "NEUTRAL_PARAPHRASE":
+                    n_control += 1
+                    continue
+                dr = cc.drift or {}
+                if isinstance(dr, str):
+                    try:
+                        dr = json.loads(dr)
+                    except Exception:
+                        dr = {}
+                if dr.get("ungrammatical"):
+                    n_ungram += 1
+                    continue
+                human = seg.text_clean or seg.text
+                prevs = (s.query(Segment)
+                         .filter(Segment.work_id == seg.work_id,
+                                 Segment.seg_version == seg.seg_version,
+                                 Segment.ordinal < seg.ordinal)
+                         .order_by(Segment.ordinal.desc()).limit(2).all())
+                ctx1 = ctx2 = ""
+                for pv_seg, slot in ((prevs[0] if len(prevs) > 0 else None, "p1"),
+                                     (prevs[1] if len(prevs) > 1 else None, "p2")):
+                    if pv_seg is None or looks_watermarked(pv_seg.text or ""):
+                        continue    # 上文宁可少给，不给脏的（§7.6 纪律 4）
+                    txt = (pv_seg.text_clean or pv_seg.text or "")
+                    if slot == "p1":
+                        ctx1 = txt
+                    else:
+                        ctx2 = txt
+                f.write(json.dumps({
+                    "id": cc.id,
+                    "failure_text": cc.text,
+                    "failure_variable": cc.variable,
+                    "failure_mode": cc.corruption_type,
+                    "source_human": human,
+                    "context_prev1": ctx1,
+                    "context_prev2": ctx2,
+                    "drift": dr,
+                    "provenance": NEGATIVE_PROVENANCE,
+                    "pv": cc.prompt_version,
+                }, ensure_ascii=False) + chr(10))
+                n += 1
+                by_type[cc.corruption_type] = by_type.get(cc.corruption_type, 0) + 1
+                work = s.get(Work, seg.work_id)
+                by_work[(work.title if work else "∅")] = by_work.get(work.title if work else "∅", 0) + 1
+    summary = {"path": str(path), "summary_path": str(sum_path), "n": n,
+               "by_type": by_type, "by_work": by_work,
+               "n_benchmark_held_out": n_bench, "n_extras_excluded": n_ex,
+               "n_watermark_excluded": n_wm, "n_fixture_excluded": n_fix,
+               "n_bad_src_excluded": n_bad, "n_control_excluded": n_control,
+               "n_ungrammatical_excluded": n_ungram, "n_skip_missing": n_missing}
+    sum_path.write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
+    return summary
+
+
 def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
     """改写训练对 —— 任务 13 补齐的第二种口径。
 
@@ -697,6 +807,8 @@ def main() -> None:
                     help="--pairs 的严格模式：只导集霸判「人类原文胜」的对（默认按假定方向导）")
     ap.add_argument("--from-frames", action="store_true",
                     help="从所有 L 主帧导出 SFT（frame→人类原文，无需人工标签）")
+    ap.add_argument("--negatives", action="store_true",
+                    help="负面模式库（corrupt_negatives_<ver>.jsonl；只标'不该这么写'）")
     ap.add_argument("--rm", action="store_true",
                     help="导出奖励模型训练数据（text/score/label_source，三来源标注）")
     ap.add_argument("--rewrite", action="store_true",
@@ -711,6 +823,16 @@ def main() -> None:
                            ('reconstruct_v1','recon_ctx_v1')""").fetchone()[0]
         con.close()
         print(f"dry-run：候选条目 {n} 条；策略提示 {len(strategy_hints())} 条")
+        return
+    if args.negatives:
+        q = export_negatives(args.ver)
+        print(f"负面库导出完成 → {q['path']}")
+        print(f"  共 {q['n']} 条（类型分布 {json.dumps(q['by_type'], ensure_ascii=False)}）")
+        print(f"  §14 隔离：基准 {q['n_benchmark_held_out']} / 番外 {q['n_extras_excluded']} / "
+              f"水印 {q['n_watermark_excluded']} / 夹具 {q['n_fixture_excluded']} / "
+              f"坏源 {q['n_bad_src_excluded']}；控制臂剔除 {q['n_control_excluded']}；"
+              f"病句剔除 {q['n_ungrammatical_excluded']}")
+        print(f"  summary → {q['summary_path']}")
         return
     if args.rm:
         q = export_rm(args.ver)

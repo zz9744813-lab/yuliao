@@ -368,3 +368,99 @@ def test_rewrite_isolation(tmp_path):
     assert q2["n_watermark_excluded"] == q1["n_watermark_excluded"] + 1
     for sid in (bs[0].id, es[6].id, ws_[0].id):
         assert not any(r["segment_id"] == sid for r in rows2), f"段 {sid} 不该进 rewrite"
+
+
+# ── 3. --negatives：负面模式库（2026-09-19 口径 code 化）──────
+
+def _neg_cc(s, exp, seg, cand, *, ctype="EXPLICITIZE", status="ok",
+            drift_ok=True, fact=True, drift=None, pv="corrupt_v1"):
+    s.add(ControlledCorruption(
+        experiment_id=exp, segment_id=seg.id, candidate_id=cand.id,
+        corruption_type=ctype, variable="x", generator_model="g",
+        prompt_version=pv, text=cand.text, n_chars=len(cand.text),
+        drift=drift if drift is not None else {}, drift_score=0.1,
+        fact_consistent=fact, drift_ok=drift_ok,
+        verify_model="v", verify_pv="sv_v1", status=status))
+
+
+def test_negatives_fields_and_eligible(tmp_path):
+    """合格劣化条目必须以完整字段进负面库（共享库 → 断言种子的存在性，不写死总数）。"""
+    db.init_db()
+    with db.session() as s:
+        exp = "EXP-NEG-T1"
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+            s.commit()
+        w, segs = _work_seg(s, "t-neg-a", [(0, TEXT, None, '{"src_ok": true}'),
+                                           (1, TEXT + "前文。", None, None)])
+        cand, _ = _cand(s, exp, segs[1])
+        _neg_cc(s, exp, segs[1], cand)
+        s.commit()
+        cc_id = s.query(ControlledCorruption).filter_by(experiment_id=exp).all()[-1].id
+    q = EX.export_negatives("negtest", out_dir=tmp_path)
+    rows = _rows(Path(q["path"]))
+    assert q["n"] == len(rows), "summary 条数必须与 jsonl 行数一致"
+    mine = [r for r in rows if r["id"] == cc_id]
+    assert len(mine) == 1, "刚种的合格负面没有出现在导出里"
+    r = mine[0]
+    for k in ("id", "failure_text", "failure_variable", "failure_mode",
+              "source_human", "provenance", "pv"):
+        assert k in r and r[k]
+    assert r["failure_text"] == cand.text
+    assert r["source_human"] == TEXT + "前文。"    # 原文=劣化所在段的人类侧
+    assert r["failure_mode"] == "EXPLICITIZE"
+
+
+def test_negatives_excludes_untreated_kinds(tmp_path):
+    """病句 / 控制臂 / 基准段 / 坏源 / 未过校验的都不进（变量不许被污染）。
+    测试库共享 → 用种子前后增量断言（交接 §9：断言写相对值）。"""
+    db.init_db()
+    with db.session() as s:
+        exp = "EXP-NEG-T2"
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+            s.commit()
+    q0 = EX.export_negatives("negtest2", out_dir=tmp_path)
+    with db.session() as s:
+        exp = "EXP-NEG-T2"
+        w, segs = _work_seg(s, "t-neg-b", [
+            (0, TEXT, "benchmark", '{"src_ok": true}'),      # 基准段
+            (1, TEXT, None, '{"src_ok": false}'),            # 坏源
+            (2, TEXT, None, '{"src_ok": true}'),             # 好：病句位
+            (3, TEXT, None, '{"src_ok": true}'),             # 好：控制臂位
+            (4, TEXT, None, '{"src_ok": true}'),             # 好：未过校验位
+            (5, TEXT, None, '{"src_ok": true}'),             # 好：合格位
+        ])
+        for i in (0, 1, 2, 3, 4, 5):
+            cand, _ = _cand(s, exp, segs[i])
+            _neg_cc(s, exp, segs[i], cand,
+                    ctype="EXPLICITIZE" if i != 3 else "NEUTRAL_PARAPHRASE",
+                    status="rejected_drift" if i == 4 else "ok",
+                    drift={"ungrammatical": True} if i == 2 else {})
+        s.commit()
+    q = EX.export_negatives("negtest2", out_dir=tmp_path)
+    d = lambda k: q[k] - q0[k]
+    assert d("n") == 1, f"6 条种子里应只有 1 条合格负面，实际增量 {d('n')}"
+    assert d("n_benchmark_held_out") == 1 and d("n_bad_src_excluded") == 1
+    assert d("n_control_excluded") == 1 and d("n_ungrammatical_excluded") == 1
+    assert d("n_skip_missing") == 0          # status!=ok 在查询层就被滤掉（不算 missing）
+
+
+def test_negatives_summary_matches_jsonl(tmp_path):
+    """summary 的条数/类型分布必须与 jsonl 逐行一致（共享库上只断内部一致性）。"""
+    db.init_db()
+    with db.session() as s:
+        exp = "EXP-NEG-T3"
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+            s.commit()
+        w, segs = _work_seg(s, "t-neg-c", [(0, TEXT, None, '{"src_ok": true}')])
+        cand, _ = _cand(s, exp, segs[0])
+        _neg_cc(s, exp, segs[0], cand, ctype="REDUNDANCY")
+        s.commit()
+    q = EX.export_negatives("negtest3", out_dir=tmp_path)
+    rows = _rows(Path(q["path"]))
+    from collections import Counter
+    assert q["n"] == len(rows)
+    assert Counter(r["failure_mode"] for r in rows) == Counter(q["by_type"])
+    assert q["summary_path"].endswith("negatives_negtest3_summary.json")
