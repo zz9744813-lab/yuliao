@@ -158,11 +158,12 @@ def test_human_vs_ai_builder_whitelist_and_answer():
     from app.config import BLIND_REVIEW_PROMPT_VERSIONS
     _seed_pair("hvai", ctype="EXPLICITIZE")     # 自建基准段+帧，不依赖共享库状态
     with db.session() as s:
-        seg = s.query(Segment).filter_by(role="benchmark").filter(
-            Segment.id.in_([x[0] for x in s.query(
-                Frame.segment_id).distinct().all()])).first()
-        assert seg is not None, "找不到带帧的基准段"
+        seg = (s.query(Segment).filter_by(role="benchmark")
+               .join(Work, Work.id == Segment.work_id)
+               .filter(Work.title == "t-sub-hvai").first())
+        assert seg is not None, "自建基准段没找到"
         fr = s.query(Frame).filter_by(segment_id=seg.id).first()
+        assert fr is not None
         for pv, status in (("reconstruct_v1", "ok"), ("recon_ctx_v1", "ok"),
                            ("recon_ctxonly_v1", "ok"), ("reconstruct_v1", "failed")):
             s.add(Candidate(experiment_id=EXP, frame_id=fr.id, segment_id=seg.id,
