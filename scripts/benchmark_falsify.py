@@ -2,7 +2,7 @@
 
 2026-09-19 起 nat-v1 / hvai-v1 出现 ~0.9 的高读数——正是交接 §0.7 附的那条教训
 「显著优于此前瓶颈的结果，先设计一个最可能否掉它的检验」的适用场景。本工具对
-benchmark_runs 里的已有跑分做四项检验，**只读库、零 LLM 成本**：
+benchmark_runs 里的已有跑分做六项检验，**只读库、零 LLM 成本**：
 
 · N0 聚类置换检验：题目聚在少量段落上（nat-v1 201 题只来自 15 段），n 不是独立
   样本数（交接 §9 统计 8）。零假设下对**每段**做符号翻转（段内所有题的 A/B 对调
@@ -14,9 +14,15 @@ benchmark_runs 里的已有跑分做四项检验，**只读库、零 LLM 成本*
   的"过线"不算过线。
 · N3 未答率：n / 集合条目。failed_parse 偏多（deepseek 实测 ~9%）会静默缩水 n，
   必须显形（纪律④）。
+· N4 长度基线（军师 P1-3）：与"只选较短文本"的简单规则配对比较——位置随机化了
+  但长度没有，不显著优于它就不算真信号。
+· N5 长度分层正确率（指标硬化）：把已答题按「人类答案在更短侧 / 更长侧」分两层
+  （等长的单列）。两层各 ≥3 题时，"人类侧更长"层 acc < 0.5 ⇒ 模型在那半边接近
+  瞎猜，读数是纯长度驱动——不许 pass（只报总 acc 掩盖这个混淆）。
 
 结论措辞是**分级的**（provisional 纪律）：
   pass  = N0 p<0.05 且 N2 波动 < 0.05 且 N1 |偏差| < 0.2 且 N3 >= 0.9
+          且显著优于"只选较短"基线，且（两层各 ≥3 题时）"人类侧更长"层 acc >= 0.5
   weak  = N0 过但其它有一项存疑
   fail  = N0 未过
 用法：
@@ -41,7 +47,8 @@ from app.models import BenchmarkItem, BenchmarkRun  # noqa: E402
 FLIP_B = 20000          # 聚类置换重排次数
 CLUST_B = 5000          # 段级 bootstrap 次数
 SEED = 20260919         # 检验本身也要可复现
-GATE = {"perm_p": 0.05, "sensitivity": 0.05, "pos_bias": 0.2, "answered": 0.9}
+GATE = {"perm_p": 0.05, "sensitivity": 0.05, "pos_bias": 0.2, "answered": 0.9,
+        "long_layer_acc": 0.5, "long_layer_min_n": 3}   # N5：长层下限与参与判定的最小层规模
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -87,7 +94,7 @@ def _binom_two_sided(k: int, n: int) -> float:
 
 def falsify_run(meta: dict, run: dict, n_items: int | None = None,
                 lengths: dict | None = None) -> dict:
-    """对单个 run 做四项检验。picks 缺的题按未答处理（不进分母，但进 N3）。
+    """对单个 run 做六项检验。picks 缺的题按未答处理（不进分母，但进 N3）。
 
     N3 的分母是**集合条目数**（n_items）——DB 里 run.n 是已答数，用它当分母
     恒为 1，failed_parse 缩水 n 会被静默放过（2026-09-19 deepseek nat-v1 实测 19 题未答）。
@@ -174,6 +181,35 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     disc = model_beat + baseline_beat
     beat_p = _binom_two_sided(min(model_beat, baseline_beat), disc) if disc else 1.0
 
+    # N5（指标硬化）长度分层正确率：把已答题按「人类答案在更短侧 / 更长侧」分两层
+    # （等长的单列 equal）。总 acc 一高就把长度混淆盖住了——模型完全可能只在
+    # "人类侧更短"的题上对（等价于免费"选短"规则）。分母 = 该层已答数。
+    strat_n = {"short": 0, "long": 0, "equal": 0}
+    strat_hit = {"short": 0, "long": 0, "equal": 0}
+    length_strat = None
+    if lengths:
+        for iid, pick in answered.items():
+            la, lb = lengths.get(iid, (0, 0))
+            if la == lb:
+                layer = "equal"
+            elif (la < lb) == (meta[iid][1] == "A"):
+                layer = "short"                  # 人类答案在更短侧
+            else:
+                layer = "long"                   # 人类答案在更长侧
+            strat_n[layer] += 1
+            strat_hit[layer] += (pick == meta[iid][1])
+        length_strat = {g: {"n": strat_n[g],
+                            "acc": round(strat_hit[g] / strat_n[g], 4) if strat_n[g] else None}
+                        for g in ("short", "long", "equal")}
+
+    # 两层都 ≥ long_layer_min_n 时参与判定：较长层（人类侧更长）acc < 0.5 ⇒
+    # 模型在那半边接近瞎猜 = 纯长度驱动，不许 pass。任一层不足 ⇒ None 不参与。
+    if length_strat and strat_n["short"] >= GATE["long_layer_min_n"] \
+            and strat_n["long"] >= GATE["long_layer_min_n"]:
+        ls_check = strat_hit["long"] / strat_n["long"] >= GATE["long_layer_acc"]
+    else:
+        ls_check = None
+
     checks = {
         "perm_p": perm_p < GATE["perm_p"],
         "sensitivity": sensitivity < GATE["sensitivity"],
@@ -181,8 +217,10 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
         "answered": answered_rate >= GATE["answered"],
         "beats_length": (len_acc is not None and acc > len_acc
                          and beat_p < 0.05),   # P1-3：不显著优于"只选较短"不许 pass
+        "length_stratified": ls_check,         # N5：None=层太小不参与判定
     }
-    verdict = ("pass" if all(checks.values())
+    gate_ok = all(v for v in checks.values() if v is not None)   # None 不阻塞
+    verdict = ("pass" if gate_ok
                else "fail" if not checks["perm_p"]
                else "weak")
     return {"model": run["model"], "n_answered": n_ans, "acc": round(acc, 4),
@@ -197,6 +235,7 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
                                  "n_pairs": n_both,
                                  "model_beat": model_beat, "baseline_beat": baseline_beat,
                                  "sign_p": round(beat_p, 4)},
+            "length_strat": length_strat,
             "checks": checks, "verdict": verdict, "n_answered": run["n"]}
 
 
@@ -208,6 +247,17 @@ def falsify_set(set_id: str) -> dict:
                      for r in runs]}
 
 
+def _fmt_length_strat(strat: dict | None) -> str:
+    """主表"分层acc(短/长)"单元格："0.95/0.60 (n=8/12)"；无长度数据或任一层
+    为空（acc 不可算）显示 —。"""
+    if not strat:
+        return "—"
+    s, l = strat["short"], strat["long"]
+    if s["acc"] is None or l["acc"] is None:
+        return "—"
+    return f"{s['acc']:.2f}/{l['acc']:.2f} (n={s['n']}/{l['n']})"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", required=True)
@@ -215,11 +265,11 @@ def main() -> None:
     args = ap.parse_args()
     out = falsify_set(args.set)
     if args.md:
-        print("| 模型 | 已答acc | 全题成功率 | 段bootstrap CI | 置换p(段翻转) | 长度基线(超它?) | pickA/ansA | 留一波动 | 未答率 | 判定 |")
-        print("|---|---|---|---|---|---|---|---|---|---|")
+        print("| 模型 | 已答acc | 全题成功率 | 段bootstrap CI | 置换p(段翻转) | 长度基线(超它?) | 分层acc(短/长) | pickA/ansA | 留一波动 | 未答率 | 判定 |")
+        print("|---|---|---|---|---|---|---|---|---|---|---|")
         for r in out["runs"]:
             if "acc" not in r:
-                print(f"| {r['model']} | — | — | — | — | — | — | — | — | fail（{r.get('reason','')}）|")
+                print(f"| {r['model']} | — | — | — | — | — | — | — | — | — | fail（{r.get('reason','')}）|")
                 continue
             lb = r["length_baseline"]
             pb = r["pos_bias"]
@@ -227,6 +277,7 @@ def main() -> None:
                   f"| [{r['cluster_ci'][0]:.3f},{r['cluster_ci'][1]:.3f}] "
                   f"| {r['perm_p']:.4f}（{r['flip_groups']}段）"
                   f"| {lb['acc']:.3f}（{lb['model_beat']}:{lb['baseline_beat']} p={lb['sign_p']:.3f}）"
+                  f"| {_fmt_length_strat(r['length_strat'])} "
                   f"| {r['pick_a_rate']:.2f}/{r['answer_a_rate']:.2f} "
                   f"| {r['sensitivity']:.3f} | {r['answered_rate']:.2f} | **{r['verdict']}** |")
     else:
