@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工作流 · 中文文风研究台</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0e1116;
+    color: #c9d1d9;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 24px;
+    line-height: 1.6;
+  }
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* 头部 */
+  header { margin-bottom: 24px; }
+  h1 { font-size: 22px; font-weight: 600; color: #e6edf3; }
+  .subtitle { font-size: 13px; color: #8b949e; margin-top: 4px; }
+
+  /* 提示条 */
+  .alert {
+    display: none;
+    background: rgba(210, 153, 34, 0.12);
+    border: 1px solid #9e6a03;
+    color: #e3b341;
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+    margin-bottom: 20px;
+  }
+  .alert.show { display: block; }
+
+  /* 统计卡 */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: #161b22;
+    border: 1px solid #263041;
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .stat-value {
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+    font-size: 26px;
+    font-weight: 600;
+    color: #58a6ff;
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-label { font-size: 12px; color: #8b949e; margin-top: 6px; }
+
+  /* 主内容卡片 */
+  .card {
+    background: #161b22;
+    border: 1px solid #263041;
+    border-radius: 10px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .card-header {
+    padding: 14px 18px;
+    border-bottom: 1px solid #263041;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .card-title { font-size: 15px; font-weight: 600; color: #e6edf3; }
+  .card-note { font-size: 12px; color: #8b949e; }
+
+  /* 表格 */
+  .table-wrap { overflow-x: auto; max-height: 520px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: #161b22;
+    color: #8b949e;
+    font-weight: 600;
+    text-align: left;
+    padding: 10px 16px;
+    border-bottom: 1px solid #263041;
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 11px 16px;
+    border-bottom: 1px solid #21262d;
+    vertical-align: middle;
+  }
+  tbody tr:hover { background: rgba(88, 166, 255, 0.04); }
+  .num { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  /* 进度条 */
+  .progress {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 160px;
+  }
+  .bar-track {
+    flex: 1;
+    height: 8px;
+    background: #21262d;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    background: #58a6ff;
+    border-radius: 4px;
+    transition: width .4s ease;
+  }
+  .bar-fill.done { background: #3fb950; }
+  .bar-fill.blocked { background: #f85149; }
+  .pct { font-size: 12px; color: #8b949e; min-width: 42px; text-align: right; }
+
+  /* 状态徽章 */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    border: 1px solid transparent;
+    white-space: nowrap;
+  }
+  .badge-done    { color: #3fb950; border-color: rgba(63,185,80,.4);  background: rgba(63,185,80,.1); }
+  .badge-active  { color: #58a6ff; border-color: rgba(88,166,255,.4); background: rgba(88,166,255,.1); }
+  .badge-blocked { color: #f85149; border-color: rgba(248,81,73,.4);  background: rgba(248,81,73,.1); }
+  .badge-pending { color: #8b949e; border-color: #30363d;             background: rgba(139,148,158,.08); }
+
+  .empty {
+    padding: 48px 20px;
+    text-align: center;
+    color: #8b949e;
+    font-size: 14px;
+  }
+  footer { font-size: 12px; color: #8b949e; text-align: right; }
+
+  @media (max-width: 640px) {
+    body { padding: 14px; }
+    .stat-value { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <h1>工作流</h1>
+    <div class="subtitle">方案 §10 工作流 A–E 的完成度与当前卡点</div>
+  </header>
+
+  <div class="alert" id="alert">数据接口不可用，以下为示例结构</div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title">工作流 A–E 明细</span>
+      <span class="card-note" id="note"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>工作流</th>
+            <th>名称</th>
+            <th>状态</th>
+            <th>完成度</th>
+            <th>当前卡点</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="empty">暂无数据</div>
+    </div>
+  </div>
+
+  <footer id="footer"></footer>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmtNum(n) {
+    if (n === null || n === undefined || isNaN(Number(n))) return '—';
+    return Number(n).toLocaleString('zh-CN');
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function fmtTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return esc(iso);
+    var p = function (x) { return String(x).padStart(2, '0'); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+           ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  function statusBadge(status) {
+    var s = String(status || '').toLowerCase();
+    var map = {
+      'done': ['badge-done', '已完成'],
+      'completed': ['badge-done', '已完成'],
+      '完成': ['badge-done', '已完成'],
+      'active': ['badge-active', '进行中'],
+      'in_progress': ['badge-active', '进行中'],
+      '进行中': ['badge-active', '进行中'],
+      'blocked': ['badge-blocked', '卡点'],
+      '卡点': ['badge-blocked', '卡点'],
+      'pending': ['badge-pending', '待启动'],
+      '待启动': ['badge-pending', '待启动']
+    };
+    var m = map[s];
+    if (m) return '<span class="badge ' + m[0] + '">' + m[1] + '</span>';
+    return '<span class="badge badge-pending">' + esc(status || '未知') + '</span>';
+  }
+
+  function progressCell(pct, status) {
+    var v = Number(pct);
+    if (isNaN(v)) return '<span style="color:#8b949e">—</span>';
+    v = Math.max(0, Math.min(100, v));
+    var s = String(status || '').toLowerCase();
+    var cls = (v >= 100 || s === 'done' || s === 'completed' || s === '完成') ? 'done'
+            : (s === 'blocked' || s === '卡点') ? 'blocked' : '';
+    return '<div class="progress">' +
+      '<div class="bar-track"><div class="bar-fill ' + cls + '" style="width:' + v + '%"></div></div>' +
+      '<span class="pct num">' + v + '%</span></div>';
+  }
+
+  /* 渲染统计卡 */
+  function renderStats(stats) {
+    var box = $('stats');
+    box.innerHTML = '';
+    if (!Array.isArray(stats) || stats.length === 0) {
+      // 空结构占位
+      ['工作流总数', '已完成', '进行中', '卡点'].forEach(function (label) {
+        box.innerHTML += '<div class="stat-card">' +
+          '<div class="stat-value">—</div>' +
+          '<div class="stat-label">' + esc(label) + '</div></div>';
+      });
+      return;
+    }
+    stats.forEach(function (st) {
+      var card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = '<div class="stat-value">' + fmtNum(st.value) + '</div>' +
+                       '<div class="stat-label">' + esc(st.label) + '</div>';
+      box.appendChild(card);
+    });
+  }
+
+  /* 渲染表格 */
+  function renderRows(rows) {
+    var tbody = $('tbody');
+    tbody.innerHTML = '';
+    var has = Array.isArray(rows) && rows.length > 0;
+    $('empty').style.display = has ? 'none' : 'block';
+    if (!has) return;
+
+    rows.forEach(function (r) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td class="num" style="color:#58a6ff;font-weight:600">' + esc(r.id || r.code || r.workflow || '—') + '</td>' +
+        '<td>' + esc(r.name || r.title || '—') + '</td>' +
+        '<td>' + statusBadge(r.status) + '</td>' +
+        '<td>' + progressCell(r.progress != null ? r.progress : r.completion, r.status) + '</td>' +
+        '<td style="color:#8b949e">' + esc(r.blocker || r.bottleneck || r.current_blocker || '—') + '</td>' +
+        '<td class="num" style="color:#8b949e">' + fmtTime(r.updated_at || r.updatedAt) + '</td>';
+      tbody.appendChild(tr);
+    });
+  }
+
+  function render(data) {
+    renderStats(data && data.stats);
+    renderRows(data && data.rows);
+    $('note').textContent = (data && data.note) || '';
+    $('footer').textContent = (data && data.generated_at)
+      ? '数据生成时间：' + fmtTime(data.generated_at) : '';
+  }
+
+  /* 加载数据 */
+  fetch('/console/workflow')
+    .then(function (res) {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    })
+    .then(function (data) { render(data); })
+    .catch(function () {
+      $('alert').classList.add('show');
+      render({ stats: [], rows: [], note: '接口返回真实数值后覆盖' });
+    });
+})();
+</script>
+</body>
+</html>

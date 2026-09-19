@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>表达残差 · 中文文风研究台</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0e1116; color:#c9d1d9;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 24px; line-height: 1.5;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  header { margin-bottom: 20px; }
+  header h1 { font-size: 22px; color:#e6edf3; font-weight: 600; }
+  header p { font-size: 13px; color:#8b949e; margin-top: 4px; }
+
+  .banner {
+    display:none; background:#3d2e00; border:1px solid #9e6a03; color:#e3b341;
+    padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:16px;
+  }
+  .banner.show { display:block; }
+
+  .cards { display:flex; flex-wrap:wrap; gap:12px; margin-bottom:20px; }
+  .card {
+    background:#161b22; border:1px solid #263041; border-radius:10px;
+    padding:16px 18px; flex:1 1 180px; min-width:160px;
+  }
+  .card .value { font-size:26px; font-weight:700; color:#58a6ff; }
+  .card .label { font-size:12px; color:#8b949e; margin-top:6px; }
+
+  .panel {
+    background:#161b22; border:1px solid #263041; border-radius:10px;
+    overflow:hidden;
+  }
+  .panel-head {
+    padding:14px 18px; border-bottom:1px solid #263041;
+    display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
+  }
+  .panel-head h2 { font-size:15px; color:#e6edf3; font-weight:600; }
+  .panel-head .meta { font-size:12px; color:#8b949e; }
+
+  .table-wrap { max-height:560px; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th {
+    position:sticky; top:0; z-index:2;
+    background:#1c2330; color:#8b949e; font-weight:600; text-align:left;
+    padding:10px 14px; border-bottom:1px solid #263041; white-space:nowrap;
+  }
+  tbody td { padding:10px 14px; border-bottom:1px solid #21262e; white-space:nowrap; }
+  tbody tr:hover { background:#1a2230; }
+  td.num { text-align:right; }
+
+  .tag {
+    display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px;
+    border:1px solid #263041;
+  }
+  .tag.sig { color:#f0883e; border-color:#6e3d1a; background:#2a1d12; }
+  .tag.nosig { color:#8b949e; }
+  .tag.sem { color:#58a6ff; border-color:#1f3a5f; background:#12233a; }
+
+  .bar-cell { display:flex; align-items:center; gap:8px; }
+  .bar { height:8px; border-radius:4px; background:#58a6ff; min-width:2px; }
+  .bar.neg { background:#f0883e; }
+
+  .empty { padding:48px 16px; text-align:center; color:#8b949e; font-size:14px; }
+
+  footer { margin-top:16px; font-size:12px; color:#8b949e; }
+
+  @media (max-width:640px) {
+    body { padding:14px; }
+    .card { flex:1 1 45%; min-width:130px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>表达残差 <span style="color:#58a6ff">Residual</span></h1>
+  <p>中文文风研究台 · 29 项确定性残差指标（人类 vs AI）、语义残差标签与显著性检验</p>
+</header>
+
+<div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+
+<section class="cards" id="cards"></section>
+
+<section class="panel">
+  <div class="panel-head">
+    <h2>残差指标明细</h2>
+    <span class="meta" id="genAt"></span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>指标</th>
+          <th style="text-align:right">人类均值</th>
+          <th style="text-align:right">AI 均值</th>
+          <th style="text-align:right">残差 Δ</th>
+          <th>残差强度</th>
+          <th style="text-align:right">p 值</th>
+          <th>显著性</th>
+          <th>语义残差标签</th>
+        </tr>
+      </thead>
+      <tbody id="tbody">
+        <tr><td colspan="9" class="empty">暂无数据</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<footer id="note"></footer>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+
+  function fmt(n) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return Number(n).toLocaleString('zh-CN');
+  }
+  function fmtF(n, d) {
+    if (n === null || n === undefined || isNaN(n)) return '—';
+    return Number(n).toLocaleString('zh-CN', { minimumFractionDigits: d, maximumFractionDigits: d });
+  }
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c];
+    });
+  }
+
+  function renderStats(stats) {
+    var box = $('cards');
+    box.innerHTML = '';
+    if (!Array.isArray(stats) || !stats.length) {
+      box.innerHTML = '<div class="card"><div class="value mono">—</div><div class="label">暂无统计数据</div></div>';
+      return;
+    }
+    stats.forEach(function (s) {
+      var v = (typeof s.value === 'number') ? fmt(s.value) : esc(s.value);
+      var div = document.createElement('div');
+      div.className = 'card';
+      div.innerHTML = '<div class="value mono">' + v + '</div><div class="label">' + esc(s.label) + '</div>';
+      box.appendChild(div);
+    });
+  }
+
+  function renderRows(rows) {
+    var tb = $('tbody');
+    tb.innerHTML = '';
+    if (!Array.isArray(rows) || !rows.length) {
+      tb.innerHTML = '<tr><td colspan="9" class="empty">暂无数据</td></tr>';
+      return;
+    }
+    var maxAbs = 0;
+    rows.forEach(function (r) {
+      var d = Math.abs(Number(r.residual != null ? r.residual : r.delta));
+      if (!isNaN(d) && d > maxAbs) maxAbs = d;
+    });
+    rows.forEach(function (r, i) {
+      var name  = r.metric != null ? r.metric : (r.name != null ? r.name : r.label);
+      var human = r.human_mean != null ? r.human_mean : r.human;
+      var ai    = r.ai_mean != null ? r.ai_mean : r.ai;
+      var res   = r.residual != null ? r.residual : r.delta;
+      var p     = r.p_value != null ? r.p_value : r.p;
+      var sig   = r.significant != null ? !!r.significant : (typeof p === 'number' && p < 0.05);
+      var tag   = r.semantic_tag != null ? r.semantic_tag : r.tag;
+
+      var resN = Number(res);
+      var w = (maxAbs > 0 && !isNaN(resN)) ? Math.max(2, Math.abs(resN) / maxAbs * 120) : 2;
+      var barCls = (!isNaN(resN) && resN < 0) ? 'bar neg' : 'bar';
+      var resTxt = isNaN(resN) ? '—' : (resN > 0 ? '+' : '') + fmtF(resN, 4);
+
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td class="mono" style="color:#8b949e">' + (i + 1) + '</td>' +
+        '<td>' + esc(name) + '</td>' +
+        '<td class="num mono">' + fmtF(human, 4) + '</td>' +
+        '<td class="num mono">' + fmtF(ai, 4) + '</td>' +
+        '<td class="num mono" style="color:' + (!isNaN(resN) && resN < 0 ? '#f0883e' : '#58a6ff') + '">' + resTxt + '</td>' +
+        '<td><div class="bar-cell"><div class="' + barCls + '" style="width:' + w + 'px"></div></div></td>' +
+        '<td class="num mono">' + (typeof p === 'number' ? fmtF(p, 4) : '—') + '</td>' +
+        '<td><span class="tag ' + (sig ? 'sig' : 'nosig') + '">' + (sig ? '显著' : '不显著') + '</span></td>' +
+        '<td>' + (tag ? '<span class="tag sem">' + esc(tag) + '</span>' : '<span style="color:#8b949e">—</span>') + '</td>';
+      tb.appendChild(tr);
+    });
+  }
+
+  function showBanner() { $('banner').classList.add('show'); }
+
+  function load() {
+    fetch('/console/residual')
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(function (data) {
+        renderStats(data.stats);
+        renderRows(data.rows);
+        if (data.generated_at) $('genAt').textContent = '生成时间：' + data.generated_at;
+        if (data.note) $('note').textContent = data.note;
+      })
+      .catch(function () {
+        showBanner();
+        renderStats([]);
+        renderRows([]);
+      });
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

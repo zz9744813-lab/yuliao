@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>语料库 · 中文文风研究台</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0e1116; color:#c9d1d9;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding:24px; min-height:100vh;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  header { margin-bottom:20px; }
+  header h1 { font-size:22px; font-weight:600; color:#c9d1d9; }
+  header p { font-size:13px; color:#8b949e; margin-top:6px; }
+  #banner {
+    display:none; background:rgba(210,153,34,.12); border:1px solid #d29922;
+    color:#e3b341; font-size:13px; padding:10px 14px; border-radius:10px; margin-bottom:16px;
+  }
+  .stats-grid {
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(200px,1fr));
+    gap:14px; margin-bottom:20px;
+  }
+  .stat-card {
+    background:#161b22; border:1px solid #263041; border-radius:10px; padding:16px 18px;
+  }
+  .stat-card .value { font-size:26px; font-weight:700; color:#58a6ff; }
+  .stat-card .label { font-size:12px; color:#8b949e; margin-top:6px; }
+  .panel {
+    background:#161b22; border:1px solid #263041; border-radius:10px; overflow:hidden;
+  }
+  .panel-head {
+    padding:14px 18px; border-bottom:1px solid #263041;
+    display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
+  }
+  .panel-head h2 { font-size:15px; font-weight:600; }
+  .panel-head .meta { font-size:12px; color:#8b949e; }
+  .table-wrap { overflow-x:auto; max-height:560px; overflow-y:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th {
+    position:sticky; top:0; z-index:2; background:#161b22;
+    text-align:left; padding:10px 14px; color:#8b949e; font-weight:600;
+    border-bottom:1px solid #263041; white-space:nowrap;
+  }
+  tbody td { padding:10px 14px; border-bottom:1px solid #21262d; color:#c9d1d9; }
+  tbody tr:hover { background:rgba(88,166,255,.05); }
+  .empty { padding:40px 0; text-align:center; color:#8b949e; font-size:13px; }
+  .tag {
+    display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px;
+    border:1px solid #263041; color:#8b949e;
+  }
+  .tag.ok { color:#3fb950; border-color:rgba(63,185,80,.4); }
+  .tag.warn { color:#e3b341; border-color:rgba(210,153,34,.4); }
+  .tag.bad { color:#f85149; border-color:rgba(248,81,73,.4); }
+  footer { margin-top:16px; font-size:12px; color:#8b949e; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>语料库 <span style="color:#58a6ff;">Corpus</span></h1>
+  <p>作品 · 段落浏览 / 来源完整性 / 清洗与水印过滤结果 / 分词 v2 统计</p>
+</header>
+
+<div id="banner">数据接口不可用，以下为示例结构</div>
+
+<div class="stats-grid" id="stats"></div>
+
+<div class="panel">
+  <div class="panel-head">
+    <h2>语料明细</h2>
+    <span class="meta" id="rowCount"></span>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead id="thead"><tr><th>暂无数据</th></tr></thead>
+      <tbody id="tbody"><tr><td class="empty">暂无数据</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<footer id="foot"></footer>
+
+<script>
+(function () {
+  const $ = s => document.querySelector(s);
+  const fmt = n => (typeof n === 'number' && isFinite(n)) ? n.toLocaleString('zh-CN') : String(n ?? '—');
+
+  function showBanner() { $('#banner').style.display = 'block'; }
+
+  function renderStats(stats) {
+    const box = $('#stats');
+    box.innerHTML = '';
+    if (!Array.isArray(stats) || stats.length === 0) {
+      box.innerHTML = '<div class="stat-card"><div class="value mono">—</div><div class="label">暂无数据</div></div>';
+      return;
+    }
+    stats.forEach(s => {
+      const d = document.createElement('div');
+      d.className = 'stat-card';
+      d.innerHTML = '<div class="value mono">' + fmt(s.value) + '</div>' +
+                    '<div class="label"></div>';
+      d.querySelector('.label').textContent = s.label ?? '';
+      box.appendChild(d);
+    });
+  }
+
+  function tagFor(key, val) {
+    const v = String(val);
+    if (/完整|通过|已清洗|成功|ok|true/i.test(v)) return '<span class="tag ok">' + v + '</span>';
+    if (/部分|警告|待|pending|warn/i.test(v)) return '<span class="tag warn">' + v + '</span>';
+    if (/缺失|失败|过滤|error|false/i.test(v)) return '<span class="tag bad">' + v + '</span>';
+    return v;
+  }
+
+  function renderRows(rows) {
+    const thead = $('#thead'), tbody = $('#tbody');
+    if (!Array.isArray(rows) || rows.length === 0) {
+      thead.innerHTML = '<tr><th>暂无数据</th></tr>';
+      tbody.innerHTML = '<tr><td class="empty">暂无数据</td></tr>';
+      $('#rowCount').textContent = '';
+      return;
+    }
+    const cols = Object.keys(rows[0]);
+    thead.innerHTML = '<tr>' + cols.map(c => '<th>' + c + '</th>').join('') + '</tr>';
+    tbody.innerHTML = rows.map(r => '<tr>' + cols.map(c => {
+      const v = r[c];
+      let cell;
+      if (typeof v === 'number') cell = '<span class="mono">' + fmt(v) + '</span>';
+      else if (v == null) cell = '<span style="color:#8b949e">—</span>';
+      else cell = tagFor(c, v);
+      return '<td>' + cell + '</td>';
+    }).join('') + '</tr>').join('');
+    $('#rowCount').textContent = '共 ' + fmt(rows.length) + ' 条';
+  }
+
+  function render(data) {
+    renderStats(data && data.stats);
+    renderRows(data && data.rows);
+    const t = data && data.generated_at ? '数据生成时间：' + data.generated_at : '';
+    const note = data && data.note ? '　·　' + data.note : '';
+    $('#foot').textContent = t + note;
+  }
+
+  fetch('/console/corpus', { headers: { 'Accept': 'application/json' } })
+    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+    .then(data => render(data))
+    .catch(() => { showBanner(); render({ stats: [], rows: [], note: '接口返回真实数值后覆盖' }); });
+})();
+</script>
+</body>
+</html>

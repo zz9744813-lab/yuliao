@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>设置与交接 · 中文文风研究台</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#0e1116; color:#c9d1d9;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding:24px; min-height:100vh;
+  }
+  .wrap { max-width:1200px; margin:0 auto; }
+  header h1 { font-size:22px; font-weight:600; color:#c9d1d9; }
+  header p { font-size:13px; color:#8b949e; margin-top:6px; }
+  .banner {
+    display:none; margin-top:14px; padding:10px 14px;
+    background:rgba(210,153,34,.12); border:1px solid #9e6a03;
+    color:#e3b341; border-radius:10px; font-size:13px;
+  }
+  .stats {
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+    gap:14px; margin-top:20px;
+  }
+  .stat {
+    background:#161b22; border:1px solid #263041; border-radius:10px;
+    padding:16px 18px;
+  }
+  .stat .num {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size:26px; font-weight:600; color:#58a6ff;
+  }
+  .stat .label { font-size:12px; color:#8b949e; margin-top:6px; }
+  .panel {
+    background:#161b22; border:1px solid #263041; border-radius:10px;
+    margin-top:20px; overflow:hidden;
+  }
+  .panel h2 {
+    font-size:14px; font-weight:600; color:#c9d1d9;
+    padding:14px 18px; border-bottom:1px solid #263041;
+  }
+  .table-scroll { overflow:auto; max-height:520px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  thead th {
+    position:sticky; top:0; background:#161b22; z-index:2;
+    text-align:left; padding:10px 14px; color:#8b949e;
+    font-weight:500; border-bottom:1px solid #263041; white-space:nowrap;
+  }
+  tbody td { padding:10px 14px; border-bottom:1px solid #21262d; vertical-align:top; }
+  tbody tr:hover { background:#1c2129; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .tag {
+    display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px;
+    border:1px solid #263041;
+  }
+  .tag.on  { color:#3fb950; border-color:#238636; background:rgba(63,185,80,.08); }
+  .tag.off { color:#8b949e; }
+  .tag.doc { color:#58a6ff; border-color:#1f6feb; background:rgba(88,166,255,.08); }
+  .empty { padding:40px; text-align:center; color:#8b949e; font-size:13px; }
+  .note { margin-top:14px; font-size:12px; color:#8b949e; }
+  .num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>设置与交接</h1>
+    <p>网关配置（脱敏）· 通道开关 · 交接文档索引</p>
+  </header>
+
+  <div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="panel">
+    <h2>配置与交接明细</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>类型</th>
+            <th>状态 / 值（脱敏）</th>
+            <th>说明</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">暂无数据</div>
+    </div>
+  </div>
+
+  <div class="note" id="note"></div>
+</div>
+
+<script>
+(function () {
+  const fmt = n => (typeof n === 'number' ? n.toLocaleString('zh-CN') : String(n));
+  const esc = s => String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+
+  function showBanner() {
+    document.getElementById('banner').style.display = 'block';
+  }
+
+  function renderStats(stats) {
+    const box = document.getElementById('stats');
+    box.innerHTML = '';
+    const list = Array.isArray(stats) && stats.length ? stats : [];
+    if (!list.length) {
+      box.innerHTML = '<div class="stat"><div class="num">—</div><div class="label">暂无统计</div></div>';
+      return;
+    }
+    list.forEach(s => {
+      const div = document.createElement('div');
+      div.className = 'stat';
+      div.innerHTML = '<div class="num">' + esc(fmt(s.value)) + '</div>' +
+                      '<div class="label">' + esc(s.label) + '</div>';
+      box.appendChild(div);
+    });
+  }
+
+  function typeTag(t) {
+    const v = String(t || '').toLowerCase();
+    if (v.includes('doc') || v.includes('文档') || v.includes('交接'))
+      return '<span class="tag doc">交接文档</span>';
+    if (v.includes('channel') || v.includes('通道'))
+      return '<span class="tag">通道</span>';
+    return '<span class="tag">配置</span>';
+  }
+
+  function statusTag(r) {
+    const raw = (r.status != null ? r.status : r.value);
+    const v = String(raw == null ? '' : raw);
+    const on = /^(on|enabled|true|启用|开启|1)$/i.test(v);
+    const off = /^(off|disabled|false|禁用|关闭|0)$/i.test(v);
+    if (on) return '<span class="tag on">已启用</span>';
+    if (off) return '<span class="tag off">已关闭</span>';
+    return '<span class="mono">' + esc(v || '—') + '</span>';
+  }
+
+  function renderRows(rows) {
+    const tbody = document.getElementById('tbody');
+    const empty = document.getElementById('empty');
+    tbody.innerHTML = '';
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) { empty.style.display = 'block'; return; }
+    empty.style.display = 'none';
+    list.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + esc(r.name || r.key || r.title || '—') + '</td>' +
+        '<td>' + typeTag(r.type || r.kind) + '</td>' +
+        '<td>' + statusTag(r) + '</td>' +
+        '<td>' + esc(r.description || r.desc || r.note || '—') + '</td>' +
+        '<td class="mono">' + esc(r.updated_at || r.updatedAt || r.time || '—') + '</td>';
+      tbody.appendChild(tr);
+    });
+  }
+
+  function render(data) {
+    renderStats(data && data.stats);
+    renderRows(data && data.rows);
+    const note = document.getElementById('note');
+    if (data && data.note) note.textContent = data.note;
+    if (data && data.generated_at)
+      note.textContent = (note.textContent ? note.textContent + ' · ' : '') +
+        '数据生成时间：' + data.generated_at;
+  }
+
+  fetch('/console/settings')
+    .then(res => {
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    })
+    .then(data => render(data))
+    .catch(() => {
+      showBanner();
+      render({ stats: [], rows: [], note: '' });
+    });
+})();
+</script>
+</body>
+</html>
