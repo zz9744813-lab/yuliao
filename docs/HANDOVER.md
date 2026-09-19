@@ -309,6 +309,10 @@ bash scripts/serve_remote.sh                         # 起评审台（集霸批�
     继续扩产的三条路：①导入新作品源（需集霸提供文本）；②min_chars 降到 40
     （有质量风险）；③seg_version+1 重切分（不算新人类文本）。在此之前
     scale_corpus 没有可跑的量。
+    ✅ **corpus v2 已产出**（T-CORPUS-V2，2026-09-20）：斗罗/将夜各建新 Work
+    （106,489 段 1:1 镜像，text=TYPO_MAP 修复后文本；v1 原样保留），
+    映射 data/exports/corpus_v2_map.jsonl；入库闸门 app/typo_map 扫描
+    add_work 只记 note 不改文本。⚠ v1/v2 同文并存，实验建批用 work_ids 选边。
 11. **评审台令牌已轮换**（2026-09-19 集霸授权代行）：新令牌在
     `data/review_token.txt`（chmod 600，不外发）；旧令牌已在 1 个日志文件脱敏
     （`<TOKEN-REDACTED>`）并经远程模拟验证作废（401）；服务已重启，
