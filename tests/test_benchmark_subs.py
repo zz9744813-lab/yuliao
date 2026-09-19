@@ -49,7 +49,8 @@ def _seed_pair(seg_key: str, ctype: str, *, src_ok: bool = True,
                    extractor_model="m", prompt_version="pv")
         s.add(fr)
         s.flush()
-        bad = "他显然是很想离开的，所以他就把茶喝完了才起身。屋外的风声是很紧的呀。"
+        bad = ("他显然是很想离开的，所以他就把茶喝完了才起身，屋外的风声紧得让人心里发慌，"
+               "可谁也没有再多说一句话来打破这样的安静。")   # 比 human 明显更长 → S 对
         cand = Candidate(experiment_id=EXP, frame_id=fr.id, segment_id=seg.id,
                          anon_label="XB", model=f"corrupt:{ctype}",
                          prompt_version="corrupt_v2", text=bad, status="ok")
@@ -186,3 +187,61 @@ def test_human_vs_ai_builder_whitelist_and_answer():
     for i in items:
         human_side = i.text_a if i.answer == "A" else i.text_b
         assert human_side == seg_text, "答案键不是人类原文侧——hvai 答案键被破坏"
+
+
+# ── 长度平衡基准（指标硬化收口）──────────────────────────────
+
+def test_length_balanced_build_balances_sides(tmp_path):
+    """bal：S（human 更短）/L（human 更长）两侧各半——长度基线按构造=0.5。
+    测试库夹具自建一对 S 与一对 L（L 侧库存是现实约束，生产库 19 对）。"""
+    # 自建一对 L：variant 比 human 短（SUBTEXT_ERASE 型）
+    db.init_db()
+    with db.session() as s:
+        if not s.get(Experiment, EXP):
+            s.add(Experiment(id=EXP, name="t", status="created", config={}, stats={}))
+        w = Work(title="t-bal-seed", source="test:bal")
+        s.add(w); s.flush()
+        seg = Segment(work_id=w.id, ordinal=0,
+                      text="他把茶喝完才起身，屋外风声很紧，谁也没有再说话，窗纸被吹得鼓了一下。",
+                      text_clean="他把茶喝完才起身，屋外风声很紧，谁也没有再说话，窗纸被吹得鼓了一下。",
+                      role="benchmark", integrity='{"src_ok": true}',
+                      n_sentences=2, n_chars=36)
+        s.add(seg); s.flush()
+        fr = Frame(experiment_id=EXP, segment_id=seg.id, granularity="L",
+                   extractor_model="m", prompt_version="pv")
+        s.add(fr); s.flush()
+        cand = Candidate(experiment_id=EXP, frame_id=fr.id, segment_id=seg.id,
+                         anon_label="XC", model="corrupt:SUBTEXT_ERASE",
+                         prompt_version="corrupt_v2", text="他喝完茶起身，风声很紧。", status="ok")
+        s.add(cand); s.flush()
+        s.add(ControlledCorruption(
+            experiment_id=EXP, segment_id=seg.id, frame_id=fr.id, candidate_id=cand.id,
+            corruption_type="SUBTEXT_ERASE", variable="潜文本抹除", generator_model="g",
+            prompt_version="corrupt_v2", text=cand.text, n_chars=len(cand.text),
+            drift={}, drift_score=0.1, fact_consistent=True, drift_ok=True,
+            verify_model="v", verify_pv="corrupt_verify_v3", status="ok"))
+        s.commit()
+    out = BB.build_length_balanced("bal-test", version=1, seed=21, per_side=19)
+    with db.session() as s:
+        st = s.get(BB.BenchmarkSet, out["set_id"])
+        items = s.query(BenchmarkItem).filter_by(set_id=st.id).all()
+    print("DEBUG items:", len(items))
+    assert st.kind == "length_balanced"
+
+    def human_len(i):
+        return len((i.text_a if i.answer == "A" else i.text_b) or "")
+    def other_len(i):
+        return len((i.text_b if i.answer == "A" else i.text_a) or "")
+    short = sum(1 for i in items if human_len(i) < other_len(i))
+    long_ = sum(1 for i in items if human_len(i) > other_len(i))
+    assert short == long_, f"两侧必须配平（short={short} long={long_}）"
+    assert short >= 1 and long_ >= 1
+
+    # 可复现：同种子两次构建，逐题一致
+    a = BB.build_length_balanced("bal-repro-a", version=1, seed=21)
+    b = BB.build_length_balanced("bal-repro-b", version=1, seed=21)
+    ka = sorted((x.segment_id, x.answer) for x in
+                db.session().query(BenchmarkItem).filter_by(set_id=a["set_id"]).all())
+    kb = sorted((x.segment_id, x.answer) for x in
+                db.session().query(BenchmarkItem).filter_by(set_id=b["set_id"]).all())
+    assert ka == kb

@@ -274,6 +274,49 @@ def build_human_vs_ai(name: str, version: int = 1, seed: int = 20260918,
                 "segments": len({x[1].id for x in rows})}
 
 
+def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
+                          per_side: int = 19, dry_run: bool = False) -> dict:
+    """长度平衡基准（指标硬化收口，2026-09-20）：S（human 更短）与 L（human 更长）
+    两侧各取一半——长度基线在平衡集上按构造 = 0.5，评委读数无法搭长度便车
+    （军师 P1-3：nat-v1 0.944 / hvai 0.872 的读数全部带着长度混淆）。
+
+    L 侧全库只有 19 对，故 per_side 默认 19；S 侧按同种子随机抽样配平。
+    控制臂（NEUTRAL_PARAPHRASE）保留：判别题（哪边是原文）里它是合法题。
+    """
+    with db.session() as s:
+        rows = _eligible_pairs(s)
+        s_side, l_side = [], []
+        for cc, seg in rows:
+            human = (seg.text_clean or seg.text or "")
+            var = cc.text or ""
+            (s_side if len(human) < len(var) else
+             l_side if len(human) > len(var) else []).append((cc, seg))
+        if dry_run:
+            return {"would_build": {"S": len(s_side), "L": len(l_side),
+                                     "per_side": min(per_side, len(l_side), len(s_side))}}
+        rng = random.Random(seed)
+        rng.shuffle(s_side)
+        rng.shuffle(l_side)
+        k = min(per_side, len(s_side), len(l_side))
+        picked = s_side[:k] + l_side[:k]
+        st = BenchmarkSet(id=new_id("BS"), name=name, version=version,
+                          kind="length_balanced", n_items=len(picked),
+                          spec={"source": "controlled_corruptions",
+                                "segment_role": "benchmark",
+                                "balanced": "S/L 各半（长度基线按构造=0.5）",
+                                "require_src_ok": True,
+                                "require_not_ungrammatical": True,
+                                "position_seed": seed,
+                                "ctx": "near1"},
+                          note="长度平衡判别题：S/L 各半，读数不被长度先验污染")
+        s.add(st)
+        s.flush()
+        _frozen_items(s, st, picked, seed, "length_balanced")
+        s.commit()
+        return {"set_id": st.id, "items": len(picked),
+                "S": k, "L": k}
+
+
 def scan() -> dict:
     with db.session() as s:
         sets = s.query(BenchmarkSet).all()
@@ -303,8 +346,10 @@ def main() -> None:
     ap.add_argument("--version", type=int, default=1)
     ap.add_argument("--kind", default="corruption_detection",
                     choices=("corruption_detection", "corruption_type", "naturalness_pair",
-                             "human_vs_ai"))
+                             "human_vs_ai", "length_balanced"))
     ap.add_argument("--seed", type=int, default=20260918)
+    ap.add_argument("--per-side", type=int, default=19, dest="per_side",
+                    help="length_balanced 每侧题数（上限受 L 侧库存约束）")
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -318,6 +363,9 @@ def main() -> None:
         out = build_naturalness_pairs(args.name, args.version, args.seed, args.dry_run)
     elif args.kind == "human_vs_ai":
         out = build_human_vs_ai(args.name, args.version, args.seed, args.dry_run)
+    elif args.kind == "length_balanced":
+        out = build_length_balanced(args.name, args.version, args.seed,
+                                    per_side=args.per_side, dry_run=args.dry_run)
     else:
         out = build_corruption_detection(args.name, args.version, args.seed, args.dry_run)
     print(json.dumps(out, ensure_ascii=False))
