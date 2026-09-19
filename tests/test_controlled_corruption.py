@@ -311,7 +311,8 @@ def test_split_benchmark_excludes_from_training_export(tmp_path, monkeypatch):
         role = {x.id: x.role for x in s.query(Segment).all()}
         want = sum(1 for c in s.query(ControlledCorruption).all()
                    if c.status == "ok" and c.candidate_id and role.get(c.segment_id) != "benchmark")
-    assert info["n"] == want, f"导出应剔除基准段后剩 {want} 对，实得 {info['n']}"
+    # P1-5 内容级隔离：邻段上下文命中冻结文本的对也被剔除（同 work 邻段链共享文本）
+    assert info["n"] == want - info["n_benchmark_content_excluded"],         f"导出应剔除基准段与内容孪生后剩 {want}-{info['n_benchmark_content_excluded']} 对，实得 {info['n']}"
 
 
 def test_control_arm_never_enters_dpo_export(tmp_path):
