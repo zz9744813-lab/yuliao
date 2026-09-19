@@ -149,12 +149,12 @@ def build(n_pairs: int, seed: int, ver: str, out_dir: Path | None = None,
     if dry_run:
         return {"would_judge_pairs": len(pairs),
                 "segments_in_pool": len(_pool_dbg())}
-    rows = []
-    for k, pair in enumerate(pairs):
-        res = judge_pair(pair)
+    def one(k_pair):
+        k, pair = k_pair
+        res = judge_pair(pair)          # 组内 3 评委并行（judge_pair 内部线程）
         if res is None:
-            continue
-        rows.append({
+            return None
+        row = {
             "id": new_id("AR"),
             "segment_id": pair["segment_id"],
             "chosen": res["chosen"], "rejected": res["rejected"],
@@ -163,13 +163,23 @@ def build(n_pairs: int, seed: int, ver: str, out_dir: Path | None = None,
             "weak": True,
             "votes": res["votes"], "n_valid_judges": res["n_valid"],
             "pair_seed": seed, "pv": PV,
-        })
+        }
         print(f"[{k + 1}/{len(pairs)}] ok", flush=True)
+        return row
+
+    # 评委是网关模型（非串行通道）→ 对间并行 + 组内并行，落盘随跑随写（防崩丢账）
     path = dest / f"ai_ranking_{ver}.jsonl"
     sum_path = dest / f"ai_ranking_{ver}_summary.json"
+    rows = []
     with path.open("w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for row in ex.map(one, list(enumerate(pairs))):
+                if row is None:
+                    continue
+                rows.append(row)
+                f.write(json.dumps(row, ensure_ascii=False) + chr(10))
+                f.flush()
     summary = {"path": str(path), "summary_path": str(sum_path), "n": len(rows),
                "n_pairs_attempted": len(pairs),
                "n_tie_dropped": len(pairs) - len(rows),
