@@ -74,6 +74,25 @@ DET = """下面是同一段中文小说的两个版本（A / B），其中**一�
 
 哪一边是**人类作者的原文**？只输出一行 JSON：{{"pick": "A"|"B", "confidence": 0.0-1.0}}"""
 
+# naturalness_pair 子基准专用（T5）：问**自然度**，不问身份——
+# 身份检测会把"认出原文"和"哪边更通顺"混成一件事（交接 §0.5③：两个轴是分开的）。
+NAT = """下面是同一段中文小说的两个版本（A / B），其中**一边是人类作者的原文**，
+另一边是被改写过的版本。
+
+【上文】
+{ctx}
+
+【A】
+{a}
+
+【B】
+{b}
+
+哪一边读起来**更自然**（更像人自然写出的中文，不别扭、不堆砌）？只输出一行 JSON：{{"pick": "A"|"B", "confidence": 0.0-1.0}}"""
+
+# task → 模板；未知 task 必须响亮报错，不许静默回落到某个默认口径（纪律④）。
+TASK_TEMPLATES = {"preference": PREF, "detection": DET, "naturalness": NAT}
+
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     if n == 0:
@@ -118,6 +137,8 @@ def run_set(*, set_id: str, models: list[str], task: str = "preference",
                 for x in items]
     if limit:
         rows = rows[:limit]
+    if task not in TASK_TEMPLATES:
+        raise SystemExit(f"未知 task={task}；可选 {sorted(TASK_TEMPLATES)}")
     print(f"基准集 {set_id}（{st.name} v{st.version}）：{len(rows)} 题 × {len(models)} 模型"
           f"（task={task}）")
     if dry_run:
@@ -125,7 +146,7 @@ def run_set(*, set_id: str, models: list[str], task: str = "preference",
 
     def one(job):
         r, m = job
-        tmpl = DET if task == "detection" else PREF
+        tmpl = TASK_TEMPLATES[task]
         from app.prompt_render import render
         try:
             res = chat(model=m, system=SYS,
@@ -236,7 +257,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", default="")
     ap.add_argument("--models", default="")
-    ap.add_argument("--task", default="preference", choices=("preference", "detection"))
+    ap.add_argument("--task", default="preference",
+                    choices=tuple(TASK_TEMPLATES),
+                    help="preference=哪边更好 / detection=哪边是原文 / naturalness=哪边更自然")
     ap.add_argument("--conc", type=int, default=6)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--scan", action="store_true")
