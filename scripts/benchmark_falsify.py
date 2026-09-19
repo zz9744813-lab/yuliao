@@ -17,13 +17,18 @@ benchmark_runs 里的已有跑分做六项检验，**只读库、零 LLM 成本*
 · N4 长度基线（军师 P1-3）：与"只选较短文本"的简单规则配对比较——位置随机化了
   但长度没有，不显著优于它就不算真信号。
 · N5 长度分层正确率（指标硬化）：把已答题按「人类答案在更短侧 / 更长侧」分两层
-  （等长单列 equal；lengths 缺 key 的题单列 missing 并显形，不伪装成 equal——
-  T-N5FIX①）。两层各 ≥10 题时（T-N5FIX②，原 3→10），"人类侧更长"层 acc < 0.5
-  ⇒ 模型在那半边接近瞎猜，读数是纯长度驱动——不许 pass（只报总 acc 掩盖这个混淆）。
+  （等长单列 equal；lengths 缺 key 的题单列 missing、形状坏掉的题单列 bad_answer /
+  bad_len 并显形，不伪装成 equal 也不炸整份报告——T-N5FIX① / T-N5GATE③）。两层各
+  ≥10 题时"人类侧更长"层必须**在单侧二项意义下优于机会线**才算过门：只看"层规模够
+  不够"或只看点估计 acc>=0.5 都收不住尺子（真 acc=0.4 时漏判率 0.367，复算见 GATE
+  上方注释）。数据缺陷（缺长度 + 坏形状）占比 > len_defect_cap ⇒ fail-closed 判不过
+  （与同文件 N4 口径一致）；层规模不足 ⇒ 判 None 但必须在报表显形"N5 因样本不足跳过"。
 
 结论措辞是**分级的**（provisional 纪律）：
   pass  = N0 p<0.05 且 N2 波动 < 0.05 且 N1 |偏差| < 0.2 且 N3 >= 0.9
-          且显著优于"只选较短"基线，且（两层各 ≥10 题时）"人类侧更长"层 acc >= 0.5
+          且显著优于"只选较短"基线，且（两层各 ≥10 题时）"人类侧更长"层命中数
+          ≥ ceil(n/2)+1（等价于单侧 P[X>=命中数|n,0.5] < 0.5），且长度数据缺陷
+          占比不超过 len_defect_cap
   weak  = N0 过但其它有一项存疑
   fail  = N0 未过
 用法：
@@ -49,13 +54,26 @@ FLIP_B = 20000          # 聚类置换重排次数
 CLUST_B = 5000          # 段级 bootstrap 次数
 SEED = 20260919         # 检验本身也要可复现
 GATE = {"perm_p": 0.05, "sensitivity": 0.05, "pos_bias": 0.2, "answered": 0.9,
-        "long_layer_acc": 0.5, "long_layer_min_n": 10}   # N5：长层判定的最小层规模
-# T-N5FIX②：long_layer_min_n 从 3 提到 10。理由：点估计 acc>=0.5 在 n=3 时，真实
-# acc≈0.4 有约 35%（P[X>=2|Binom(3,0.4)]）被误判为"过"（放行纯长度驱动 run）；n=10
-# 压到约 17%、n=15 约 9%。取 10：既显著收紧漏判，又保住"14 题 acc=0.43 仍判死"的
-# 保守口径（见 test_length_gate_alone_downgrades_pass_to_weak）。层规模 <10 时诚实
-# 判 None（不参与判定），而不是拿噪声样本假装过了门——fail-open 的口子只留给"数据
-# 不足"这一种可解释情形，且与 length_strat.missing 显形配合（见 T-N5FIX①）。
+        "long_layer_acc": 0.5, "long_layer_min_n": 10,
+        "long_layer_p": 0.5, "len_defect_cap": 0.30}   # N5：长层判定的最小层规模 / 单侧门槛 / 数据缺陷上限
+# T-N5GATE①（订正并收紧 T-N5FIX②）：N5 判据从「点估计 acc>=0.5」换成「单侧二项优于
+# 机会线」，同时把 T-N5FIX② 写错的漏判概率改对。代码语义 acc>=0.5 ⇒ 命中数 X>=ceil(n/2)，
+# 真 acc=0.4 时的误放行（漏判）概率复算如下（Binom(n,0.4) 尾概率）：
+#     n= 3   P[X>=2] = 0.3520      ← min_n=3 时的实际漏判率
+#     n=10   P[X>=5] = 0.3669      ← min_n=10 时的实际漏判率
+#     n=15   P[X>=8] = 0.2131
+# ⇒ 原注释宣称的「n=10≈17%、n=15≈9%」是 P[X>=ceil(n/2)+1] 口径（0.1662 / 0.0950），
+#   代码从未实现过，属于把"想要的尺子"当成"已有的尺子"。更要紧的是：**min_n 从 3 提到
+#   10 本身几乎不降低漏判率**（0.352→0.367，反而略升，因为偶数层正好 0.5 也算过），
+#   真正收紧必须靠 p 门槛。故新判据要求单侧 P[X>=X_obs | n,0.5] < long_layer_p(=0.5)，
+#   逐 n 等价于 X>=ceil(n/2)+1（n 为奇数时 X=(n+1)/2 的 p 恰等于 0.5，按"不进则不退"
+#   判不过），于是同一真值 acc=0.4 下的漏判率变为：
+#     n=10   P[X>=6] = 0.1662（≈17%）      n=15   P[X>=9] = 0.0950（≈9.5%）
+#   ——报表口径与注释口径这次对上了。保留 long_layer_acc=0.5 作为显式下限（p 门槛已蕴含
+#   它，写出来是为了让"长层过半规模且低于机会线"这类情形在任何 p 取值下都判死）。
+# 层规模 < min_n 仍判 None（不参与判定），但必须在返回 dict 与 --md 主表显形为"N5 因
+# 样本不足跳过"；数据缺陷（缺长度 + 坏形状）占比 > len_defect_cap 则 fail-closed 判
+# 不过——与同文件 N4「基线算不出就不许 pass」的口径一致（T-N5GATE②）。
 
 
 def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
@@ -99,6 +117,34 @@ def _binom_two_sided(k: int, n: int) -> float:
     return min(1.0, sum(pm(x) for x in range(n + 1) if pm(x) <= p0 + 1e-12))
 
 
+def _binom_one_sided_ge(k: int, n: int) -> float:
+    """单侧尾概率 P[X >= k]（零假设 p=0.5）。N5 长层判据用（T-N5GATE①）：值越小 =
+    长层命中数越不可能是猜出来的。k<=0 时为 1.0（毫无证据）。"""
+    from math import comb
+    if n == 0:
+        return 1.0
+    return min(1.0, sum(comb(n, x) * (0.5 ** n) for x in range(max(0, k), n + 1)))
+
+
+def _ab_len(lengths: dict, iid) -> tuple[int, int] | None:
+    """取 lengths[iid] 的 (A侧, B侧) 二元组；形状坏掉（不是可比较的二元组）返回 None。
+
+    T-N5GATE③：原来 `la, lb = lengths[iid]` 直接解包，一条脏数据（三元组 / None / 字符串）
+    就能让 falsify_run → falsify_set → main 整条只读分析链抛穿、全部 run 的报表一起没了。
+    这里把异常收敛成 None，由调用方计进 bad_len 桶并显形（fail-closed-but-reported）。
+    缺 key（无长度数据）同样返回 None——N5 调用方会先单独判 missing，不会混进 bad_len。
+    二元组但元素不是数字（如字符串 "10" 会被解成 "1","0"）也按坏形状处理，不能让脏值
+    混进 short/long 层参与判定。
+    """
+    try:
+        la, lb = lengths[iid]
+    except (TypeError, ValueError, KeyError):
+        return None
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (la, lb)):
+        return None
+    return la, lb
+
+
 def _length_layer(la: int, lb: int, ans: str) -> str:
     """按「人类答案落在更短侧 / 更长侧 / 等长」归层——N5 的唯一判层入口。
 
@@ -126,8 +172,8 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     n_ans = len(answered)
     if n_ans == 0:
         return {"model": run["model"], "verdict": "fail", "reason": "无可用答案"}
-    acc = sum(1 for iid, p in answered.items()
-              if meta[iid][1] == p) / n_ans
+    n_hits = sum(1 for iid, p in answered.items() if meta[iid][1] == p)
+    acc = n_hits / n_ans
     ans_a_rate = sum(1 for iid in answered if meta[iid][1] == "A") / n_ans
     pick_a_rate = sum(1 for p in answered.values() if p == "A") / n_ans
 
@@ -188,7 +234,10 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     len_correct = model_beat = baseline_beat = 0
     n_both = 0
     for iid, pick in answered.items():
-        la, lb = (lengths or {}).get(iid, (0, 0))
+        pair = _ab_len(lengths, iid) if lengths else None
+        if pair is None:
+            continue                      # 缺长度 / 长度形状坏：规则无输入，跳过配对
+        la, lb = pair
         pred = "A" if la < lb else ("B" if lb < la else None)
         if pred is None:
             continue                      # 等长：规则无答案，算它错，跳过配对
@@ -210,38 +259,61 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     # T-N5FIX①：lengths 里缺 key 的题**不再默认 (0,0)** 落进 equal（那会让 short/long
     # 被抽空 → length_strat=None → 与同文件 N4 fail-closed 口径相反的静默 fail-open）。
     # 缺数据的题单独计 missing 桶并在报表显形（缺多少题、占比），不得伪装成 equal。
-    layers = ("short", "long", "equal", "missing")
+    # T-N5GATE③：答案非 A/B、长度值非 (int,int) 二元组这类脏数据也不再抛穿——单列
+    # bad_answer / bad_len 桶计数显形，与 missing 一起算进"数据缺陷率"。
+    layers = ("short", "long", "equal", "missing", "bad_answer", "bad_len")
     strat_n = {g: 0 for g in layers}
     strat_hit = {g: 0 for g in layers}
     length_strat = None
     n_missing_len = 0
+    n_bad_shape = 0
     long_p = None
+    long_p_one = None
     if lengths:
         for iid, pick in answered.items():
+            ok = (pick == meta[iid][1])
             if iid not in lengths:                 # 缺长度数据：单独成桶，显形
                 layer = "missing"
+            elif meta[iid][1] not in ("A", "B"):   # 人类答案坏：不喂给会抛的 _length_layer
+                layer = "bad_answer"
             else:
-                la, lb = lengths[iid]              # 解包本身即形状断言（须为 (A侧,B侧) 二元组）
-                layer = _length_layer(la, lb, meta[iid][1])
+                pair = _ab_len(lengths, iid)
+                layer = "bad_len" if pair is None else _length_layer(pair[0], pair[1], meta[iid][1])
             strat_n[layer] += 1
-            strat_hit[layer] += (pick == meta[iid][1])
+            strat_hit[layer] += ok
         n_missing_len = strat_n["missing"]
-        # 与 N0/N4 同一把尺子：对「人类侧更长」层做对 0.5 的双侧二项检验 p，报表显形
-        # （阈值/漏判概率见 GATE["long_layer_min_n"] 上方 T-N5FIX② 注释）。判死口径保持
-        # 保守点估计 acc<0.5（长层过半规模却低于机会线即视为长度驱动），p 只作透明披露。
+        n_bad_shape = strat_n["bad_answer"] + strat_n["bad_len"]
+        # 与 N0/N4 同一把尺子：对「人类侧更长」层披露双侧 p（透明），并**用单侧 p 判定**
+        # （T-N5GATE①：点估计 acc>=0.5 在真 acc=0.4 时漏判 0.367，收不住；单侧门槛见
+        # GATE 上方复算）。判死口径 = 长层没有单侧证据优于机会线 ⇒ 不许 pass。
         if strat_n["long"]:
             long_p = _binom_two_sided(strat_hit["long"], strat_n["long"])
+            long_p_one = _binom_one_sided_ge(strat_hit["long"], strat_n["long"])
         length_strat = {g: {"n": strat_n[g],
                             "acc": round(strat_hit[g] / strat_n[g], 4) if strat_n[g] else None}
                         for g in layers}
 
-    # 两层都 ≥ long_layer_min_n 时参与判定：较长层（人类侧更长）acc < 0.5 ⇒
-    # 模型在那半边接近瞎猜 = 纯长度驱动，不许 pass。任一层不足 ⇒ None 不参与。
-    if length_strat and strat_n["short"] >= GATE["long_layer_min_n"] \
-            and strat_n["long"] >= GATE["long_layer_min_n"]:
-        ls_check = strat_hit["long"] / strat_n["long"] >= GATE["long_layer_acc"]
-    else:
+    min_n = GATE["long_layer_min_n"]
+    n_short, n_long = strat_n["short"], strat_n["long"]
+    defect_rate = (n_missing_len + n_bad_shape) / n_ans
+    # T-N5GATE②：三种"没判"的状态必须可区分，且缺陷超限要 fail-closed（与 N4 一致）：
+    # ① 整列缺失（lengths 为 None/{}）→ None + 显形；② 有列但缺陷占比超上限 → False
+    # （不许静默跳过）；③ 层规模不足 → None 但必须显式标"N5 因样本不足跳过"。
+    if length_strat is None:
         ls_check = None
+        n5_skip = {"reason": "无长度列", "n_short": None, "n_long": None, "min_n": min_n}
+    elif defect_rate > GATE["len_defect_cap"]:
+        ls_check = False
+        n5_skip = {"reason": "长度数据缺陷超上限", "rate": round(defect_rate, 4),
+                   "cap": GATE["len_defect_cap"], "n_short": n_short, "n_long": n_long,
+                   "min_n": min_n}
+    elif n_short < min_n or n_long < min_n:
+        ls_check = None
+        n5_skip = {"reason": "样本不足", "n_short": n_short, "n_long": n_long, "min_n": min_n}
+    else:
+        ls_check = (strat_hit["long"] / n_long >= GATE["long_layer_acc"]
+                    and long_p_one < GATE["long_layer_p"])
+        n5_skip = None
 
     checks = {
         "perm_p": perm_p < GATE["perm_p"],
@@ -250,7 +322,7 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
         "answered": answered_rate >= GATE["answered"],
         "beats_length": (len_acc is not None and acc > len_acc
                          and beat_p < 0.05),   # P1-3：不显著优于"只选较短"不许 pass
-        "length_stratified": ls_check,         # N5：None=层太小不参与判定
+        "length_stratified": ls_check,         # N5：None=无长度列或层规模不足（见 length_strat_skip）
     }
     gate_ok = all(v for v in checks.values() if v is not None)   # None 不阻塞
     verdict = ("pass" if gate_ok
@@ -259,9 +331,13 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     # T-N5FIX④：原 dict 里有两处 "n_answered" 键（一处 = 由 picks 现算的 n_ans、
     # 一处 = DB 的 run["n"]），后值静默覆盖前者。这是真 bug——n_ans 才是所有检验实际
     # 用的已答数。现令 n_answered = n_ans，DB 值单独放 n_db 保留可比对，不再互相覆盖。
+    # T-N5GATE④：wilson 原来吃 DB 的 run["correct"]/run["n"]，与现算 acc 不同源——
+    # 两者不等时报表里"acc 落在自己的 CI 外面"。现统一到 n_hits/n_ans，并把 n 不一致
+    # 显式标成 n_mismatch（不再让读者自己发现 acc 与 CI 打架）。
     return {"model": run["model"], "n_answered": n_ans, "n_db": run["n"],
+            "n_mismatch": n_ans != run["n"], "n_hits": n_hits, "n_hits_db": run["correct"],
             "acc": round(acc, 4),
-            "wilson": [round(v, 4) for v in wilson(run["correct"], run["n"])],
+            "wilson": [round(v, 4) for v in wilson(n_hits, n_ans)],
             "cluster_ci": [round(lo, 4), round(hi, 4)],
             "perm_p": round(perm_p, 4), "flip_groups": len(segs),
             "pick_a_rate": round(pick_a_rate, 4), "answer_a_rate": round(ans_a_rate, 4),
@@ -275,31 +351,66 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
             "length_strat": length_strat,
             "length_missing": None if length_strat is None else
                 {"n": n_missing_len, "rate": round(n_missing_len / n_ans, 4)},
+            "length_bad": None if length_strat is None else
+                {"n": n_bad_shape, "rate": round(n_bad_shape / n_ans, 4)},
+            "length_defect_rate": None if length_strat is None else round(defect_rate, 4),
+            "length_strat_skip": n5_skip,
             "length_strat_long_p": None if long_p is None else round(long_p, 4),
+            "length_strat_long_p_one_sided": None if long_p_one is None else round(long_p_one, 4),
             "checks": checks, "verdict": verdict}
 
 
 def falsify_set(set_id: str) -> dict:
     meta, n_items, runs, lengths = _load(set_id)
+    out = []
+    for r in runs:
+        try:
+            out.append(falsify_run(meta, r, n_items=n_items, lengths=lengths))
+        except Exception as e:                    # noqa: BLE001
+            # T-N5GATE③：N5/N4 内部的脏数据已在桶里收敛，这里兜住的是"其它"意外
+            # （如 picks 引用了已删除的 item）。单条坏 run 只降级它自己那一行，
+            # 不许把整份只读报告的其余 run 一起带走。
+            out.append({"model": r["model"], "verdict": "fail",
+                        "reason": f"检验异常 {type(e).__name__}: {e}"})
     return {"set_id": set_id, "n_items": n_items,
             "gates": GATE,
-            "runs": [falsify_run(meta, r, n_items=n_items, lengths=lengths)
-                     for r in runs]}
+            "runs": out}
 
 
-def _fmt_length_strat(strat: dict | None) -> str:
-    """主表"分层acc(短/长)"单元格："0.95/0.60 (n=8/12)"；无长度数据或任一层
-    为空（acc 不可算）显示 —。T-N5FIX①：缺长度数据的题单独显形为"[缺长度 N]"，
-    提醒读数里有几题没进 short/long（不再被算进 equal 掩盖）。无缺失时格式不变。"""
+def _fmt_length_strat(strat: dict | None, min_n: int | None = None,
+                      defect_cap: float | None = None) -> str:
+    """主表"分层acc(短/长)"单元格："0.95/0.60 (n=8/12)"。
+
+    T-N5GATE②③：三种"没判成"的状态必须在同一格里可区分，且**最坏情形不许隐身**——
+    原先 `if s['acc'] is None or l['acc'] is None: return "—"` 排在 missing 之前，
+    于是"有长度列但题题缺 key"（short/long 被抽空）会显示成与"根本没有长度列"完全
+    一样的 —，读者看到的是"没数据"而不是"数据全缺 N 题"。现先算缺陷数再决定降级显示：
+      · strat 为 None/{}      → "—"（整列不存在，无从判定）
+      · 任一层为空            → "—" 前缀，但仍追加 [缺长度 N] / [坏数据 N]
+      · 传 min_n 且任一层不足 → 追加 [N5跳过:n短X/n长Y<min_n]（样本不足，没参与判定）
+      · 传 defect_cap 且超限  → 追加 [N5缺陷P%>cap]（此时判定已是 False，不是跳过）
+    不传 min_n/defect_cap 时格式与历史一致（既有精确格式断言依赖这一点）。
+    """
     if not strat:
         return "—"
     s, l = strat["short"], strat["long"]
+    miss = strat.get("missing", {}).get("n") or 0
+    bad = (strat.get("bad_answer", {}).get("n") or 0) + (strat.get("bad_len", {}).get("n") or 0)
     if s["acc"] is None or l["acc"] is None:
-        return "—"
-    cell = f"{s['acc']:.2f}/{l['acc']:.2f} (n={s['n']}/{l['n']})"
-    miss = strat.get("missing", {}).get("n", 0)
+        cell = "—"
+    else:
+        cell = f"{s['acc']:.2f}/{l['acc']:.2f} (n={s['n']}/{l['n']})"
     if miss:
         cell += f" [缺长度 {miss}]"
+    if bad:
+        cell += f" [坏数据 {bad}]"
+    if defect_cap is not None:
+        n_ans = sum((v.get("n") or 0) for v in strat.values())
+        rate = (miss + bad) / n_ans if n_ans else 0.0
+        if rate > defect_cap:
+            cell += f" [N5缺陷{rate:.0%}>{defect_cap:.0%}·判不过]"
+    if min_n is not None and (s["n"] < min_n or l["n"] < min_n):
+        cell += f" [N5跳过:n短{s['n']}/n长{l['n']}<{min_n}]"
     return cell
 
 
@@ -322,7 +433,7 @@ def main() -> None:
                   f"| [{r['cluster_ci'][0]:.3f},{r['cluster_ci'][1]:.3f}] "
                   f"| {r['perm_p']:.4f}（{r['flip_groups']}段）"
                   f"| {lb['acc']:.3f}（{lb['model_beat']}:{lb['baseline_beat']} p={lb['sign_p']:.3f}）"
-                  f"| {_fmt_length_strat(r['length_strat'])} "
+                  f"| {_fmt_length_strat(r['length_strat'], GATE['long_layer_min_n'], GATE['len_defect_cap'])} "
                   f"| {r['pick_a_rate']:.2f}/{r['answer_a_rate']:.2f} "
                   f"| {r['sensitivity']:.3f} | {r['answered_rate']:.2f} | **{r['verdict']}** |")
     else:
