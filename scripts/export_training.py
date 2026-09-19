@@ -174,7 +174,10 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
             integ = {}
         # 军师 P1-6：训练口径要求 src_ok **必须 True**——"没查过=不可用"（铁律）。
         # 旧口径只排 False，32 条未校勘段就这么混进了 SFT。
-        if integ.get("src_ok") is not True:
+        # 会审意见：False（查过且判坏）与 None（从未查过）是**互斥口径**，分开报。
+        if integ.get("src_ok") is False:
+            return "bad_src"
+        if "src_ok" not in integ:
             return "src_unverified"
     # 内容级隔离（P1-5）：无论 role，正文命中基准冻结文本即剔除（跨切分孪生/同文）
     if _hits_bench_text(seg.text_clean or seg.text if seg else None):
@@ -558,6 +561,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
         n = n_skip_missing = n_unresolved = n_text_empty = n_ctrl = 0
         n_bench = n_wm = n_ex = n_fix = n_bad = 0
         n_bench_content = 0
+        n_src_unv = 0
         by_source = {"corruption_variable": 0, "user_verdict": 0, "judge_majority": 0}
         pos = neg = neu = n_weak = 0
         pending: list[dict] = []
@@ -581,12 +585,11 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                 if reason == "fixture":
                     n_fix += 1
                     continue
-                if reason in ("bad_src", "src_unverified"):
+                if reason == "bad_src":
                     n_bad += 1
                     continue
-                if reason == "benchmark_content":    # P1-5：内容级隔离
-                    n_bench_content += 1
-                    continue
+                if reason == "src_unverified":
+                    n_src_unv += 1
                     continue
                 if reason == "benchmark_content":    # P1-5：内容级隔离
                     n_bench_content += 1
@@ -651,8 +654,9 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                     emit("human", htext, msc[0], "judge_majority", weak=True)
                     emit("candidate", cand.text, msc[1], "judge_majority", weak=True)
 
-    # 军师 P1-6：同文本多来源分数冲突的处理规则——按来源优先级保留一条
+    # 军师 P1-6：同段同文本多来源分数冲突的处理规则——按来源优先级保留一条
     # （user_verdict 强标签 > corruption_variable 构造性 > judge_majority 弱标），
+    # 同优先级平局按 id 字典序取最小（确定性 tie-break，重跑逐字节可复现），
     # 其余丢弃并计数。**先定规则再混合**，不静默保留冲突分数。
     prio = {"user_verdict": 3, "corruption_variable": 2, "judge_majority": 1}
     def _norm_txt(t: str) -> str:
@@ -660,18 +664,20 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
     best: dict[tuple, dict] = {}
     n_conflict_dropped = 0
     for row in pending:
-        key = (row.get("segment_id"), _norm_txt(row["text"]))
+        key = (row["segment_id"], _norm_txt(row["text"]))   # 缺 segment_id 应响亮报错，不静默归并
         cur = best.get(key)
         if cur is None:
             best[key] = row
             continue
         n_conflict_dropped += 1
-        if prio.get(row["label_source"], 0) > prio.get(cur["label_source"], 0):
+        cand_prio = prio.get(row["label_source"], 0)
+        cur_prio = prio.get(cur["label_source"], 0)
+        if cand_prio > cur_prio or (cand_prio == cur_prio and row["id"] < cur["id"]):
             best[key] = row
     rows = sorted(best.values(), key=lambda r: r["id"])
     with path.open("w", encoding="utf-8") as f:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + chr(10))
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
     n = len(rows)
     n_weak = sum(1 for r in rows if r.get("weak"))
     by_source = Counter(r["label_source"] for r in rows)
@@ -725,6 +731,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
     starts: dict = {}
     n = n_bench = n_ex = n_wm = n_fix = n_bad = 0
     n_bench_content = 0
+    n_src_unv = 0
     n_control = n_ungram = n_missing = 0
     neg_segs: set = set()
     by_type: dict[str, int] = {}
@@ -753,8 +760,11 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                 if reason == "fixture":
                     n_fix += 1
                     continue
-                if reason in ("bad_src", "src_unverified"):
+                if reason == "bad_src":
                     n_bad += 1
+                    continue
+                if reason == "src_unverified":
+                    n_src_unv += 1
                     continue
                 if reason == "benchmark_content":    # P1-5：内容级隔离
                     n_bench_content += 1
@@ -806,6 +816,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                 work = s.get(Work, seg.work_id)
                 by_work[(work.title if work else "∅")] = by_work.get(work.title if work else "∅", 0) + 1
     summary = {"path": str(path), "summary_path": str(sum_path), "n": n,
+               "n_src_unverified_excluded": n_src_unv,
                "n_source_segments": len(neg_segs),
                "by_type": by_type, "by_work": by_work,
                "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_extras_excluded": n_ex,
@@ -838,6 +849,8 @@ def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
         n = n_skip_missing = 0
         n_bench = n_wm = n_ex = n_fix = n_bad = 0
         n_bench_content = 0
+        n_src_unv = 0
+        segs_covered: set = set()
         by_work: dict[str, int] = {}
         granularity_dist: dict[str, int] = {}
         with path.open("w", encoding="utf-8") as f:
@@ -861,6 +874,9 @@ def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
                     continue
                 if reason == "bad_src":
                     n_bad += 1
+                    continue
+                if reason == "src_unverified":
+                    n_src_unv += 1
                     continue
                 if reason:
                     n_skip_missing += 1
@@ -888,12 +904,14 @@ def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
                 }
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
                 n += 1
+                segs_covered.add(seg.id)
                 by_work[rec["work"]] = by_work.get(rec["work"], 0) + 1
                 granularity_dist[fr.granularity] = granularity_dist.get(fr.granularity, 0) + 1
     summary = {
         "path": str(path), "summary_path": str(sum_path),
         "n": n, "by_work": by_work, "granularity_dist": granularity_dist,
         "n_skip_missing": n_skip_missing,
+        "n_segments_covered": len(segs_covered), "n_src_unverified_excluded": n_src_unv,
         "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
         "n_extras_excluded": n_ex, "n_fixture_excluded": n_fix,
         "n_bad_src_excluded": n_bad,
