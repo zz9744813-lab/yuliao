@@ -52,8 +52,9 @@ def test_apply_fixes_text_clean_only_and_idempotent():
         seg = s.get(Segment, sid)
         assert seg.text == "吴天宗的千雪来了。", "原文 text 不许动"
         assert seg.text_clean == "昊天宗的千仞雪来了。"
-        assert json.loads(seg.integrity)["src_ok"] is True, "修复后规则清零应翻回可用"
-        assert "typo_normalize" in json.loads(seg.integrity)["checked_pv"]
+        # 军师 P0 退回：字表工具只许改字，**不许碰 integrity**——
+        # 修人名不能顺手放行 LLM 查出的缺句/截断；重判是 source_check 的职责
+        assert seg.integrity == '{"src_ok": false, "defects": ["疑似掉字：`千雪`"], "checked_pv": "source_integrity_v1"}',             "字表工具改动了 integrity（越权）"
     assert out["segments_touched"] >= 1
     # 幂等：再跑一遍该段不再变化
     out2 = NT.apply_repairs()

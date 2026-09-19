@@ -112,7 +112,6 @@ def apply_repairs() -> dict:
     cache: dict[str, str] = {}
     per_work: Counter = Counter()
     n_seg = n_replaced = 0
-    n_flipped = 0
     with db.session() as s:
         segs = s.query(Segment).all()
         for seg in segs:
@@ -125,25 +124,13 @@ def apply_repairs() -> dict:
             n_seg += 1
             n_replaced += k
             per_work[title[:20]] += k
-            # 规则重判：修复后规则命中清零 → 该段从"规则判坏"翻回可用
-            try:
-                integ = json.loads(seg.integrity or "{}")
-            except Exception:
-                integ = {}
-            hits = rule_defects(new)
-            if not hits and integ.get("src_ok") is not True:
-                integ.update({"src_ok": True, "severity": "low", "defects": [],
-                              "checked_pv": "typo_normalize_v1",
-                              "note": f"字表归一化后重判（替换 {k} 处）"})
-                seg.integrity = json.dumps(integ, ensure_ascii=False)
-                n_flipped += 1
-            elif hits:
-                integ.update({"src_ok": False, "defects": hits,
-                              "checked_pv": "typo_normalize_v1"})
-                seg.integrity = json.dumps(integ, ensure_ascii=False)
         s.commit()
+    # ⚠ 军师退回（P0）：**只许改字，不许碰 src_ok / 缺陷字段**。规则只认识字表，
+    # 修人名不该顺手放行 LLM 查出的缺句/截断。integrity 一律由 source_check
+    # 的 LLM 校勘重判：`python scripts/source_check.py --run --scope used`。
     out = {"segments_touched": n_seg, "replacements": n_replaced,
-           "integrity_flipped_to_ok": n_flipped, "by_work": dict(per_work)}
+           "by_work": dict(per_work),
+           "integrity_note": "src_ok 不在本工具职责内；重判请跑 source_check --run"}
     print(json.dumps(out, ensure_ascii=False, indent=1))
     return out
 

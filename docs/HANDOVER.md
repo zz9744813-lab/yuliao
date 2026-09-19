@@ -290,9 +290,11 @@ bash scripts/serve_remote.sh                         # 起评审台（集霸批�
     1/5 号依赖集霸人工盲评、4 号 Implicitness 缺构题器。
 13. **字表归一化修复完成**（授权项 2，`ca74785` + 本条）：斗罗/将夜系统性错字
     438 处修复（千雪→千仞雪 390、吴天→昊天 两书 47、了天斗罗 1），387 段翻回
-    可用池。**前后对照（同源 40 对，qoder）：0.700 → 0.900（Δ=+20pp，
+    池。**前后对照（同源 40 对，qoder）：0.700 → 0.900（Δ=+20pp，
     Fisher p=0.048）**——错字对仪器读数的影响被定量；斗罗历史读数偏低部分
-    归因于此（provisional）。详见 `docs/typo-normalization-20260919.md`。
+    归因于此（provisional）。⚠ 初版"387 段翻回可用池"经军师 P0 退回**已撤销**：
+    字表工具不许碰 integrity（修人名≠无缺句），相关段重置未校勘后由
+    source_check LLM 重判。详见 `docs/typo-normalization-20260919.md`。
     复跑：`scripts/normalize_typos.py --scan/--apply/--report`。
 14. **授权代行四项（2026-09-19 晚）**：
     · **项1 gold standard 双轨**：(c) 负面库 v2 已是主线（103 条，`23b3140`）；
