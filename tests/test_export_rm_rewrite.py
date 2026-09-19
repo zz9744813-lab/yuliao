@@ -516,18 +516,18 @@ def test_normal_segment_not_flagged_by_content_guard():
 def test_rm_conflict_rule_same_segment_same_text(tmp_path):
     """军师 P1-6：同段同文本多来源冲突 → 按优先级保留一条
     （user_verdict > corruption_variable > judge_majority），其余丢弃并计数。"""
-    exp = "EXP-RM-CONFLICT"
+    exp = f"EXP-RM-CONFLICT-{_UNIQ}"
     db.init_db()
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rm-conflict", [(0, TEXT, None, '{"src_ok": true}')])
+        w, segs = _work_seg(s, f"t-rm-conflict-{_UNIQ}", [(0, TEXT, None, '{"src_ok": true}')])
         c, _ = _cand(s, exp, segs[0], text=TEXT + "候选。")
         _judges(s, exp, c, ["candidate", "candidate", "human"])   # 弱标：candidate 1.0
         _review(s, exp, c, "human")                               # 强标：human 侧 1.0
         s.commit()
-    q = EX.export_rm("conflict", out_dir=tmp_path)
-    rows = _rows(tmp_path / "rm_conflict.jsonl")
+    q = EX.export_rm(f"conflict-{_UNIQ}", out_dir=tmp_path)
+    rows = _rows(tmp_path / f"rm_conflict-{_UNIQ}.jsonl")
     # 同段同文本（TEXT）的两条冲突：强标 user_verdict 留，弱标 judge_majority 丢
     human_rows = [r for r in rows if r["side"] == "human" and r["segment_id"] == segs[0].id
                   and "".join(r["text"].split()) == "".join(TEXT.split())]
@@ -537,13 +537,19 @@ def test_rm_conflict_rule_same_segment_same_text(tmp_path):
 
 
 # ── 5. 会审补课：src_ok 三态 / 冲突确定性 / 缺主键响炸 / summary 自洽 ──
+# 注：测试库为**会话级共享**（conftest 每 pytest 进程一个临时库），同会话内
+# 重复触发（如 -k 选择器多次命中）会累积行——本节全部标识符带 run-unique 后缀。
+
+import uuid as _uuid
+_UNIQ = _uuid.uuid4().hex[:8]
 
 def test_src_ok_tri_state_gate(tmp_path):
+    uniq = _UNIQ
     """src_ok 三态：True 放行；False→bad_src；缺键/null→src_unverified。
     '非 True 不得入池'必须由代码保证（军师会审要求 a）。"""
     db.init_db()
     with db.session() as s:
-        w = Work(title="t-tri", source="test:tri")
+        w = Work(title=f"t-tri-{_UNIQ}", source="test:tri")
         s.add(w); s.flush()
         cases = {
             0: '{"src_ok": true}',
@@ -568,20 +574,21 @@ def test_src_ok_tri_state_gate(tmp_path):
 
 
 def test_rm_conflict_same_priority_deterministic(tmp_path):
+    uniq = _UNIQ
     """军师会审要求 b：同优先级冲突重跑两次，产物逐字节一致。"""
-    exp = "EXP-RM-DETER"
+    exp = f"EXP-RM-DETER-{_UNIQ}"
     db.init_db()
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rm-deter", [(0, TEXT, None, '{"src_ok": true}')])
+        w, segs = _work_seg(s, f"t-rm-deter-{_UNIQ}", [(0, TEXT, None, '{"src_ok": true}')])
         c1, _ = _cand(s, exp, segs[0], text=TEXT + "候选甲。")
         _judges(s, exp, c1, ["candidate", "candidate", "human"])
         s.commit()
-    q1 = EX.export_rm("deter1", out_dir=tmp_path)
-    q2 = EX.export_rm("deter2", out_dir=tmp_path)
-    f1 = (tmp_path / "rm_deter1.jsonl").read_bytes()
-    f2 = (tmp_path / "rm_deter2.jsonl").read_bytes()
+    q1 = EX.export_rm(f"deter1-{_UNIQ}", out_dir=tmp_path)
+    q2 = EX.export_rm(f"deter2-{_UNIQ}", out_dir=tmp_path)
+    f1 = (tmp_path / f"rm_deter1-{_UNIQ}.jsonl").read_bytes()
+    f2 = (tmp_path / f"rm_deter2-{_UNIQ}.jsonl").read_bytes()
     assert f1 == f2 and q1["n"] == q2["n"] and q1["n"] > 0, "同输入两次导出必须逐字节一致"
 
 
@@ -595,18 +602,19 @@ def test_rm_missing_segment_id_raises():
 
 
 def test_rm_summary_new_fields_present_and_consistent(tmp_path):
+    uniq = _UNIQ
     """军师会审要求 d：新字段存在且与桶计数自洽（n == 行数，分桶之和 == n）。"""
-    exp = "EXP-RM-FIELDS2"
+    exp = f"EXP-RM-FIELDS2-{_UNIQ}"
     db.init_db()
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rm-fields2", [(0, TEXT, None, '{"src_ok": true}')])
+        w, segs = _work_seg(s, f"t-rm-fields2-{_UNIQ}", [(0, TEXT, None, '{"src_ok": true}')])
         c, _ = _cand(s, exp, segs[0])
         _review(s, exp, c, "human")
         s.commit()
-    q = EX.export_rm("fields2", out_dir=tmp_path)
-    rows = _rows(tmp_path / "rm_fields2.jsonl")
+    q = EX.export_rm(f"fields2-{_UNIQ}", out_dir=tmp_path)
+    rows = _rows(tmp_path / f"rm_fields2-{_UNIQ}.jsonl")
     for k in ("n_benchmark_content_excluded", "n_src_unverified_excluded",
               "n_conflict_dropped", "n_segments_covered" if "n_segments_covered" in q else "n"):
         assert k in q, f"summary 缺字段 {k}"
