@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 import sys
 from collections import Counter
@@ -34,7 +35,10 @@ from app.gateway import chat  # noqa: E402
 from app.models import Candidate, Segment  # noqa: E402
 from app.ids import new_id  # noqa: E402
 
-JUDGES = ("deepseek/deepseek-v4.1-flash", "moonshotai/kimi-k3", "agnes-3.0-flash")
+# 评委名单可被调度覆盖（LG_RANKING_JUDGES=逗号分隔）；通道挂掉时降级
+# （如 2026-09-19 晚 deepseek 网关连败 → kimi+agnes 双评委，n_valid=2 需一致票）。
+JUDGES = tuple((os.environ.get("LG_RANKING_JUDGES")
+                or "deepseek/deepseek-v4.1-flash,moonshotai/kimi-k3,agnes-3.0-flash").split(","))
 PV = "ai_ranking_v1"
 
 NAT_SYS = "你是中文小说评审。只回答 A 或 B，不解释。"
@@ -171,18 +175,29 @@ def build(n_pairs: int, seed: int, ver: str, out_dir: Path | None = None,
     path = dest / f"ai_ranking_{ver}.jsonl"
     sum_path = dest / f"ai_ranking_{ver}_summary.json"
     rows = []
-    with path.open("w", encoding="utf-8") as f:
+    n_dropped = 0
+    done_segs: set = set()
+    if path.exists():                       # 断点续跑：已判段跳过，追加写
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r0 = json.loads(line)
+                rows.append(r0)
+                done_segs.add(r0["segment_id"])
+    todo = [pr for pr in pairs if pr["segment_id"] not in done_segs]
+    with path.open("a", encoding="utf-8") as f:
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=6) as ex:
-            for row in ex.map(one, list(enumerate(pairs))):
+            for row in ex.map(one, list(enumerate(todo))):
                 if row is None:
+                    n_dropped += 1
                     continue
                 rows.append(row)
                 f.write(json.dumps(row, ensure_ascii=False) + chr(10))
                 f.flush()
     summary = {"path": str(path), "summary_path": str(sum_path), "n": len(rows),
-               "n_pairs_attempted": len(pairs),
-               "n_tie_dropped": len(pairs) - len(rows),
+               "n_pairs_attempted": len(todo),
+               "n_tie_dropped": n_dropped,
+               "judges": list(JUDGES),
                "chosen_model_dist": dict(Counter(r["chosen_model"] for r in rows)),
                "by_model_pair": dict(Counter(
                    "/".join(sorted((r["chosen_model"], r["rejected_model"]))) for r in rows)),

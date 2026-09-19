@@ -298,7 +298,12 @@ bash scripts/serve_remote.sh                         # 起评审台（集霸批�
     · **项1 gold standard 双轨**：(c) 负面库 v2 已是主线（103 条，`23b3140`）；
       (b) AI-vs-AI 相对排序上线——`scripts/ai_ranking_build.py`（自然度轴三评委
       多数决、weak 标签、断点续跑、`LG_RANKING_JUDGES` 可覆盖；deepseek 网关
-      晚间连败后降级 kimi+agnes 双评委），产物 `ai_ranking_v1.jsonl`（~150 对）。
+      晚间连败后降级 kimi+agnes 双评委），产物 `ai_ranking_v1.jsonl`
+      **105 对**（132 对尝试、45 对评委分歧弃权；全部双评委一致票 n_valid=2）。
+      ⚠ **已知偏向（必读）**：chosen 侧 deepseek 占 72%（76/105）——评委轴认为
+      deepseek 文风更自然。DPO 用它训练会把模型往 deepseek 风格拉，不完全是
+      "更不像 AI"。缓解（v2 待做）：配对按模型均衡采样；或先在 hvai-v1 上
+      复验排序仪器再放量。数据全带 weak 标签与逐票留痕，可审计。
     · **项2 字表归一化**：见上条 13（`ca74785`/`fef07a0`，0.700→0.900）。
     · **项3 令牌轮换**：见上条 11（`0fc6935`）。
     · **项4 训练可行性评估**：`docs/training-feasibility-20260919.md`（`8322819`）。
