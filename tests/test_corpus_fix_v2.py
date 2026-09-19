@@ -125,3 +125,19 @@ def test_corpus_v2_idempotent(tmp_path):
     out2 = CF.build(only=("斗罗大陆",), map_path=tmp_path / "m.jsonl")
     assert out2["created"] == [] and out2["skipped"], "重跑必须幂等跳过"
     assert n1 == 1
+
+
+# ── 4. 会审补课：apply 黄金用例（幂等 / 顺序 / 空值）──────────
+
+def test_apply_is_idempotent_and_golden():
+    raw = "吴天宗的千雪见到了了天斗罗。"
+    once, n1 = apply(raw)
+    twice, n2 = apply(once)
+    # 黄金值：吴天→昊天(1) + 千雪→千仞雪(1) + 了天斗罗→昊天斗罗(1)
+    assert once == "昊天宗的千仞雪见到了昊天斗罗。" and n1 == 3
+    assert twice == once and n2 == 0, "修复必须幂等（修复产物不再命中字表）"
+
+
+def test_hits_none_and_empty():
+    assert hits(None) == {} and hits("") == {}
+    assert apply("") == ("", 0)

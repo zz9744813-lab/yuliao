@@ -15,6 +15,11 @@
 必须用 work_ids 明确选边（否则同一内容双份入池）。goldpick/建批工具按
 标题含"（corpus v2）"排除 v2 的默认行为另行决定。
 
+⚠ text / text_clean 口径：v2 的 text = v1.text_clean 经 TYPO_MAP 后的文本，
+v2 的 text_clean 随行携带 v1 的 text_clean——两者内容一致（v1 的 text_clean
+已先被 normalize_typos 修复过），但请下游统一读 `text`，避免口径漂移。
+未来 v2 上重跑 clean_text/normalize 时 text_clean 才会与 text 再次分层。
+
 用法：
     python scripts/corpus_fix_v2.py --scan                # 受影响作品的命中统计
     python scripts/corpus_fix_v2.py --build               # 产出 corpus v2（幂等）
@@ -92,7 +97,7 @@ def build(only: tuple[str, ...] | None = None,
                 skipped.append({"work": w.title, "v2": v2_title,
                                 "reason": "v2 已存在（幂等跳过）"})
                 continue
-            n_seg = n_repl = 0
+            n_seg = n_repl = n_integ_unparsed = 0
             w2 = Work(title=v2_title, author=w.author, source=w.source,
                       note=f"corpus v2 of「{w.title}」：TYPO_MAP 修复版"
                            f"（app/typo_map；v1 原样保留）")
@@ -108,7 +113,12 @@ def build(only: tuple[str, ...] | None = None,
                         integ["corpus_v2_source"] = seg.id
                         integ = json.dumps(integ, ensure_ascii=False)
                     except Exception:
+                        # 会审要求：不许静默丢锚——保留原值但计数告警，
+                        # 该段 v2 重绑帧/标注时需人工补映射
                         integ = seg.integrity
+                        n_integ_unparsed += 1
+                        print(f"[warn] integrity 非 JSON，未写 corpus_v2_source："
+                              f"v1={seg.id}", flush=True)
                 s.add(Segment(
                     work_id=w2.id, chapter=seg.chapter, ordinal=seg.ordinal,
                     text=new_text,                     # v2 正文 = 修复后清洗文本
@@ -122,7 +132,8 @@ def build(only: tuple[str, ...] | None = None,
                 n_repl += k
             w2.note = (w2.note or "") + f"；镜像 {n_seg} 段，替换 {n_repl} 处"
             created.append({"work": w.title, "v2": v2_title,
-                            "segments": n_seg, "replacements": n_repl})
+                            "segments": n_seg, "replacements": n_repl,
+                            "integrity_unparsed": n_integ_unparsed})
         s.commit()
         if map_rows:
             map_file.parent.mkdir(parents=True, exist_ok=True)
