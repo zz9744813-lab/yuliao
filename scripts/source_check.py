@@ -32,6 +32,9 @@
 - 作者本人的风格问题（如唐家三少爱用"地"当"的"）**算缺陷但不拦**——
   它是真实语料的一部分；只有**信息被破坏**（缺字、缺句、名字指代混乱）才拦。
 - 幂等：已有 `integrity.src_ok` 的段默认跳过。
+- 防呆（T-GUARD）：开跑前先校验 `LG_SOURCE_MODEL` 在网关模型池内（池外 fail-fast 并
+  打印最接近的名字，见 `scripts/preflight_models.py`）；累计 20 次调用后失败率 >30%
+  当场熔断中止。起因：`data/_dbg/DIAG_rescore_387.md`（名字写错 → 387 条 503 全灭）。
 
 用法：
     python scripts/source_check.py --scan
@@ -58,6 +61,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from app import db  # noqa: E402
 from app.gateway import bind_experiment, chat  # noqa: E402
 from app.models import Candidate, ControlledCorruption, Frame, Segment  # noqa: E402
+from app import config  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：模型名预检
 
 PV = "source_integrity_v1"
 # 判完整性要细读，用稳的模型；但**允许被调度覆盖**：夜间要把第一阶段也分派到
@@ -90,6 +95,26 @@ PROMPT = """下面是一段从网上下载的中文小说（盗版 txt 常有掉
 
 _lock = threading.Lock()
 _stat = {"ok": 0, "failed": 0, "skip": 0, "bad": 0}
+
+# 批量防呆②：失败率熔断。累计 LLM 调用满 BREAKER_MIN_CALLS 次后，failed/total 超线
+# 就当场中止（返回 dict 里 aborted=true），不等跑完 387 条再报 ok=0。
+# 起因见 data/_dbg/DIAG_rescore_387.md（模型名写错 → 503 全灭 × 7.4 分钟）。
+BREAKER_MIN_CALLS = 20
+BREAKER_FAIL_RATE = 0.3
+
+
+def _preflight() -> str | None:
+    """开跑前校验模型名在网关池内；None=可跑，否则返回不可跑的原因（含候选名）。
+
+    mock 模式根本不发网络调用（gateway 回确定性伪输出），无从校验也无需校验。
+    """
+    if config.LLM_MODE == "mock":
+        return None
+    try:
+        c = pf.check_model(MODEL)
+    except pf.GatewayUnreachable as e:
+        return f"拿不到网关模型池，无法确认 `{MODEL}`：{e}"
+    return None if c.ok else pf.describe(c)
 
 
 def parse_json(text: str) -> dict | None:
@@ -175,6 +200,27 @@ def targets(scope: str) -> list[str]:
 
 def run(scope: str = "used", conc: int = 8, limit: int = 0,
         ids: list[str] | None = None, exp_id: str | None = None) -> dict:
+    blocked = _preflight()
+    if blocked:
+        print(f"[预检失败] 模型名 `{MODEL}` 用不了，未开跑：{blocked}")
+        return {**dict(_stat), "aborted": True}
+    abort = threading.Event()
+
+    def _count(*keys: str) -> None:
+        """累计计数；满 BREAKER_MIN_CALLS 次后失败率超线就置熔断（只报一次）。"""
+        msg = None
+        with _lock:
+            for k in keys:
+                _stat[k] += 1
+            calls = _stat["ok"] + _stat["failed"]
+            rate = _stat["failed"] / calls if calls else 0.0
+            if (calls >= BREAKER_MIN_CALLS and rate > BREAKER_FAIL_RATE
+                    and not abort.is_set()):
+                abort.set()
+                msg = f"熔断：失败率 {rate:.1%}，已中止"
+        if msg:
+            print(msg)
+
     if ids is not None:
         with db.session() as s:
             rows = [(x.id, x.text_clean or x.text, x.integrity) for x in
@@ -195,9 +241,11 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
         todo = todo[:limit]
     print(f"待检查 {len(todo)} 段（scope={scope}，已检查跳过 {_stat['skip']}）")
     if not todo:
-        return dict(_stat)
+        return {**dict(_stat), "aborted": False}
 
     def one(item):
+        if abort.is_set():
+            return
         sid, text = item
         hits = rule_defects(text)
         if hits:                                  # 规则命中 → 直接判坏，不花 LLM 的钱
@@ -213,8 +261,7 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                                  "defects": hits, "checked_pv": PV + "+rules"})
                     seg.integrity = json.dumps(prev, ensure_ascii=False)
                     s.commit()
-            with _lock:
-                _stat["bad"] += 1
+            _count("bad")
             return
         if not text or len(text.strip()) < 10:
             with db.session() as s:
@@ -224,18 +271,15 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                                                 "defects": ["段为空或过短"]},
                                                ensure_ascii=False)
                     s.commit()
-            with _lock:
-                _stat["bad"] += 1
+            _count("bad")
             return
         try:
             d = check_one(text, exp_id)
         except Exception:                            # noqa: BLE001
-            with _lock:
-                _stat["failed"] += 1
+            _count("failed")
             return
         if not d:
-            with _lock:
-                _stat["failed"] += 1
+            _count("failed")
             return
         with db.session() as s:
             seg = s.get(Segment, sid)
@@ -250,17 +294,17 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                          "defects": d.get("defects") or [], "checked_pv": PV})
             seg.integrity = json.dumps(prev, ensure_ascii=False)
             s.commit()
-        with _lock:
-            _stat["ok"] += 1
-            if not d.get("src_ok"):
-                _stat["bad"] += 1
+        if d.get("src_ok"):
+            _count("ok")
+        else:
+            _count("ok", "bad")
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
         list(ex.map(one, todo))
     print(f"完成：ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
           f"（{(time.time() - t0) / 60:.1f} 分钟）")
-    return dict(_stat)
+    return {**dict(_stat), "aborted": abort.is_set()}
 
 
 def scan() -> None:
@@ -294,8 +338,10 @@ def main() -> None:
         scan()
         return
     if args.run:
-        print(json.dumps(run(scope=args.scope, conc=args.conc, limit=args.limit),
-                         ensure_ascii=False))
+        res = run(scope=args.scope, conc=args.conc, limit=args.limit)
+        print(json.dumps(res, ensure_ascii=False))
+        if res.get("aborted"):
+            sys.exit(2)     # 预检没过 / 失败率熔断：非零退出，别让夜间窗口静默空转
         scan()
         return
     ap.print_help()
