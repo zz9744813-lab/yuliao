@@ -15,6 +15,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from . import config
+from . import context_ablation
 from .context_ablation import MODES as CONTEXT_MODES  # noqa: F401  （口径引用）
 from .gateway import chat
 from .prompts_ctx import CTXONLY_SYSTEM, CTXONLY_USER, RECON_CTX_SYSTEM, RECON_CTX_USER
@@ -70,7 +72,7 @@ PROMPT_VERSION_BY_MODE: dict[WriterMode, str] = {
 }
 
 
-def write(req: WriterRequest, model: str = "deepseek/deepseek-v4.1-flash",
+def write(req: WriterRequest, model: str = config.DEFAULT_LLM_MODEL,
           temperature: float = 0.7, max_tokens: int = 3000) -> WriterResult:
     """调 gateway 生成一段。异常向上抛，调用方决定重试策略。"""
     req.validate()

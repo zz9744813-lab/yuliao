@@ -26,6 +26,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from app import config  # noqa: E402  # SIGNALS 用 DEFAULT_LLM_MODEL（P0 死 id 收敛）
+
 import pref_drivers as PD  # noqa: E402
 
 DB = Path(__file__).resolve().parent.parent / "data" / "language_genome.db"
@@ -34,9 +36,9 @@ CORE = ("n_sentences", "long_sent_ratio", "punct_！_per_k", "sent_len_mean")
 # 只保留两模型都有的两个口径，且**要求所有列齐全**才纳入样本 → 保证同子集
 SIGNALS = {
     "kimi_v4": ("judge_preference_v4", "moonshotai/kimi-k3"),
-    "ds_v4": ("judge_preference_v4", "deepseek/deepseek-v4.1-flash"),
+    "ds_v4": ("judge_preference_v4", config.DEFAULT_LLM_MODEL),
     "kimi_v3": ("judge_preference_v3", "moonshotai/kimi-k3"),
-    "ds_v3": ("judge_preference_v3", "deepseek/deepseek-v4.1-flash"),
+    "ds_v3": ("judge_preference_v3", config.DEFAULT_LLM_MODEL),
 }
 
 

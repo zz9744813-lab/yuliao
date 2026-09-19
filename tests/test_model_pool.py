@@ -14,14 +14,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from app import gateway  # noqa: E402
+from app import config, gateway  # noqa: E402
 
 
 def test_agy_is_serial():
     assert gateway.is_serial_model("agy/gemini-3.8-flash-high")
     assert not gateway.is_serial_model("moonshotai/kimi-k3")
     assert not gateway.is_serial_model("z-ai/glm-5.3")
-    assert not gateway.is_serial_model("deepseek/deepseek-v4.1-flash")
+    assert not gateway.is_serial_model(config.DEFAULT_LLM_MODEL)
 
 
 def test_split_models_groups_serial_apart():

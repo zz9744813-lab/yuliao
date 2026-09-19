@@ -20,7 +20,7 @@ from app.reconstruct import build_reconstruct_user
 import httpx
 
 EXP = "EXP-0911-B82D"
-CTX_MODELS = ["deepseek/deepseek-v4.1-flash", "meta/muse-spark-1.3-contributor"]
+CTX_MODELS = [config.DEFAULT_LLM_MODEL, "meta/muse-spark-1.3-contributor"]
 
 RECON_CTX_SYSTEM = "你是中文小说写作者，只输出正文。"
 RECON_CTX_USER = """你在续写一部长篇小说。下面给出：前文（最近两段）、以及接下来这一段必须完成的骨架（Frame JSON）。

@@ -123,7 +123,7 @@ def main() -> None:
     # ② 生成 B0 + C 候选
     if args.skip_candidates:
         print(f"\n--skip-candidates：只抽帧。下一步用并行驱动分模型跑：")
-        print(f"  python scripts/gen_cand_one.py {eid} --models deepseek/deepseek-v4.1-flash --groups B0,C")
+        print(f"  python scripts/gen_cand_one.py {eid} --models {config.DEFAULT_LLM_MODEL} --groups B0,C")
         print(f"  python scripts/gen_cand_one.py {eid} --models z-ai/glm-5.3 --groups B0,C")
         return
 

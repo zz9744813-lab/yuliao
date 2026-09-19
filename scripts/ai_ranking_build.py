@@ -29,16 +29,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import db  # noqa: E402
+from app import config, db  # noqa: E402
 from app.config import BLIND_REVIEW_PROMPT_VERSIONS  # noqa: E402
 from app.gateway import chat  # noqa: E402
-from app.models import Candidate, Segment  # noqa: E402
+from app.models import Candidate, Segment, exclude_corpus_v2_segments  # noqa: E402
 from app.ids import new_id  # noqa: E402
 
 # 评委名单可被调度覆盖（LG_RANKING_JUDGES=逗号分隔）；通道挂掉时降级
 # （如 2026-09-19 晚 deepseek 网关连败 → kimi+agnes 双评委，n_valid=2 需一致票）。
 JUDGES = tuple((os.environ.get("LG_RANKING_JUDGES")
-                or "deepseek/deepseek-v4.1-flash,moonshotai/kimi-k3,agnes-3.0-flash").split(","))
+                or f"{config.DEFAULT_LLM_MODEL},moonshotai/kimi-k3,agnes-3.0-flash").split(","))
 PV = "ai_ranking_v1"
 
 NAT_SYS = "你是中文小说评审。只回答 A 或 B，不解释。"
@@ -72,13 +72,18 @@ def parse_pick(text: str) -> str | None:
 
 
 def _pool(s) -> dict[str, list[Candidate]]:
-    """非基准段 → 该段的白名单 ok 候选（≥2 个才入池）。"""
+    """非基准段 → 该段的白名单 ok 候选（≥2 个才入池）。
+
+    corpus v2 镜像段一并排除：v2 与 v1 同文，双份入池等于同一对排序证据计两次
+    （会审①复发路径，与 role='benchmark' 侧同闸）。
+    """
     rows = (s.query(Candidate)
             .filter(Candidate.status == "ok")
             .filter(Candidate.prompt_version.in_(BLIND_REVIEW_PROMPT_VERSIONS))
             .filter(Candidate.text.isnot(None)).all())
     segs = {x.id: x for x in
-            s.query(Segment).filter(Segment.role.is_(None) | (Segment.role == "train")).all()}
+            s.query(Segment).filter(Segment.role.is_(None) | (Segment.role == "train"),
+                                    exclude_corpus_v2_segments()).all()}
     pool: dict[str, list[Candidate]] = {}
     for c in rows:
         seg = segs.get(c.segment_id)

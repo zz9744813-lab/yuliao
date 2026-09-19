@@ -28,11 +28,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import db  # noqa: E402
+from app import config, db  # noqa: E402
 from app.models import Experiment, Frame, Segment  # noqa: E402
 
 EXP_ID = "EXP-BENCH-RECON"
-MODEL = "deepseek/deepseek-v4.1-flash"   # 中转网关，非串行通道；够快且便宜
+MODEL = config.DEFAULT_LLM_MODEL   # 中转网关，非串行通道；够快且便宜
 
 
 def setup(dry_run: bool = True) -> dict:

@@ -3,7 +3,7 @@
 import json, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import db
+from app import config, db
 from app.context_ablation import neighbors
 from app.gateway import chat
 from app.ids import new_id
@@ -23,7 +23,7 @@ USER = """你在续写一部长篇小说。下面是最近两段前文。
 
 写"下一段"："""
 SYS = "你是中文小说写作者，只输出正文。"
-MODELS = ["deepseek/deepseek-v4.1-flash", "meta/muse-spark-1.3-contributor"]
+MODELS = [config.DEFAULT_LLM_MODEL, "meta/muse-spark-1.3-contributor"]
 
 def main():
   with db.session() as s:

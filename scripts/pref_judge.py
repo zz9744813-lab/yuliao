@@ -15,7 +15,7 @@
 
 用法：
     python scripts/pref_judge.py EXP-0911-B82D --batch r15
-    python scripts/pref_judge.py EXP-0911-B82D --all --judges moonshotai/kimi-k3,deepseek/deepseek-v4.1-flash
+    python scripts/pref_judge.py EXP-0911-B82D --all --judges moonshotai/kimi-k3,deepseek-v4.1-flash
     python scripts/pref_judge.py EXP-0911-B82D --batch r15 --no-context   # 消融对照
     python scripts/pref_judge.py EXP-0911-B82D --batch r15 --dry-run
 """
@@ -30,12 +30,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import db
+from app import config, db
 from app.context_ablation import scene_context
 from app.judges import PREFERENCE_PROMPT_VERSION, judge_preference
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
 
-DEFAULT_JUDGES = "moonshotai/kimi-k3,deepseek/deepseek-v4.1-flash"
+DEFAULT_JUDGES = "moonshotai/kimi-k3," + config.DEFAULT_LLM_MODEL
 
 _lock = threading.Lock()
 _counter = {"ok": 0, "failed": 0, "skip": 0}

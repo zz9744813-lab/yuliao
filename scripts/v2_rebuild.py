@@ -12,7 +12,7 @@ from app.reconstruct import build_reconstruct_user, RECON_PROMPT_VERSION
 from scripts.phase15_gen import RECON_CTX_USER, RECON_CTX_SYSTEM
 from scripts.factorial_d import USER as CTXONLY_USER, SYS as CTXONLY_SYS
 
-MODELS = ["deepseek/deepseek-v4.1-flash", "meta/muse-spark-1.3-contributor"]
+MODELS = [config.DEFAULT_LLM_MODEL, "meta/muse-spark-1.3-contributor"]
 
 def gen_group(s, exp, frames, segs, kind, builder, purpose_prefix, pv):
     n = 0

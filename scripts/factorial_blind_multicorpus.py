@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from app import db
+from app import config, db
 from app.context_ablation import neighbors
 from app.models import Candidate, Frame, Segment
 from app.reconstruct import RECON_PROMPT_VERSION as PV_B0
@@ -35,7 +35,7 @@ CORPORA = {
     "douluo": "EXP-0914-6DD3",
     "ba19": "EXP-0913-BA19",   # 琼明旧实验：候选齐全，作 builder 冒烟基准
 }
-MODELS = ["deepseek/deepseek-v4.1-flash", "meta/muse-spark-1.3-contributor"]
+MODELS = [config.DEFAULT_LLM_MODEL, "meta/muse-spark-1.3-contributor"]
 PV_C, PV_D = "recon_ctx_v1", "recon_ctxonly_v1"
 
 

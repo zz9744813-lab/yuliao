@@ -33,7 +33,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import db
+from app import config, db
 from app.context_ablation import scene_context
 from app.judges import PROMPT_VARIANTS, judge_preference
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
@@ -43,7 +43,7 @@ EXP = "EXP-0911-B82D"
 BATCH = "r25"
 # 建批时刻（r25 创建于 2026-09-14 13:15Z 之后）。此前的 done 题进过推导集。
 BATCH_EPOCH = "2026-09-14T13:15:00Z"
-JUDGES = ("moonshotai/kimi-k3", "deepseek/deepseek-v4.1-flash")
+JUDGES = ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL)
 
 _lock = threading.Lock()
 _counter = {"ok": 0, "failed": 0, "skip": 0}

@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import preflight_models as pf  # noqa: E402
 import source_check as sc  # noqa: E402
-from app import gateway  # noqa: E402
+from app import config, gateway  # noqa: E402
 from app import db  # noqa: E402
 from app.models import Segment, Work  # noqa: E402
 
@@ -125,7 +125,7 @@ def test_pool_hit_ok(gw):
 
 
 @pytest.mark.parametrize("name", ["z-ai/glm-5.3",             # 与池内完全一致
-                                  "deepseek/deepseek-v4.1-flash",  # 配置里带 vendor 前缀的写法
+                                  f"deepseek/{config.DEFAULT_LLM_MODEL}",  # 池内裸名多加了 vendor 前缀
                                   "kimi-k3"])                 # 少写 vendor 前缀
 def test_vendor_prefix_normalization_hits(gw, name):
     assert pf.check_model(name).ok, f"{name} 该按归一化命中，否则会误杀在用的默认名"

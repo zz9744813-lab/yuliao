@@ -34,12 +34,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from app import db  # noqa: E402
+from app import config, db  # noqa: E402
 from app.models import (Candidate, ControlledCorruption, Experiment, Frame, Segment,  # noqa: E402
                         Work, exclude_corpus_v2_segments)
 from app.experiments import stage_extract_frames  # noqa: E402
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
 from clean_text import clean_rules, looks_broken, needs_llm  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
+import source_check  # noqa: E402  # 扩产的源校勘闸门（MODEL 也在这里定义）
 
 
 def pick(n: int, seed: int, min_chars: int = 60, works: list[str] | None = None) -> list[str]:
@@ -98,18 +100,24 @@ def pick(n: int, seed: int, min_chars: int = 60, works: list[str] | None = None)
 
 
 def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
+    # 批量防呆①（P0 死 id 事故）：开跑前先把要用的模型名问一遍网关。
+    # 死 id 的表现是"源校勘通过 0/300 → 抽到 0 帧"，看上去像池子耗尽，实际全在 503。
+    blocked = pf.preflight_block([config.DEFAULT_LLM_MODEL, source_check.MODEL],
+                                 source="scale_corpus")
+    if blocked:
+        print(f"[预检失败] 未开跑：{blocked}")
+        return {"picked": 0, "aborted": True, "reason": blocked}
     ids = pick(n, seed, min_chars)
     print(f"挑到候选段 {len(ids)}（从没被任何实验用过、无水印无拼音、够长）")
     if not ids:
         return {"picked": 0}
-    from app import config
     with db.session() as s:
         e = s.get(Experiment, exp_id)
         if e is None:
             e = Experiment(id=exp_id, name=f"corpus_scale {time.strftime('%Y-%m-%d')}",
                            status="created",
                            config={"segment_ids": ids, "granularities": ["L"],
-                                   "extractors": ["deepseek/deepseek-v4.1-flash"],
+                                   "extractors": [config.DEFAULT_LLM_MODEL],
                                    "concurrency": conc,
                                    "kind": "corpus_scale"})
             s.add(e)

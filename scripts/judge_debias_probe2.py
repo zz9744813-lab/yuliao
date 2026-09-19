@@ -35,9 +35,11 @@ from scripts.judge_debias_probe import (  # noqa: E402
     agreement_bin, kappa_bin, perm_null, resolve_pick,
 )
 
+from app import config, db  # noqa: E402  # MODELS 在模块级取 DEFAULT_LLM_MODEL，必须模块级 import
+
 PERM_B = 20000
 SEED = 20260920
-MODELS = ("moonshotai/kimi-k3", "deepseek/deepseek-v4.1-flash",
+MODELS = ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL,
           "qoder/Qwen3.8-Flash", "wb/hy4-preview-f", "agnes-3.0-flash")
 PV_HINT = "heldout_near1"       # corr24 上实际有判定的口径前缀（装载时自动发现）
 
@@ -124,7 +126,6 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--md", action="store_true")
     args = ap.parse_args()
-    from app import db
     data = load_probe(db.session)
 
     print(f"corr24 集霸判定 {len(data.items)} 题；评委口径 "

@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from app import db
+from app import config, db
 from app.context_ablation import neighbors
 from app.gateway import chat
 from app.models import Candidate, Experiment, Frame, Segment
@@ -27,7 +27,7 @@ from app.reconstruct import build_reconstruct_user, RECON_PROMPT_VERSION
 from phase15_gen import RECON_CTX_USER
 from factorial_d import USER as CTXONLY_USER
 
-MODELS = ["deepseek/deepseek-v4.1-flash", "meta/muse-spark-1.3-contributor"]
+MODELS = [config.DEFAULT_LLM_MODEL, "meta/muse-spark-1.3-contributor"]
 PV_B0 = RECON_PROMPT_VERSION          # reconstruct_v1
 PV_C, PV_D = "recon_ctx_v1", "recon_ctxonly_v1"
 RUN_TAG = format(int(time.time()) & 0xFFFF, "04x")

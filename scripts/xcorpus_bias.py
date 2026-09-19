@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import db
+from app import config, db
 from app.context_ablation import scene_context
 from app.judges import PREFERENCE_PROMPT_VERSION, judge_preference
 from app.models import Candidate, JudgeRun, Segment, Work
@@ -41,7 +41,7 @@ CORPORA = [
     ("斗罗（目标风格锚·三少）", "EXP-0914-6DD3"),
 ]
 JUDGE_KIND = "preference_xcorpus"      # 独立 kind，不污染正式 preference 记录
-DEFAULT_JUDGES = "moonshotai/kimi-k3,deepseek/deepseek-v4.1-flash"
+DEFAULT_JUDGES = "moonshotai/kimi-k3," + config.DEFAULT_LLM_MODEL
 
 _lock = threading.Lock()
 _counter = {"ok": 0, "failed": 0, "skip": 0}
@@ -112,7 +112,7 @@ def _report() -> None:
     print(f"\n{'语料':24s}{'评委':14s}{'n':>4s}{'挑candidate':>13s}{'挑human':>9s}{'弃权/非二选一':>14s}")
     with db.session() as s:
         for label, exp_id in CORPORA:
-            for m in ("moonshotai/kimi-k3", "deepseek/deepseek-v4.1-flash"):
+            for m in ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL):
                 rows = (s.query(JudgeRun)
                         .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND, model=m,
                                    prompt_version=PREFERENCE_PROMPT_VERSION)

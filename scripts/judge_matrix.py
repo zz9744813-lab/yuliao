@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import db
+from app import config, db
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
 
 
@@ -136,7 +136,7 @@ def main(exp_id: str, batch: str | None = None) -> list[dict]:
         if not user_call:
             return []
 
-        judges = ("moonshotai/kimi-k3", "deepseek/deepseek-v4.1-flash")
+        judges = ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL)
         rows = _adversarial_rows(s, exp_id, user_call, judges)
         print("\n── 口径 A：adversarial（评委猜「哪边是 AI」→ 映射为站边）──")
         print(json.dumps(rows, ensure_ascii=False, indent=1))

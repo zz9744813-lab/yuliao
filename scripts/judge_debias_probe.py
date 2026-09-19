@@ -54,6 +54,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app import config  # noqa: E402  REQUIRED_MODELS 用 DEFAULT_LLM_MODEL（P0 死 id 收敛）
+
 BATCH = "corr24"
 CONTROL_TYPE = "NEUTRAL_PARAPHRASE"       # 控制臂：内容相同只换说法
 GATE = 0.70
@@ -62,7 +64,7 @@ BOOT_B = 2000                              # κ bootstrap 次数
 SMOOTH_ALPHA = 1.0                         # map 校准的拉普拉斯平滑强度
 ANSWERS = ("human", "candidate", "tie", "both_bad")   # map 目标桶（cant_judge 不入桶）
 SEED = 20260919
-REQUIRED_MODELS = ("moonshotai/kimi-k3", "deepseek/deepseek-v4.1-flash")
+REQUIRED_MODELS = ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL)
 
 
 def _as_dict(v) -> dict | None:

@@ -43,8 +43,10 @@ from scripts.judge_debias_probe import (  # noqa: E402
     _stress_verdict,
 )
 
+from app import config as _config  # noqa: E402
+
 MODEL = "moonshotai/kimi-k3"
-MODEL2 = "deepseek/deepseek-v4.1-flash"
+MODEL2 = _config.DEFAULT_LLM_MODEL
 PV = "judge_preference_v4_heldout_near1"
 
 

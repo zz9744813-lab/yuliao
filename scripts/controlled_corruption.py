@@ -59,7 +59,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from app import config, db  # noqa: E402
 from app.gateway import bind_experiment, chat  # noqa: E402
 from app.models import (Candidate, ControlledCorruption, Experiment, Frame,  # noqa: E402
-                        ReviewItem, Segment, Work)
+                        ReviewItem, Segment, Work, exclude_corpus_v2_segments)
 from app.prompt_render import render  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -74,7 +74,7 @@ GEN_PV = "corrupt_v2"
 # v3：加 grammatical 字段（只查病句/标点错乱，不评文风）——用于**审计**生成器有没有
 #     把"表达方式劣化"做成"语法劣化"。不做硬拒（有些类型天然读起来别扭）。
 VERIFY_PV = "corrupt_verify_v3"
-DEFAULT_GEN = "deepseek/deepseek-v4.1-flash"
+DEFAULT_GEN = config.DEFAULT_LLM_MODEL
 DEFAULT_VERIFY = "z-ai/glm-5.3"
 
 # 长度硬卡：单变量改写不该把长度翻倍或砍半（超了就说明改了不止一个变量）
@@ -655,8 +655,12 @@ def pick_fresh_segments(s, n: int, seed: int, min_chars: int = 60,
     为什么不需要 SemanticFrame：**corruption 检测不需要帧**——基准题就是
     「两版里哪版是人类原文」，比的是文本本身。所以基准段可以完全独立于帧抽取，
     从 29 万段里挑，不受"哪段抽过帧"的约束。
+
+    corpus v2 镜像段（role=None，与 v1 同文）一律排除：挑中它就是"同文双份入基准"，
+    会把 U0c 刚收口的 v2 污染重新写回来（会审①复发路径）。
     """
     segs = (s.query(Segment).filter(Segment.role.is_(None))
+            .filter(exclude_corpus_v2_segments())
             .filter(Segment.n_chars >= min_chars).all())
     titles = {w.id: (w.title or "") for w in s.query(Work).all()}
     cand_segs = {r[0] for r in s.query(Candidate.segment_id).distinct()}
@@ -715,14 +719,23 @@ def split_benchmark(n: int | None = None, ratio: float = 0.25, seed: int = 99118
       SFT 导出（`export_training.py`），拿它当基准等于基准题泄漏。
     · 划定后**只增不减**（role 只从 None 变成 benchmark），且是确定性的（按 seed
       排序取样），否则两次跑会得到两套基准、历史数字不可比。
+
+    corpus v2 镜像段永不入基准（会审①复发路径：本函数是 role='benchmark' 的写入侧）。
     """
     with db.session() as s:
         q = s.query(ControlledCorruption.segment_id)
         if exp:                              # 限定实验：避免跨实验互相牵动（测试与多批共用一库）
             q = q.filter(ControlledCorruption.experiment_id == exp)
-        seg_ids = sorted({r[0] for r in q.distinct()})
-        if not seg_ids:
+        all_ids = sorted({r[0] for r in q.distinct()})
+        if not all_ids:
             return {"marked": 0, "pool": 0, "reason": "劣化数据集为空"}
+        # v2 段与 v1 同文，双份入基准=基准被污染；只挡新划，不回改历史 role
+        seg_ids = sorted({r[0] for r in s.query(Segment.id).filter(
+            Segment.id.in_(all_ids), exclude_corpus_v2_segments()).all()})
+        v2_excluded = len(all_ids) - len(seg_ids)
+        if not seg_ids:
+            return {"marked": 0, "pool": 0, "v2_excluded": v2_excluded,
+                    "reason": "劣化数据集只剩 corpus v2 镜像段"}
         used_elsewhere = {r[0] for r in s.query(Candidate.segment_id)
                           .filter(Candidate.prompt_version.in_(("reconstruct_v1", "recon_ctx_v1")))
                           .distinct()}
@@ -740,6 +753,7 @@ def split_benchmark(n: int | None = None, ratio: float = 0.25, seed: int = 99118
             s.commit()
         return {"marked": len(picked), "already": len(already), "pool_fresh": len(pool),
                 "pool_total": len(seg_ids), "used_elsewhere": len(seg_ids) - len(fresh) - len(already),
+                "v2_excluded": v2_excluded,
                 "dry_run": dry_run}
 
 
@@ -770,7 +784,7 @@ def _ensure_frames(seg_ids: list[str], exp_id: str) -> int:
         e.config = {**(e.config or {}), "segment_ids": sorted(set(need)),
                     "granularities": ["L"],
                     "extractors": (e.config or {}).get(
-                        "extractors") or ["deepseek/deepseek-v4.1-flash"],
+                        "extractors") or [config.DEFAULT_LLM_MODEL],
                     "concurrency": 4}
         s.commit()
         print(f"补抽 L 帧：{len(need)} 段（基准段本来没抽过帧）")
@@ -939,7 +953,7 @@ def reverify(*, verify_model: str, conc: int, dry_run: bool = False,
 # agy 的 Gemini 3.8）。
 # ⚠ agy 是**单账号共享额度**：必须顺序调用（见 app/gateway.is_serial_model），
 #   混在并发池里会互相挤掉。判分函数已按此把 agy 模型单独串行跑。
-DEFAULT_JUDGES = ("moonshotai/kimi-k3", "deepseek/deepseek-v4.1-flash",
+DEFAULT_JUDGES = ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL,
                   "z-ai/glm-5.3", "agy/gemini-3.8-flash-high")
 NEW1_SUFFIX = "_near1"
 
@@ -1290,7 +1304,13 @@ def main() -> None:
             # （2026-09-18 实测：连跑三次攒出 14 个段，只有 7 个有帧，0 条成功）。
             used = sorted({r[0] for r in s.query(ControlledCorruption.segment_id)
                            .filter(ControlledCorruption.experiment_id == exp_id).distinct()})
-            held = [x for x in s.query(Segment).filter(Segment.id.in_(used)).all()] if used else []
+            # 续用的一律过 corpus v2 血缘闸（role='benchmark' 在本循环下方写入，
+            # 让历史脏行经断点续跑复活=会审①指出的复发路径）
+            held = [x for x in s.query(Segment).filter(
+                Segment.id.in_(used), exclude_corpus_v2_segments()).all()] if used else []
+            dropped_v2 = len(used) - len(held)
+            if dropped_v2:
+                print(f"[v2 闸] 断点续跑丢弃 corpus v2 镜像段 {dropped_v2} 个（不划基准）")
             picked = [(seg, None) for seg in held]
             if len(picked) < args.fresh_benchmark:
                 more = pick_fresh_segments(s, args.fresh_benchmark - len(picked),

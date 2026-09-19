@@ -3,7 +3,7 @@
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import db, experiments
+from app import config, db, experiments
 from app.context_ablation import neighbors
 from app.gateway import chat
 from app.models import Candidate, Experiment, Frame, Segment, Work
@@ -12,7 +12,7 @@ from app.reconstruct import build_reconstruct_user, RECON_PROMPT_VERSION
 from scripts.phase15_gen import RECON_CTX_USER, RECON_CTX_SYSTEM
 from scripts.factorial_d import USER as CTXONLY_USER, SYS as CTXONLY_SYS
 
-MODELS = ["deepseek/deepseek-v4.1-flash", "z-ai/glm-5.3"]
+MODELS = [config.DEFAULT_LLM_MODEL, "z-ai/glm-5.3"]
 
 def gen_group(s, exp, frames, segs, kind, builder, purpose, pv):
     existing = {(c.frame_id, c.model, c.prompt_version) for c in

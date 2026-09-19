@@ -39,12 +39,16 @@ GATEWAY_API_KEY = os.environ.get("LG_GATEWAY_API_KEY", "")
 # 重建候选默认模型池（网关实测可用）
 # 2026-09-14：移除 glm-5.3（该模型已不可用，留在池里会产出 failed 调用）
 # 2026-09-14：加入 agnes-3.0-flash（用户指定；网关 /models 确认存在，是 agnes 系最新 flash）
+# 2026-09-20（P0）：中转池内在册的是**无前缀** `deepseek-v4.1-flash`；带 `deepseek/`
+# 前缀的旧 id 已下线（503 model_not_found，09-19 20:00 起全线死）。全仓默认模型
+# 收敛到本常量（环境变量 LG_LLM_MODEL 可覆盖），不许再散落字面量。
+DEFAULT_LLM_MODEL = os.environ.get("LG_LLM_MODEL", "deepseek-v4.1-flash")
 DEFAULT_RECON_MODELS = [
     m.strip()
     for m in os.environ.get(
         "LG_RECON_MODELS",
-        "deepseek/deepseek-v4.1-flash,z-ai/glm-5.3,"
-        "moonshotai/kimi-k3,agnes-3.0-flash",
+        f"deepseek-v4.1-flash,z-ai/glm-5.3,"
+        f"moonshotai/kimi-k3,agnes-3.0-flash",
     ).split(",")
     if m.strip()
 ]
@@ -54,7 +58,7 @@ STRONG_MODEL = os.environ.get("LG_STRONG_MODEL", "moonshotai/kimi-k3")
 EXTRACTOR_MODELS = [
     m.strip()
     for m in os.environ.get(
-        "LG_EXTRACTOR_MODELS", f"{STRONG_MODEL},deepseek/deepseek-v4.1-flash"
+        "LG_EXTRACTOR_MODELS", f"{STRONG_MODEL},{DEFAULT_LLM_MODEL}"
     ).split(",")
     if m.strip()
 ]
