@@ -32,6 +32,10 @@ Writer 输出：Sentence / Paragraph
 用法：
     python scripts/export_training.py --dry-run
     python scripts/export_training.py --ver v1
+    python scripts/export_training.py --pairs          # DPO 对照对
+    python scripts/export_training.py --from-frames    # SFT（帧→人类原文）
+    python scripts/export_training.py --rm             # 奖励模型数据（text/score/label_source）
+    python scripts/export_training.py --rewrite        # 改写对（instruction=帧要点 / output=人类原文）
 """
 from __future__ import annotations
 
@@ -50,12 +54,103 @@ from app import db  # noqa: E402
 from app.context_ablation import neighbors  # noqa: E402
 from app.models import (Candidate, ControlledCorruption, ExpressionStrategy,  # noqa: E402
                         Frame, JudgeRun, ReviewItem, Segment, Work)
+from make_random_batch import looks_watermarked  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "exports"
 
 # 控制臂不是劣化：它是"中性改写"，用来量评委偏差（见 controlled_corruption.CONTROLS）。
 # **绝不能进 DPO 对**——那等于教模型"换个说法就是错的"。
 CONTROL_TYPES = frozenset({"NEUTRAL_PARAPHRASE"})
+
+# winner_resolved → (人类侧分, 候选侧分)。解析不出的（'B' / cant_judge / None）不在表里，
+# 跳过并计数——**不许把读不懂的判定硬编成分数**（纪律④）。
+# tie 有两种历史写法：review_items 用 'tie'，judge_runs 用 'equal'，都认。
+SCORE_MAP = {
+    "human": (1.0, 0.0),
+    "candidate": (0.0, 1.0),
+    "tie": (0.5, 0.5), "equal": (0.5, 0.5),
+    "both_bad": (0.0, 0.0),   # 两边都不好：都给 0，不硬造高低
+}
+
+RM_PROVENANCE = {
+    "user_verdict": "集霸盲评裁定（review_items.status=done）",
+    "corruption_variable": "controlled_corruption（§7）：人类原文 vs 单变量劣化，变量级标签",
+    "judge_majority": "评委多数票（judge_runs, preference）——弱标签",
+}
+
+
+def _extras_boundary(s, work_id: str, seg_version: int | None) -> int | None:
+    """番外区边界：第一个「番外正文段」的 ordinal；没有番外则 None。
+
+    复用 make_random_batch.extras_start 的识别依据（「番外」开头的段），但**不能
+    直接套用**：v1 老切分把多章标题连排成目录簇（琼明 v1 ordinal 29 起就是
+    「番外 多年之后3…番外 多年之后4…」，一段含 3~4 个「番外」），按老口径会把
+    整部书误判成番外——本轮实测误剔 192 条已判定候选。目录簇的特征是「番外」
+    **多次出现**，真正的番外正文段只出现一次（v1 正文起点 12455、v2 起点 18308，
+    两种切分下都验证过）。所以这里只认单次出现的段当边界。
+    """
+    rows = (s.query(Segment.ordinal, Segment.text)
+            .filter(Segment.work_id == work_id, Segment.seg_version == seg_version,
+                    Segment.text.like("番外%"))
+            .order_by(Segment.ordinal).all())
+    for ordinal, text in rows:
+        if (text or "").count("番外") == 1:
+            return ordinal
+    return None
+
+
+def _excluded_reason(s, seg: Segment | None, starts: dict, *,
+                     for_train: bool = False) -> str:
+    """训练导出的隔离闸门：返回剔除原因（空串 = 放行）。
+
+    硬约束（任务 13 钉死，回归测试锁定）——以下段落**一律不进任何训练导出**：
+
+    1. `role='benchmark'`（§14：基准段被训练读到就不再是基准）；
+    2. 番外区段（集霸 2026-09-17 定的策略：只排番外，其余照抽；
+       边界 = 该作品第一个番外正文段的 ordinal，见 _extras_boundary）；
+    3. 水印伪影段（盗版 txt 掺拼音/乱码，只污染人类那一侧，会制造不公平比较，
+       见 make_random_batch.looks_watermarked）。
+
+    for_train=True 再加两条质量闸（SFT/RM 口径；DPO 的段在劣化生成端已查过源）：
+    fixture_* 夹具作品、源校勘判坏（integrity.src_ok=false）的段。
+
+    starts 缓存 {(work_id, seg_version): extras 起始 ordinal}，避免每段一查。
+    """
+    if seg is None:
+        return "missing"
+    if seg.role == "benchmark":
+        return "benchmark"
+    key = (seg.work_id, seg.seg_version)
+    if key not in starts:
+        starts[key] = _extras_boundary(s, seg.work_id, seg.seg_version)
+    st = starts[key]
+    if st is not None and seg.ordinal >= st:
+        return "extras"
+    if looks_watermarked(seg.text or ""):
+        return "watermark"
+    if for_train:
+        work = s.get(Work, seg.work_id)
+        if work is not None and (work.title or "").startswith("fixture"):
+            return "fixture"
+        try:
+            integ = json.loads(seg.integrity or "{}")
+        except Exception:
+            integ = {}
+        if integ.get("src_ok") is False:
+            return "bad_src"
+    return ""
+
+
+def _majority_winner(ws: list[str]) -> str:
+    """同一候选的评委多票 → 多数票。无票返回空串；平票归 equal（不硬造胜负）。"""
+    if not ws:
+        return ""
+    c: dict[str, int] = {}
+    for w in ws:
+        c[w] = c.get(w, 0) + 1
+    top = max(c.values())
+    leads = [k for k, v in c.items() if v == top]
+    return leads[0] if len(leads) == 1 else "equal"
 
 
 def strategy_hints() -> list[str]:
@@ -88,6 +183,8 @@ def export(ver: str) -> dict:
     path = OUT_DIR / f"writer_train_{ver}.jsonl"
     n_l4 = n_skip = 0
     dist = {"human": 0, "candidate": 0}
+    starts: dict = {}
+    n_hold: dict[str, int] = {}
     with db.session() as s, path.open("w", encoding="utf-8") as f:
         for r in rows:
             # ⚠ ORM 的 JSON 列**已经解析成 dict**，再 json.loads 会抛 TypeError。
@@ -108,6 +205,11 @@ def export(ver: str) -> dict:
             seg = s.get(Segment, r["seg"])
             if cand is None or seg is None:
                 n_skip += 1
+                continue
+            reason = _excluded_reason(s, seg, starts)   # §14 基准 / 番外 / 水印：不进导出
+            if reason:
+                n_skip += 1
+                n_hold[reason] = n_hold.get(reason, 0) + 1
                 continue
             fr = (s.query(Frame).filter_by(experiment_id=r["exp"], segment_id=r["seg"],
                                            granularity="L", is_primary=True)
@@ -136,7 +238,7 @@ def export(ver: str) -> dict:
             n_l4 += 1
             dist[w] += 1
     return {"path": str(path), "n_l4": n_l4, "n_skip": n_skip, "dist": dist,
-            "n_hints": len(hints)}
+            "n_hints": len(hints), "n_held_out": n_hold}
 
 
 def export_corrupt_pairs(ver: str, out_dir: Path | None = None,
@@ -205,16 +307,21 @@ def export_corrupt_pairs(ver: str, out_dir: Path | None = None,
     dest = out_dir or OUT_DIR
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / f"corrupt_dpo_{ver}.jsonl"
-    n = n_suspect = n_user = n_bench = n_ctrl = n_strict_skip = 0
+    n = n_suspect = n_user = n_bench = n_ctrl = n_strict_skip = n_dirty = 0
     by_type: dict[str, int] = {}
+    starts: dict = {}
     with db.session() as s, path.open("w", encoding="utf-8") as f:
         for r in rows:
             seg = s.get(Segment, r["seg"])
             cand = s.get(Candidate, r["cid"])
             if seg is None or cand is None:
                 continue
-            if seg.role == "benchmark":          # §14：基准段不进训练导出
+            reason = _excluded_reason(s, seg, starts)   # §14 基准 / 番外 / 水印：不进导出
+            if reason == "benchmark":
                 n_bench += 1
+                continue
+            if reason in ("watermark", "extras"):
+                n_dirty += 1
                 continue
             if r["ct"] in CONTROL_TYPES:         # 控制臂只用于测量，不是训练信号
                 n_ctrl += 1
@@ -267,7 +374,7 @@ def export_corrupt_pairs(ver: str, out_dir: Path | None = None,
             by_type[r["ct"]] = by_type.get(r["ct"], 0) + 1
     return {"path": str(path), "n": n, "n_suspect": n_suspect, "n_user": n_user,
             "n_benchmark_held_out": n_bench, "n_control_excluded": n_ctrl,
-            "by_type": by_type}
+            "n_dirty_held_out": n_dirty, "by_type": by_type}
 
 
 def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
@@ -284,8 +391,9 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
     dest = out_dir or OUT_DIR
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / f"writer_sft_{ver}.jsonl"
-    n = n_bad = n_bench = n_l4 = n_fixture = 0
+    n = n_bad = n_bench = n_l4 = n_fixture = n_dirty = 0
     by_work: dict[str, int] = {}
+    starts: dict = {}
     with db.session() as s, path.open("w", encoding="utf-8") as f:
         judged = {}
         for ri in s.query(ReviewItem).filter(ReviewItem.status == "done").all():
@@ -296,20 +404,18 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
             seg = s.get(Segment, fr.segment_id)
             if seg is None or not fr.payload:
                 continue
-            if seg.role == "benchmark":          # §14：基准段不进训练
+            reason = _excluded_reason(s, seg, starts, for_train=True)
+            if reason == "benchmark":            # §14：基准段不进训练
                 n_bench += 1
                 continue
-            # fixture_* 是测试夹具（10~17 段），既不可外推也会污染统计 —— 训练数据同样不许进
-            w_title = (s.get(Work, seg.work_id).title if s.get(Work, seg.work_id) else "") or ""
-            if w_title.startswith("fixture"):
+            if reason == "fixture":
                 n_fixture += 1
                 continue
-            try:
-                integ = json.loads(seg.integrity or "{}")
-            except Exception:
-                integ = {}
-            if integ.get("src_ok") is False:
+            if reason == "bad_src":
                 n_bad += 1
+                continue
+            if reason:                           # watermark / extras（任务 13 硬约束）
+                n_dirty += 1
                 continue
             text = seg.text_clean or seg.text
             if not text or len(text.strip()) < 20:
@@ -336,7 +442,251 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
             by_work[rec["work"]] = by_work.get(rec["work"], 0) + 1
     return {"path": str(path), "n": n, "n_skipped_bad_src": n_bad,
             "n_skipped_benchmark": n_bench, "n_skipped_fixture": n_fixture,
-            "by_work": by_work}
+            "n_skipped_dirty": n_dirty, "by_work": by_work}
+
+
+def export_rm(ver: str, out_dir: Path | None = None) -> dict:
+    """奖励模型（RM）训练数据 —— 任务 13 补齐的第一种口径（总方案 §42）。
+
+    一行一条，骨架只有三件：`text / score / label_source`（另带 weak、side、suspect
+    与溯源 id）。分数**只来自库里已有的真实标注**，一条都不许编：
+
+    ① `corruption_variable` —— 受控劣化对（人类原文 vs 单变量劣化版）。
+       「劣化版更差」这个标签来自劣化**变量本身**（§7 的已知答案，与 DPO 默认方向
+       同一条真值来源）；集霸**裁定过**的条目改用他的判定（升级为 user_verdict），
+       评委多数票偏好劣化版的带 `suspect: true`（§7.5 反例，须人工复核）。
+    ② `user_verdict` —— 集霸判定过的 review_items（status=done），winner_resolved
+       映射成分数（SCORE_MAP）：human→1/0，candidate→0/1，tie/equal→0.5/0.5，
+       both_bad→0/0。
+    ③ `judge_majority` —— 评委判定（judge_runs, preference）按候选聚合多数票，
+       **显式 `weak: true`**（§52：评委不是真理源，只能当弱标签）。
+
+    隔离（任务 13 硬约束）：基准段 / 番外段 / 水印段一律不进（_excluded_reason）；
+    控制臂 NEUTRAL_PARAPHRASE 是中性改写不是劣化，**正负例都不给**。
+
+    summary 同名落盘 `rm_<ver>_summary.json`：条数 / 来源分布 / 正负比。
+    """
+    dest = out_dir or OUT_DIR
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / f"rm_{ver}.jsonl"
+    sum_path = dest / f"rm_{ver}_summary.json"
+    with db.session() as s:
+        # —— 预取三类来源的原始标注，避免循环里 N+1 ——
+        uvs: dict[str, dict] = {}
+        for ri in s.query(ReviewItem).filter(ReviewItem.status == "done").all():
+            uvs[ri.subject_id] = he._as_dict(ri.human_verdict) or {}
+        votes: dict[str, list[str]] = {}
+        for jr in (s.query(JudgeRun)
+                   .filter(JudgeRun.judge_kind == "preference",
+                           JudgeRun.status == "ok").all()):
+            w = (he._as_dict(jr.verdict) or {}).get("winner_resolved")
+            if w:
+                votes.setdefault(jr.subject_id, []).append(w)
+        cc_by_cand: dict[str, ControlledCorruption] = {}
+        for cc in (s.query(ControlledCorruption)
+                   .filter(ControlledCorruption.status == "ok",
+                           ControlledCorruption.candidate_id.isnot(None)).all()):
+            cc_by_cand[cc.candidate_id] = cc
+
+        subjects = sorted(set(uvs) | set(votes) | set(cc_by_cand))
+        starts: dict = {}
+        n = n_skip_missing = n_unresolved = n_text_empty = n_ctrl = 0
+        n_bench = n_wm = n_ex = n_fix = n_bad = 0
+        by_source = {"corruption_variable": 0, "user_verdict": 0, "judge_majority": 0}
+        pos = neg = neu = n_weak = 0
+        with path.open("w", encoding="utf-8") as f:
+            for cid in subjects:
+                cand = s.get(Candidate, cid)
+                if cand is None:
+                    # 孤儿判定（候选行已不在库，verdict 里也没有原文）：跳过并计数，不许编文本
+                    n_skip_missing += 1
+                    continue
+                seg = s.get(Segment, cand.segment_id)
+                reason = _excluded_reason(s, seg, starts, for_train=True)
+                if reason == "benchmark":
+                    n_bench += 1
+                    continue
+                if reason == "watermark":
+                    n_wm += 1
+                    continue
+                if reason == "extras":
+                    n_ex += 1
+                    continue
+                if reason == "fixture":
+                    n_fix += 1
+                    continue
+                if reason == "bad_src":
+                    n_bad += 1
+                    continue
+                if reason:
+                    n_skip_missing += 1
+                    continue
+                cc = cc_by_cand.get(cid)
+                if cc is not None and cc.corruption_type in CONTROL_TYPES:
+                    n_ctrl += 1              # 控制臂：中性改写，不是负例也不是正例
+                    continue
+                htext = (seg.text_clean or seg.text or "").strip()
+                if not htext or len(htext) < 20:
+                    n_skip_missing += 1
+                    continue
+                nb = neighbors(s, seg)
+                work = s.get(Work, seg.work_id)
+                base = {
+                    "work": work.title if work else "",
+                    "segment_id": seg.id, "candidate_id": cand.id,
+                    "pv": cand.prompt_version, "model": cand.model,
+                    "prev2": (nb["prev2"].text if nb.get("prev2") else ""),
+                    "prev1": (nb["prev1"].text if nb.get("prev1") else ""),
+                }
+
+                def emit(side: str, text: str, score: float, src: str,
+                         weak: bool, suspect: bool = False) -> None:
+                    nonlocal n, n_weak, pos, neg, neu, n_text_empty
+                    if not (text or "").strip():
+                        n_text_empty += 1
+                        return
+                    row = dict(base)
+                    row.update({
+                        "id": f"{cid}:{side}:{src}",
+                        "text": text, "score": score,
+                        "label_source": src, "weak": weak, "suspect": suspect,
+                        "side": side,
+                        "corruption_type": (cc.corruption_type if cc else ""),
+                        "corruption_variable": (cc.variable if cc else ""),
+                        "provenance": RM_PROVENANCE[src],
+                    })
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    n += 1
+                    n_weak += weak
+                    by_source[src] += 1
+                    if score > 0.5:
+                        pos += 1
+                    elif score < 0.5:
+                        neg += 1
+                    else:
+                        neu += 1
+
+                # ② 集霸裁定（强标签，优先于变量标签）
+                sc = SCORE_MAP.get(uvs.get(cid, {}).get("winner_resolved"))
+                if sc:
+                    emit("human", htext, sc[0], "user_verdict", weak=False)
+                    emit("candidate", cand.text, sc[1], "user_verdict", weak=False)
+                elif cid in uvs:
+                    n_unresolved += 1        # 判过但解析不出（'B'/cant_judge）：不编分
+                # ① 变量标签（没有裁定才用；裁定过的不再回退到默认方向）
+                if cc and sc is None:
+                    suspect = _majority_winner(votes.get(cid, [])) == "candidate"
+                    emit("human", htext, 1.0, "corruption_variable",
+                         weak=False, suspect=suspect)
+                    emit("candidate", cand.text, 0.0, "corruption_variable",
+                         weak=False, suspect=suspect)
+                # ③ 评委多数票（弱标签）
+                mj = _majority_winner(votes.get(cid, []))
+                msc = SCORE_MAP.get(mj)
+                if msc:
+                    emit("human", htext, msc[0], "judge_majority", weak=True)
+                    emit("candidate", cand.text, msc[1], "judge_majority", weak=True)
+    summary = {
+        "path": str(path), "summary_path": str(sum_path),
+        "n": n, "by_source": by_source,
+        "pos": pos, "neg": neg, "neutral": neu,
+        "pos_neg_ratio": (round(pos / neg, 3) if neg else None),
+        "n_weak": n_weak,
+        "n_skip_missing": n_skip_missing, "n_unresolved_verdict": n_unresolved,
+        "n_text_empty": n_text_empty,
+        "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
+        "n_extras_excluded": n_ex, "n_fixture_excluded": n_fix,
+        "n_bad_src_excluded": n_bad, "n_control_excluded": n_ctrl,
+    }
+    sum_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    return summary
+
+
+def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
+    """改写训练对 —— 任务 13 补齐的第二种口径。
+
+    `instruction = 语义帧要点`（L 主帧 payload 的 JSON 串，event/intention/
+    reader_effect），`output = 人类原文`（text_clean 优先）。这就是 §42 的
+    「Semantic → Expression」改写监督信号，**不需要任何人工标签**（质量 L1）。
+
+    「L 级优先」：只用 L 主帧（实测 M 帧覆盖的段全部同时有 L 帧，无遗漏）。
+    隔离同 --rm：基准段 / 番外段 / 水印段 / 夹具 / 坏源一律不进（_excluded_reason）。
+    summary 同名落盘 `rewrite_<ver>_summary.json`：条数 / 粒度与语料分布。
+    """
+    dest = out_dir or OUT_DIR
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / f"rewrite_{ver}.jsonl"
+    sum_path = dest / f"rewrite_{ver}_summary.json"
+    with db.session() as s:
+        frames = (s.query(Frame).filter(Frame.granularity == "L", Frame.is_primary == True)  # noqa: E712
+                  .filter(Frame.status != "failed").all())
+        starts: dict = {}
+        n = n_skip_missing = 0
+        n_bench = n_wm = n_ex = n_fix = n_bad = 0
+        by_work: dict[str, int] = {}
+        granularity_dist: dict[str, int] = {}
+        with path.open("w", encoding="utf-8") as f:
+            for fr in frames:
+                seg = s.get(Segment, fr.segment_id)
+                if seg is None or not fr.payload:
+                    n_skip_missing += 1
+                    continue
+                reason = _excluded_reason(s, seg, starts, for_train=True)
+                if reason == "benchmark":
+                    n_bench += 1
+                    continue
+                if reason == "watermark":
+                    n_wm += 1
+                    continue
+                if reason == "extras":
+                    n_ex += 1
+                    continue
+                if reason == "fixture":
+                    n_fix += 1
+                    continue
+                if reason == "bad_src":
+                    n_bad += 1
+                    continue
+                if reason:
+                    n_skip_missing += 1
+                    continue
+                text = (seg.text_clean or seg.text or "").strip()
+                if not text or len(text) < 20:
+                    n_skip_missing += 1
+                    continue
+                nb = neighbors(s, seg)
+                work = s.get(Work, seg.work_id)
+                rec = {
+                    "id": fr.id,
+                    "instruction": json.dumps(fr.payload, ensure_ascii=False,
+                                              sort_keys=True),
+                    "output": text,
+                    "context": {"prev2": (nb["prev2"].text if nb.get("prev2") else ""),
+                                "prev1": (nb["prev1"].text if nb.get("prev1") else "")},
+                    "frame": fr.payload,
+                    "granularity": fr.granularity,
+                    "work": work.title if work else "",
+                    "segment_id": seg.id, "frame_id": fr.id,
+                    "pv": fr.prompt_version,
+                    "quality": "L1",             # §44：自动抽取（无人工判定）
+                    "provenance": "L 主帧要点 → 人类原文（自动，无需人工判定）",
+                }
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                n += 1
+                by_work[rec["work"]] = by_work.get(rec["work"], 0) + 1
+                granularity_dist[fr.granularity] = granularity_dist.get(fr.granularity, 0) + 1
+    summary = {
+        "path": str(path), "summary_path": str(sum_path),
+        "n": n, "by_work": by_work, "granularity_dist": granularity_dist,
+        "n_skip_missing": n_skip_missing,
+        "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
+        "n_extras_excluded": n_ex, "n_fixture_excluded": n_fix,
+        "n_bad_src_excluded": n_bad,
+    }
+    sum_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    return summary
 
 
 def main() -> None:
@@ -347,6 +697,10 @@ def main() -> None:
                     help="--pairs 的严格模式：只导集霸判「人类原文胜」的对（默认按假定方向导）")
     ap.add_argument("--from-frames", action="store_true",
                     help="从所有 L 主帧导出 SFT（frame→人类原文，无需人工标签）")
+    ap.add_argument("--rm", action="store_true",
+                    help="导出奖励模型训练数据（text/score/label_source，三来源标注）")
+    ap.add_argument("--rewrite", action="store_true",
+                    help="导出改写训练对（instruction=语义帧要点，output=人类原文）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     db.init_db()
@@ -357,6 +711,29 @@ def main() -> None:
                            ('reconstruct_v1','recon_ctx_v1')""").fetchone()[0]
         con.close()
         print(f"dry-run：候选条目 {n} 条；策略提示 {len(strategy_hints())} 条")
+        return
+    if args.rm:
+        q = export_rm(args.ver)
+        print(f"RM 导出完成 → {q['path']}")
+        print(f"  共 {q['n']} 行（来源分布 {json.dumps(q['by_source'], ensure_ascii=False)}）")
+        print(f"  正 {q['pos']} / 负 {q['neg']} / 中性 {q['neutral']}（正负比 "
+              f"{q['pos_neg_ratio']}）；弱标签（评委）{q['n_weak']} 行")
+        print(f"  §14 隔离：基准 {q['n_benchmark_held_out']} / 番外 {q['n_extras_excluded']} / "
+              f"水印 {q['n_watermark_excluded']} / 夹具 {q['n_fixture_excluded']} / "
+              f"坏源 {q['n_bad_src_excluded']}；控制臂剔除 {q['n_control_excluded']}")
+        print(f"  跳过：孤儿判定/无段/短文 {q['n_skip_missing']} / 判定解析不出 "
+              f"{q['n_unresolved_verdict']} / 空文本 {q['n_text_empty']}")
+        print(f"  summary → {q['summary_path']}")
+        return
+    if args.rewrite:
+        q = export_rewrite(args.ver)
+        print(f"Rewrite 导出完成 → {q['path']}")
+        print(f"  共 {q['n']} 对（粒度分布 {json.dumps(q['granularity_dist'], ensure_ascii=False)}）")
+        print(f"  §14 隔离：基准 {q['n_benchmark_held_out']} / 番外 {q['n_extras_excluded']} / "
+              f"水印 {q['n_watermark_excluded']} / 夹具 {q['n_fixture_excluded']} / "
+              f"坏源 {q['n_bad_src_excluded']} / 无帧或短文 {q['n_skip_missing']}")
+        print(f"  语料分布 {json.dumps(q['by_work'], ensure_ascii=False)}")
+        print(f"  summary → {q['summary_path']}")
         return
     if args.from_frames:
         q = export_sft_from_frames(args.ver)
