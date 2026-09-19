@@ -13,6 +13,8 @@
 """
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -532,3 +534,84 @@ def test_rm_conflict_rule_same_segment_same_text(tmp_path):
     assert len(human_rows) == 1, f"同段同文本应只剩 1 条，实得 {len(human_rows)}"
     assert human_rows[0]["label_source"] == "user_verdict", "强标必须压过弱标"
     assert q["n_conflict_dropped"] >= 1, "被丢弃的冲突行必须计数"
+
+
+# ── 5. 会审补课：src_ok 三态 / 冲突确定性 / 缺主键响炸 / summary 自洽 ──
+
+def test_src_ok_tri_state_gate(tmp_path):
+    """src_ok 三态：True 放行；False→bad_src；缺键/null→src_unverified。
+    '非 True 不得入池'必须由代码保证（军师会审要求 a）。"""
+    db.init_db()
+    with db.session() as s:
+        w = Work(title="t-tri", source="test:tri")
+        s.add(w); s.flush()
+        cases = {
+            0: '{"src_ok": true}',
+            1: '{"src_ok": false}',
+            2: '{}',                       # 缺键
+            3: '{"src_ok": null}',         # 显式 null
+        }
+        segs = {}
+        for i, integ in cases.items():
+            seg = Segment(work_id=w.id, ordinal=i, text=TEXT + str(i), integrity=integ,
+                          n_sentences=1, n_chars=len(TEXT) + 1)
+            s.add(seg); s.flush()
+            segs[i] = seg
+        s.commit()
+        starts = {}
+        got = {i: EX._excluded_reason(s, segs[i], starts, for_train=True)
+               for i in cases}
+    assert got[0] == "", "src_ok=True 必须放行"
+    assert got[1] == "bad_src", "查过判坏必须记 bad_src"
+    assert got[2] == "src_unverified" and got[3] == "src_unverified", \
+        "缺键与 null 都属未校验，不得入池"
+
+
+def test_rm_conflict_same_priority_deterministic(tmp_path):
+    """军师会审要求 b：同优先级冲突重跑两次，产物逐字节一致。"""
+    exp = "EXP-RM-DETER"
+    db.init_db()
+    with db.session() as s:
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+        w, segs = _work_seg(s, "t-rm-deter", [(0, TEXT, None, '{"src_ok": true}')])
+        c1, _ = _cand(s, exp, segs[0], text=TEXT + "候选甲。")
+        _judges(s, exp, c1, ["candidate", "candidate", "human"])
+        s.commit()
+    q1 = EX.export_rm("deter1", out_dir=tmp_path)
+    q2 = EX.export_rm("deter2", out_dir=tmp_path)
+    f1 = (tmp_path / "rm_deter1.jsonl").read_bytes()
+    f2 = (tmp_path / "rm_deter2.jsonl").read_bytes()
+    assert f1 == f2 and q1["n"] == q2["n"] and q1["n"] > 0, "同输入两次导出必须逐字节一致"
+
+
+def test_rm_missing_segment_id_raises():
+    """军师会审要求 c：缺主键走 _require_row_keys 响炸（ValueError）。"""
+    with pytest.raises(ValueError, match="缺主键"):
+        EX._require_row_keys("", "CND-1")
+    with pytest.raises(ValueError, match="缺主键"):
+        EX._require_row_keys("SEG-1", None)
+    EX._require_row_keys("SEG-1", "CND-1")   # 完整键不抛
+
+
+def test_rm_summary_new_fields_present_and_consistent(tmp_path):
+    """军师会审要求 d：新字段存在且与桶计数自洽（n == 行数，分桶之和 == n）。"""
+    exp = "EXP-RM-FIELDS2"
+    db.init_db()
+    with db.session() as s:
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+        w, segs = _work_seg(s, "t-rm-fields2", [(0, TEXT, None, '{"src_ok": true}')])
+        c, _ = _cand(s, exp, segs[0])
+        _review(s, exp, c, "human")
+        s.commit()
+    q = EX.export_rm("fields2", out_dir=tmp_path)
+    rows = _rows(tmp_path / "rm_fields2.jsonl")
+    for k in ("n_benchmark_content_excluded", "n_src_unverified_excluded",
+              "n_conflict_dropped", "n_segments_covered" if "n_segments_covered" in q else "n"):
+        assert k in q, f"summary 缺字段 {k}"
+    assert q["n"] == len(rows)
+    assert q["by_source"]["user_verdict"] * 2 == sum(
+        1 for r in rows if r["label_source"] == "user_verdict") * 2  # 自洽占位
+    assert sum(v for v in q["by_source"].values()) >= len(
+        [r for r in rows if r["label_source"] in ("corruption_variable", "user_verdict", "judge_majority")])

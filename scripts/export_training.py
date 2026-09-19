@@ -128,6 +128,13 @@ def _bench_hashes() -> set:
     return _BENCH_HASHES
 
 
+def _require_row_keys(segment_id, candidate_id) -> None:
+    """RM 行主键前置校验：path.open("w") 会清空旧文件，写半截才 KeyError 的
+    窗口必须关死（会审 2026-09-19）。缺任一键 → 响亮 ValueError。"""
+    if not segment_id or not candidate_id:
+        raise ValueError(f"RM 行缺主键（segment_id/candidate_id）：{segment_id!r}/{candidate_id!r}")
+
+
 def _hits_bench_text(text: str | None) -> bool:
     if not text:
         return False
@@ -177,7 +184,7 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
         # 会审意见：False（查过且判坏）与 None（从未查过）是**互斥口径**，分开报。
         if integ.get("src_ok") is False:
             return "bad_src"
-        if "src_ok" not in integ:
+        if integ.get("src_ok") is not True:   # 缺键与 null 同属"从未校验"
             return "src_unverified"
     # 内容级隔离（P1-5）：无论 role，正文命中基准冻结文本即剔除（跨切分孪生/同文）
     if _hits_bench_text(seg.text_clean or seg.text if seg else None):
@@ -504,7 +511,7 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
                 "pv": fr.prompt_version,
                 "provenance": "L 主帧 → 人类原文（自动，无需人工判定）",
             }
-            f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             n += 1
             by_work[rec["work"]] = by_work.get(rec["work"], 0) + 1
     return {"path": str(path), "n": n, "n_skipped_bad_src": n_bad,
@@ -621,6 +628,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                     if not (text or "").strip():
                         n_text_empty += 1
                         return
+                    _require_row_keys(seg.id, cid)   # 会审：主键前置校验，写半截窗口关死
                     row = dict(base)
                     row.update({
                         "id": f"{cid}:{side}:{src}",
@@ -697,7 +705,8 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
         "n_text_empty": n_text_empty,
         "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
         "n_extras_excluded": n_ex, "n_fixture_excluded": n_fix,
-        "n_bad_src_excluded": n_bad, "n_control_excluded": n_ctrl,
+        "n_bad_src_excluded": n_bad, "n_src_unverified_excluded": n_src_unv,
+        "n_control_excluded": n_ctrl,
     }
     sum_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2),
                         encoding="utf-8")
@@ -809,7 +818,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                     "drift": dr,
                     "provenance": NEGATIVE_PROVENANCE,
                     "pv": cc.prompt_version,
-                }, ensure_ascii=False) + chr(10))
+                }, ensure_ascii=False) + "\n")
                 n += 1
                 neg_segs.add(cc.segment_id)
                 by_type[cc.corruption_type] = by_type.get(cc.corruption_type, 0) + 1
