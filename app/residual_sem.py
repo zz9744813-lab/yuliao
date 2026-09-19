@@ -6,9 +6,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 
 from . import config
+
+# 命题分解默认用 STRONG_MODEL（细读任务用稳的模型）；但**允许被调度覆盖**——
+# 夜间/白班批量跑命题时设 LG_PROPOSITION_MODEL=deepseek/... 即可改派到快通道
+# （2026-09-19：kimi 全量命题 ~2.6 次/分钟要 4.6 小时，deepseek ~30 次/分钟）。
+# 默认值不变，行为与以前完全一致（同 LG_SOURCE_MODEL 的先例 8604a51）。
+PROPOSITION_MODEL = os.environ.get("LG_PROPOSITION_MODEL", "") or config.STRONG_MODEL
 from .gateway import LLMError, chat
 from .prompt_render import render
 
@@ -84,7 +91,7 @@ def parse_llm_json(text: str) -> dict | None:
 def extract_propositions(text: str) -> dict:
     try:
         r = chat(
-            model=config.STRONG_MODEL,
+            model=PROPOSITION_MODEL,
             system="你只输出 strict JSON。",
             user=render(PROPOSITIONS_PROMPT, text=text),
             purpose="propositions",
@@ -104,7 +111,7 @@ def extract_propositions(text: str) -> dict:
 def semantic_residual(*, frame_json: str, human_text: str, candidate_text: str) -> dict:
     try:
         r = chat(
-            model=config.STRONG_MODEL,
+            model=PROPOSITION_MODEL,
             system="你是严谨的语义核对员，只输出 JSON。",
             user=render(SEM_RESIDUAL_PROMPT,
                         frame_json=frame_json, human=human_text, candidate=candidate_text),
