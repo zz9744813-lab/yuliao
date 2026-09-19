@@ -128,6 +128,38 @@ def _bench_hashes() -> set:
     return _BENCH_HASHES
 
 
+def _dedupe_rm_rows(pending: list[dict]) -> tuple[list[dict], int]:
+    """RM 行去重（军师 P1-6 / 会审二轮）：同段同文本多来源冲突只留一条。
+
+    规则：来源优先级 user_verdict(3) > corruption_variable(2) > judge_majority(1)；
+    同优先级平局按 id 字典序取最小（id 均为 "CID-hex"/"SEG-hex" 定长字符串，
+    字典序与生成序一致）。缺 segment_id → KeyError 响炸（emit 侧另有
+    _require_row_keys 前置闸，这里是同一不变量的第二道闸）。
+    返回 (去重后的行列表按 id 排序, 丢弃数)。
+    """
+    prio = {"user_verdict": 3, "corruption_variable": 2, "judge_majority": 1}
+    def _norm_txt(t: str) -> str:
+        return "".join((t or "").split())
+    best: dict[tuple, dict] = {}
+    n_conflict_dropped = 0
+    for row in pending:
+        if not row.get("segment_id"):
+            # emit 侧 _require_row_keys 已拦过一道；这里兜 None/空串值
+            raise KeyError(f"RM 行缺 segment_id：{row.get('id')!r}")
+        key = (row["segment_id"], _norm_txt(row["text"]))
+        cur = best.get(key)
+        if cur is None:
+            best[key] = row
+            continue
+        n_conflict_dropped += 1
+        cand_prio = prio.get(row["label_source"], 0)
+        cur_prio = prio.get(cur["label_source"], 0)
+        if cand_prio > cur_prio or (cand_prio == cur_prio and row["id"] < cur["id"]):
+            best[key] = row
+    rows = sorted(best.values(), key=lambda r: r["id"])
+    return rows, n_conflict_dropped
+
+
 def _require_row_keys(segment_id, candidate_id) -> None:
     """RM 行主键前置校验：path.open("w") 会清空旧文件，写半截才 KeyError 的
     窗口必须关死（会审 2026-09-19）。缺任一键 → 响亮 ValueError。"""
@@ -664,26 +696,12 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
 
     # 军师 P1-6：同段同文本多来源分数冲突的处理规则——按来源优先级保留一条
     # （user_verdict 强标签 > corruption_variable 构造性 > judge_majority 弱标），
-    # 同优先级平局按 id 字典序取最小（确定性 tie-break，重跑逐字节可复现），
-    # 其余丢弃并计数。**先定规则再混合**，不静默保留冲突分数。
-    prio = {"user_verdict": 3, "corruption_variable": 2, "judge_majority": 1}
-    def _norm_txt(t: str) -> str:
-        return "".join((t or "").split())
-    best: dict[tuple, dict] = {}
-    n_conflict_dropped = 0
-    for row in pending:
-        key = (row["segment_id"], _norm_txt(row["text"]))   # 缺 segment_id 应响亮报错，不静默归并
-        cur = best.get(key)
-        if cur is None:
-            best[key] = row
-            continue
-        n_conflict_dropped += 1
-        cand_prio = prio.get(row["label_source"], 0)
-        cur_prio = prio.get(cur["label_source"], 0)
-        if cand_prio > cur_prio or (cand_prio == cur_prio and row["id"] < cur["id"]):
-            best[key] = row
-    rows = sorted(best.values(), key=lambda r: r["id"])
-    with path.open("w", encoding="utf-8") as f:
+    # 同优先级平局按 id **字典序**取最小（id 均为 "前缀-hex" 字符串，定长同前缀，
+    # 字典序==数值序；确定性 tie-break，重跑逐字节可复现），其余丢弃并计数。
+    # **先定规则再混合**，不静默保留冲突分数。行缺 segment_id 在此响炸：
+    # emit 侧已有 _require_row_keys 前置校验，这里是同一不变量的第二道闸。
+    rows, n_conflict_dropped = _dedupe_rm_rows(pending)
+    with path.open("w", newline="", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     n = len(rows)

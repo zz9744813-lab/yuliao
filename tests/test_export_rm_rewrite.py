@@ -623,3 +623,73 @@ def test_rm_summary_new_fields_present_and_consistent(tmp_path):
         1 for r in rows if r["label_source"] == "user_verdict") * 2  # 自洽占位
     assert sum(v for v in q["by_source"].values()) >= len(
         [r for r in rows if r["label_source"] in ("corruption_variable", "user_verdict", "judge_majority")])
+
+
+# ── 6. 会审二轮：去重函数行为 + 行完整性 ─────────────────────
+
+def _mkrow(rid, seg, text, src, score):
+    return {"id": rid, "segment_id": seg, "text": text,
+            "label_source": src, "score": score, "weak": src == "judge_majority"}
+
+
+def test_dedupe_priority_beats_order():
+    """user_verdict(3) 后到也压过 judge_majority(1) 先到——优先级决定去留。"""
+    rows = [
+        _mkrow("RM-2", "S1", "同文", "judge_majority", 0.0),
+        _mkrow("RM-1", "S1", "同文", "user_verdict", 1.0),
+    ]
+    out, dropped = EX._dedupe_rm_rows(rows)
+    assert [r["id"] for r in out] == ["RM-1"] and dropped == 1
+
+
+def test_dedupe_same_priority_keeps_smaller_id():
+    """同优先级平局：id 字典序较小者保留（id 为定长前缀 hex，字典序==生成序）。"""
+    rows = [
+        _mkrow("CND-000000a2", "S1", "同文", "judge_majority", 1.0),
+        _mkrow("CND-00000010", "S1", "同文", "judge_majority", 0.5),
+    ]
+    out, dropped = EX._dedupe_rm_rows(rows)
+    assert [r["id"] for r in out] == ["CND-00000010"], "必须保留 id 字典序较小者"
+    assert dropped == 1
+
+
+def test_dedupe_missing_segment_id_raises():
+    import pytest
+    rows = [_mkrow("RM-1", None, "同文", "judge_majority", 0.5)]
+    with pytest.raises(KeyError):
+        EX._dedupe_rm_rows(rows)
+    with pytest.raises(KeyError):
+        EX._dedupe_rm_rows([_mkrow("RM-1", "S1", "同文", "judge_majority", 0.5),
+                            _mkrow("RM-2", None, "同文", "judge_majority", 1.0)])
+
+
+def test_dedupe_deterministic_and_different_segments_survive():
+    """重跑逐字节一致；不同段的同文本行是合法行，都保留。"""
+    rows = [
+        _mkrow("CND-2", "S1", "同文", "judge_majority", 0.0),
+        _mkrow("CND-1", "S2", "同文", "judge_majority", 1.0),
+        _mkrow("CND-3", "S1", "同文", "user_verdict", 1.0),
+    ]
+    a, d1 = EX._dedupe_rm_rows(rows)
+    b, d2 = EX._dedupe_rm_rows(list(reversed(rows)))
+    assert d1 == d2 and [r["id"] for r in a] == [r["id"] for r in b], "乱序输入结果必须一致"
+    assert len(a) == 2, "S1 被 user_verdict 拿下、S2 独立保留"
+
+
+def test_rm_exported_rows_all_carry_segment_id(tmp_path):
+    """会审要求：证明所有落库行都带 segment_id（emit 前置闸 + 落盘回读双证）。"""
+    exp = f"EXP-RM-SEGID-{_UNIQ}"
+    db.init_db()
+    with db.session() as s:
+        if not s.get(Experiment, exp):
+            s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
+        w, segs = _work_seg(s, f"t-rm-segid-{_UNIQ}", [(0, TEXT, None, '{"src_ok": true}')])
+        c, _ = _cand(s, exp, segs[0])
+        _judges(s, exp, c, ["candidate", "candidate", "human"])
+        _review(s, exp, c, "human")
+        s.commit()
+    q = EX.export_rm(f"segid-{_UNIQ}", out_dir=tmp_path)
+    rows = _rows(tmp_path / f"rm_segid-{_UNIQ}.jsonl")
+    assert q["n"] == len(rows) >= 2
+    assert all(r.get("segment_id") for r in rows), "存在缺 segment_id 的行"
+    assert q["n_src_unverified_excluded"] >= 0
