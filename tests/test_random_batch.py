@@ -403,3 +403,19 @@ def test_watermark_filter_catches_site_watermark_injected_midsentence():
     assert not looks_watermarked("他说：“你不必再来了。”")
     assert not looks_watermarked("（这一段是插叙）——就这样结束了……")
     assert looks_watermarked("朱红sè的大门")       # 旧规则（带调拼音）仍生效
+
+
+# ── §14 隔离硬闸（2026-09-19）────────────────────────────────
+def test_benchmark_role_candidates_never_enter_pool():
+    """基准段上的候选端给集霸判一次，隐藏基准就不再 hidden——
+    role='benchmark' 的候选必须在建批前被硬闸拦下（此前只靠自觉）。"""
+    exp_id = "EXP-RB-BENCHGUARD"
+    _seed(exp_id, 2, 0)                    # 2 条普通候选（role=None）
+    with db.session() as s:
+        seg = s.query(Segment).filter_by(work_id=s.query(Work).filter_by(
+            title="t-" + exp_id).one().id).one()
+        seg.role = "benchmark"             # 把同实验里的段标成基准段
+        s.commit()
+    with db.session() as s:
+        out = MRB.build_batch(s, exp_id, 10, "benchguard", seed=1, dry_run=True)
+    assert out["picked"] == [], "基准段候选混进了盲评池——§14 隔离被破坏"

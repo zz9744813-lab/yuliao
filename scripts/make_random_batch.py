@@ -102,6 +102,18 @@ def build_batch(s, exp: str, n: int, tag: str, seed: int,
     cands = [c for c in cands
              if c.prompt_version in BLIND_REVIEW_PROMPT_VERSIONS
              and c.text and len(c.text.strip()) >= 20]
+    # §14 隔离硬闸（2026-09-19）：role='benchmark' 段上的候选**永不进盲评池**——
+    # 端给集霸判一次，隐藏基准就不再是 hidden。此前靠"别把基准实验指给本脚本"
+    # 的自觉，按白名单纪律落成硬闸；被拦下的量显式打印，不许静默（纪律④）。
+    if cands:
+        _roles = {r.id: r.role for r in
+                  s.query(Segment).filter(
+                      Segment.id.in_({c.segment_id for c in cands})).all()}
+        _blocked = [c for c in cands if _roles.get(c.segment_id) == "benchmark"]
+        if _blocked:
+            print(f"[§14 隔离] 拦下 {len(_blocked)} 条基准段候选，不进盲评池"
+                  f"（experiment={exp}）")
+            cands = [c for c in cands if _roles.get(c.segment_id) != "benchmark"]
     if pool == "unjudged":
         done_ids = {r.subject_id for r in
                     s.query(ReviewItem).filter_by(experiment_id=exp).all()
