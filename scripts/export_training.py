@@ -52,8 +52,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import heldout_eval as he  # noqa: E402
 from app import db  # noqa: E402
 from app.context_ablation import neighbors  # noqa: E402
-from app.models import (Candidate, ControlledCorruption, ExpressionStrategy,  # noqa: E402
-                        Frame, JudgeRun, ReviewItem, Segment, Work)
+from app.models import (BenchmarkItem, Candidate, ControlledCorruption,  # noqa: E402
+                        ExpressionStrategy, Frame, JudgeRun, ReviewItem, Segment, Work)
 from make_random_batch import looks_watermarked  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "exports"
@@ -99,6 +99,41 @@ def _extras_boundary(s, work_id: str, seg_version: int | None) -> int | None:
     return None
 
 
+_BENCH_HASHES: set | None = None
+
+
+def _bench_hashes() -> set:
+    """内容级隔离（军师 P1-5）：全部基准条目冻结文本（a/b/≥50字context）的规范化哈希。
+
+    为什么在 _excluded_reason 内部懒加载：隔离只查目标段 role 会漏两种情况——
+    ①同一内容在不同切分版本下有两个 segment id（一个 benchmark、一个 None→可训练，
+    hvai 原文就是这样漏进训练导出的）；②条目 context（邻段原文）与可训练段相同。
+    懒加载让不接触基准表的调用方零开销。
+    """
+    global _BENCH_HASHES
+    if _BENCH_HASHES is None:
+        import hashlib
+        def _norm(t: str) -> str:
+            return "".join((t or "").split())
+        hs = set()
+        with db.session() as s:
+            for it in s.query(BenchmarkItem).all():
+                for t in (it.text_a, it.text_b):
+                    if t:
+                        hs.add(hashlib.md5(_norm(t).encode("utf-8")).hexdigest())
+                if it.context and len(it.context) >= 50:
+                    hs.add(hashlib.md5(_norm(it.context).encode("utf-8")).hexdigest())
+        _BENCH_HASHES = hs
+    return _BENCH_HASHES
+
+
+def _hits_bench_text(text: str | None) -> bool:
+    if not text:
+        return False
+    import hashlib
+    return hashlib.md5("".join(text.split()).encode("utf-8")).hexdigest() in _bench_hashes()
+
+
 def _excluded_reason(s, seg: Segment | None, starts: dict, *,
                      for_train: bool = False) -> str:
     """训练导出的隔离闸门：返回剔除原因（空串 = 放行）。
@@ -138,6 +173,20 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
             integ = {}
         if integ.get("src_ok") is False:
             return "bad_src"
+    # 内容级隔离（P1-5）：无论 role，正文命中基准冻结文本即剔除（跨切分孪生/同文）
+    if _hits_bench_text(seg.text_clean or seg.text if seg else None):
+        return "benchmark_content"
+    # 第②种泄漏：条目 context（基准段的邻段原文）与可训练段的邻段相同
+    if for_train and seg is not None:
+        prevs = (s.query(Segment)
+                 .filter(Segment.work_id == seg.work_id,
+                         Segment.seg_version == seg.seg_version,
+                         Segment.ordinal < seg.ordinal,
+                         Segment.ordinal >= seg.ordinal - 2)
+                 .all())
+        for pv_seg in prevs:
+            if _hits_bench_text(pv_seg.text_clean or pv_seg.text):
+                return "benchmark_content"
     return ""
 
 
@@ -308,6 +357,7 @@ def export_corrupt_pairs(ver: str, out_dir: Path | None = None,
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / f"corrupt_dpo_{ver}.jsonl"
     n = n_suspect = n_user = n_bench = n_ctrl = n_strict_skip = n_dirty = 0
+    n_bench_content = 0
     by_type: dict[str, int] = {}
     starts: dict = {}
     with db.session() as s, path.open("w", encoding="utf-8") as f:
@@ -320,8 +370,10 @@ def export_corrupt_pairs(ver: str, out_dir: Path | None = None,
             if reason == "benchmark":
                 n_bench += 1
                 continue
-            if reason in ("watermark", "extras"):
+            if reason in ("watermark", "extras") or reason == "benchmark_content":
                 n_dirty += 1
+                if reason == "benchmark_content":
+                    n_bench_content += 1
                 continue
             if r["ct"] in CONTROL_TYPES:         # 控制臂只用于测量，不是训练信号
                 n_ctrl += 1
@@ -373,7 +425,7 @@ def export_corrupt_pairs(ver: str, out_dir: Path | None = None,
             n_user += bool(w)
             by_type[r["ct"]] = by_type.get(r["ct"], 0) + 1
     return {"path": str(path), "n": n, "n_suspect": n_suspect, "n_user": n_user,
-            "n_benchmark_held_out": n_bench, "n_control_excluded": n_ctrl,
+            "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_control_excluded": n_ctrl,
             "n_dirty_held_out": n_dirty, "by_type": by_type}
 
 
@@ -392,6 +444,7 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
     dest.mkdir(parents=True, exist_ok=True)
     path = dest / f"writer_sft_{ver}.jsonl"
     n = n_bad = n_bench = n_l4 = n_fixture = n_dirty = 0
+    n_bench_content = 0
     by_work: dict[str, int] = {}
     starts: dict = {}
     with db.session() as s, path.open("w", encoding="utf-8") as f:
@@ -413,6 +466,9 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
                 continue
             if reason == "bad_src":
                 n_bad += 1
+                continue
+            if reason == "benchmark_content":    # P1-5：内容级隔离
+                n_bench_content += 1
                 continue
             if reason:                           # watermark / extras（任务 13 硬约束）
                 n_dirty += 1
@@ -492,6 +548,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
         starts: dict = {}
         n = n_skip_missing = n_unresolved = n_text_empty = n_ctrl = 0
         n_bench = n_wm = n_ex = n_fix = n_bad = 0
+        n_bench_content = 0
         by_source = {"corruption_variable": 0, "user_verdict": 0, "judge_majority": 0}
         pos = neg = neu = n_weak = 0
         with path.open("w", encoding="utf-8") as f:
@@ -517,6 +574,13 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                     continue
                 if reason == "bad_src":
                     n_bad += 1
+                    continue
+                if reason == "benchmark_content":    # P1-5：内容级隔离
+                    n_bench_content += 1
+                    continue
+                    continue
+                if reason == "benchmark_content":    # P1-5：内容级隔离
+                    n_bench_content += 1
                     continue
                 if reason:
                     n_skip_missing += 1
@@ -594,7 +658,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
         "n_weak": n_weak,
         "n_skip_missing": n_skip_missing, "n_unresolved_verdict": n_unresolved,
         "n_text_empty": n_text_empty,
-        "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
+        "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
         "n_extras_excluded": n_ex, "n_fixture_excluded": n_fix,
         "n_bad_src_excluded": n_bad, "n_control_excluded": n_ctrl,
     }
@@ -629,6 +693,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
     sum_path = dest / f"negatives_{ver}_summary.json"
     starts: dict = {}
     n = n_bench = n_ex = n_wm = n_fix = n_bad = 0
+    n_bench_content = 0
     n_control = n_ungram = n_missing = 0
     by_type: dict[str, int] = {}
     by_work: dict[str, int] = {}
@@ -658,6 +723,9 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                     continue
                 if reason == "bad_src":
                     n_bad += 1
+                    continue
+                if reason == "benchmark_content":    # P1-5：内容级隔离
+                    n_bench_content += 1
                     continue
                 if cc.corruption_type == "NEUTRAL_PARAPHRASE":
                     n_control += 1
@@ -705,7 +773,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                 by_work[(work.title if work else "∅")] = by_work.get(work.title if work else "∅", 0) + 1
     summary = {"path": str(path), "summary_path": str(sum_path), "n": n,
                "by_type": by_type, "by_work": by_work,
-               "n_benchmark_held_out": n_bench, "n_extras_excluded": n_ex,
+               "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_extras_excluded": n_ex,
                "n_watermark_excluded": n_wm, "n_fixture_excluded": n_fix,
                "n_bad_src_excluded": n_bad, "n_control_excluded": n_control,
                "n_ungrammatical_excluded": n_ungram, "n_skip_missing": n_missing}
@@ -734,6 +802,7 @@ def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
         starts: dict = {}
         n = n_skip_missing = 0
         n_bench = n_wm = n_ex = n_fix = n_bad = 0
+        n_bench_content = 0
         by_work: dict[str, int] = {}
         granularity_dist: dict[str, int] = {}
         with path.open("w", encoding="utf-8") as f:
@@ -790,7 +859,7 @@ def export_rewrite(ver: str, out_dir: Path | None = None) -> dict:
         "path": str(path), "summary_path": str(sum_path),
         "n": n, "by_work": by_work, "granularity_dist": granularity_dist,
         "n_skip_missing": n_skip_missing,
-        "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
+        "n_benchmark_content_excluded": n_bench_content, "n_benchmark_held_out": n_bench, "n_watermark_excluded": n_wm,
         "n_extras_excluded": n_ex, "n_fixture_excluded": n_fix,
         "n_bad_src_excluded": n_bad,
     }

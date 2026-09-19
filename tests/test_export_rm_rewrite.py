@@ -464,3 +464,47 @@ def test_negatives_summary_matches_jsonl(tmp_path):
     assert q["n"] == len(rows)
     assert Counter(r["failure_mode"] for r in rows) == Counter(q["by_type"])
     assert q["summary_path"].endswith("negatives_negtest3_summary.json")
+
+# ── 4. 内容级隔离（军师 P1-5）────────────────────────────────
+
+def test_benchmark_content_twin_excluded(tmp_path):
+    """跨切分版本的同文孪生：role=None 的段文本与基准条目冻结文本相同 → 剔除。"""
+    db.init_db()
+    with db.session() as s:
+        from app.models import BenchmarkItem, BenchmarkSet
+        hidden = "夜色像一张收口的网，把他整个人罩了进去，连呼吸都变得滞重。"
+        ctx = "他沿着巷子往深处走，两侧的屋檐滴水，在青石板上敲出细密的鼓点，一声接一声，敲得人心头发紧，久久不能平息。"
+        bs = BenchmarkSet(id="BS-LEAK-T", name="leak-t", kind="corruption_detection", n_items=1, spec={})
+        s.add(bs); s.flush()
+        s.add(BenchmarkItem(set_id=bs.id, kind="corruption_detection",
+                            text_a=hidden, text_b="劣化侧另一段足够长的文本内容，用于测试。", answer="A",
+                            context=ctx))
+        w = Work(title="斗罗大陆（唐家三少）-leak-t", source="test:leak")
+        s.add(w); s.flush()
+        # 孪生正文段（role=None，可训练面）+ 邻段为冻结 context 的段
+        twin = Segment(work_id=w.id, ordinal=0, text=hidden, role=None,
+                       integrity='{"src_ok": true}', n_sentences=1, n_chars=len(hidden))
+        ctx_seg = Segment(work_id=w.id, ordinal=1, text=ctx, role=None,
+                          integrity='{"src_ok": true}', n_sentences=1, n_chars=len(ctx))
+        s.add_all([twin, ctx_seg]); s.commit()   # _bench_hashes 走独立 session，必须先 commit
+        starts = {}
+        EX._BENCH_HASHES = None            # 单例缓存按进程缓存——新种入的基准条目要重载
+        r_twin = EX._excluded_reason(s, twin, starts, for_train=True)
+        r_ctx = EX._excluded_reason(s, ctx_seg, starts, for_train=True)
+    assert r_twin == "benchmark_content", f"孪生正文漏进训练导出：{r_twin}"
+    assert r_ctx == "benchmark_content", f"邻段上下文泄漏未拦：{r_ctx}"
+
+
+def test_normal_segment_not_flagged_by_content_guard():
+    """普通段不许被内容守卫误伤（相对断言：只有命中冻结文本才剔除）。"""
+    db.init_db()
+    with db.session() as s:
+        w = Work(title="凡人修仙传（忘语）-leak-t2", source="test:leak2")
+        s.add(w); s.flush()
+        seg = Segment(work_id=w.id, ordinal=0, text="韩立低头看了看手中的玉盒，神色如常地把它收进了储物袋里。",
+                      role=None, integrity='{"src_ok": true}', n_sentences=1, n_chars=32)
+        s.add(seg); s.flush()
+        starts = {}
+        EX._BENCH_HASHES = None
+        r = EX._excluded_reason(s, seg, starts, for_train=True)
+    assert r == "", f"普通段被内容守卫误伤：{r}"
