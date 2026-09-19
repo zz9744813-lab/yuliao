@@ -18,7 +18,8 @@ benchmark_runs 里的已有跑分做六项检验，**只读库、零 LLM 成本*
   但长度没有，不显著优于它就不算真信号。
 · N5 长度分层正确率（指标硬化）：把已答题按「人类答案在更短侧 / 更长侧」分两层
   （等长单列 equal；lengths 缺 key 的题单列 missing、形状坏掉的题单列 bad_answer /
-  bad_len 并显形，不伪装成 equal 也不炸整份报告——T-N5FIX① / T-N5GATE③）。两层各
+  bad_len 并显形，不伪装成 equal 也不炸整份报告——T-N5FIX① / T-N5GATE③；非有限值
+  NaN/±inf 同属坏形状，一并挡在 _ab_len 进 bad_len，T-N5POLISH①）。两层各
   ≥10 题时"人类侧更长"层必须**在单侧二项意义下优于机会线**才算过门：只看"层规模够
   不够"或只看点估计 acc>=0.5 都收不住尺子（真 acc=0.4 时漏判率 0.367，复算见 GATE
   上方注释）。数据缺陷（缺长度 + 坏形状）占比 > len_defect_cap ⇒ fail-closed 判不过
@@ -34,6 +35,8 @@ benchmark_runs 里的已有跑分做六项检验，**只读库、零 LLM 成本*
 用法：
     python scripts/benchmark_falsify.py --set BS-9fb5d1ac1134
     python scripts/benchmark_falsify.py --set BS-9fb5d1ac1134 --md
+退出码：0 = 全部 run 检验完成；1 = 集合没有条目；3 = 有 run 被降级（报告不完整，
+        降级条数同时打 stderr，见 falsify_set 的 T-N5POLISH③）。
 """
 from __future__ import annotations
 
@@ -135,13 +138,26 @@ def _ab_len(lengths: dict, iid) -> tuple[int, int] | None:
     缺 key（无长度数据）同样返回 None——N5 调用方会先单独判 missing，不会混进 bad_len。
     二元组但元素不是数字（如字符串 "10" 会被解成 "1","0"）也按坏形状处理，不能让脏值
     混进 short/long 层参与判定。
+    T-N5POLISH①：非有限值（NaN / ±inf）同样是坏形状，一律挡在这里。旧实现只查类型，
+    而 float('nan') 与 float('inf') 都是合法 float，于是能穿透到判层与 N4：
+      · _length_layer(nan, 20, 'A') == 'long'、(nan, 20, 'B') == 'short'——NaN 参与比较
+        恒 False，判层结果由 ans 字母单方面决定，脏数据直接污染**承重**的长层；
+      · _length_layer(inf, inf, ...) == 'equal'（-inf 同理）——正是 T-N5FIX① 要消灭的
+        「脏数据伪装成 equal」；
+      · N4 里 `pred = 'A' if la < lb else ('B' if lb < la else None)` 对 NaN 两侧都
+        False ⇒ pred=None 静默 skip，连缺陷都不算。
+    挡住之后由调用方计进 bad_len 桶并算入 length_defect_rate（缺陷率显形、可被
+    len_defect_cap 抓住），equal/short/long 只接受真正可比较的有限值。
     """
     try:
         la, lb = lengths[iid]
     except (TypeError, ValueError, KeyError):
         return None
-    if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in (la, lb)):
-        return None
+    for v in (la, lb):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        if not math.isfinite(v):            # NaN / +inf / -inf 不可比较，按坏形状收敛
+            return None
     return la, lb
 
 
@@ -296,9 +312,10 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     min_n = GATE["long_layer_min_n"]
     n_short, n_long = strat_n["short"], strat_n["long"]
     defect_rate = (n_missing_len + n_bad_shape) / n_ans
-    # T-N5GATE②：三种"没判"的状态必须可区分，且缺陷超限要 fail-closed（与 N4 一致）：
+    # T-N5GATE②：几种"没判"的状态必须可区分，且缺陷超限要 fail-closed（与 N4 一致）：
     # ① 整列缺失（lengths 为 None/{}）→ None + 显形；② 有列但缺陷占比超上限 → False
-    # （不许静默跳过）；③ 层规模不足 → None 但必须显式标"N5 因样本不足跳过"。
+    # （不许静默跳过）；③ 层规模不足 → None 但必须显式标"N5 因样本不足跳过"；
+    # ④ 长层为空/单侧 p 未算出（判定前提不成立，T-N5POLISH②）→ None + 显式标"长层为空"。
     if length_strat is None:
         ls_check = None
         n5_skip = {"reason": "无长度列", "n_short": None, "n_long": None, "min_n": min_n}
@@ -310,6 +327,15 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
     elif n_short < min_n or n_long < min_n:
         ls_check = None
         n5_skip = {"reason": "样本不足", "n_short": n_short, "n_long": n_long, "min_n": min_n}
+    elif n_long <= 0 or long_p_one is None:
+        # T-N5POLISH②：把判定分支的两个**隐式前提**显式化——`strat_hit["long"] / n_long`
+        # 要求 n_long > 0；`long_p_one < GATE["long_layer_p"]` 要求 long_p_one 已算出
+        # （长层为空时是 None，None < 0.5 直接 TypeError）。此前它们只靠"默认
+        # long_layer_min_n = 10 ≥ 1 ⇒ 空层必先落进上面的样本不足分支"这一**取值域**
+        # 间接成立；配置一旦被改成 0/负数就会崩。前提不成立 ⇒ 判 None 并说明原因，
+        # 不得依赖配置取值域，也不得改默认值。
+        ls_check = None
+        n5_skip = {"reason": "长层为空", "n_short": n_short, "n_long": n_long, "min_n": min_n}
     else:
         ls_check = (strat_hit["long"] / n_long >= GATE["long_layer_acc"]
                     and long_p_one < GATE["long_layer_p"])
@@ -322,7 +348,7 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
         "answered": answered_rate >= GATE["answered"],
         "beats_length": (len_acc is not None and acc > len_acc
                          and beat_p < 0.05),   # P1-3：不显著优于"只选较短"不许 pass
-        "length_stratified": ls_check,         # N5：None=无长度列或层规模不足（见 length_strat_skip）
+        "length_stratified": ls_check,         # N5：None=无长度列/层规模不足/长层为空（见 length_strat_skip）
     }
     gate_ok = all(v for v in checks.values() if v is not None)   # None 不阻塞
     verdict = ("pass" if gate_ok
@@ -361,8 +387,17 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None,
 
 
 def falsify_set(set_id: str) -> dict:
+    """跑完一个集合的全部 run；单条意外只降级它自己那一行。
+
+    T-N5POLISH③：降级行沿用 verdict="fail"（不动取值，也不新增 "acc" 键——main() 的
+    `if "acc" not in r` 渲染守卫正是靠"降级行不含 acc"这一性质），但**另加显式标记**
+    degraded / error_type，把"根本没测成"与"实测没过门"区分开——否则报告自身的可证伪性
+    被削弱：读者从判定列看不出这一行是结论还是事故。降级条数以 stderr 汇总 + 非零退出码
+    （见 main）双通道警示。
+    """
     meta, n_items, runs, lengths = _load(set_id)
     out = []
+    n_degraded = 0
     for r in runs:
         try:
             out.append(falsify_run(meta, r, n_items=n_items, lengths=lengths))
@@ -370,10 +405,17 @@ def falsify_set(set_id: str) -> dict:
             # T-N5GATE③：N5/N4 内部的脏数据已在桶里收敛，这里兜住的是"其它"意外
             # （如 picks 引用了已删除的 item）。单条坏 run 只降级它自己那一行，
             # 不许把整份只读报告的其余 run 一起带走。
+            n_degraded += 1
             out.append({"model": r["model"], "verdict": "fail",
-                        "reason": f"检验异常 {type(e).__name__}: {e}"})
+                        "reason": f"检验异常 {type(e).__name__}: {e}",
+                        "degraded": True, "error_type": type(e).__name__})
+    if n_degraded:
+        print(f"[warn] {set_id}: {n_degraded}/{len(runs)} 个 run 检验异常被降级"
+              f"（verdict=fail 是占位、不是实测结论；见行内 degraded/error_type）",
+              file=sys.stderr)
     return {"set_id": set_id, "n_items": n_items,
             "gates": GATE,
+            "n_degraded": n_degraded,
             "runs": out}
 
 
@@ -438,6 +480,14 @@ def main() -> None:
                   f"| {r['sensitivity']:.3f} | {r['answered_rate']:.2f} | **{r['verdict']}** |")
     else:
         print(json.dumps(out, ensure_ascii=False, indent=1))
+    # T-N5POLISH③：有 run 被降级 ⇒ 这份报告不完整，用非零退出码把"不完整"变成机器可读
+    # 信号（stderr 汇总行 + 退出码双通道，二者受众不同）。取 3 是为了和 _load 的
+    # "集合没有条目"SystemExit（默认码 1）区分开。二选一里选退出码而不是再加一条汇总行：
+    # --md 模式下 stdout 整块是要粘进评审材料的表格，往里混非表行会破坏 Markdown 表；
+    # 而 stderr 已经承载降级条数，再补一行只是重复，退出码才是主控/CI 漏不掉的独立信号。
+    # 本工具只读库、零 LLM 成本，非零退出不可能污染任何数据，最坏只是调用方需显式接管。
+    if out.get("n_degraded"):
+        sys.exit(3)
 
 
 if __name__ == "__main__":

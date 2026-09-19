@@ -14,6 +14,11 @@
 8. T-N5GATE 回归：判定尺子换成单侧二项（X>=ceil(n/2)+1）并在边界 n=min_n 处参与判定；
    层不足/列缺失必须显形且不混同；数据缺陷超上限 fail-closed 压 pass；坏答案与坏长度
    形状不抛穿且计数显形；wilson 与 acc 同源并标 n_mismatch；n_ans==0 走提前 return。
+9. T-N5POLISH 回归：非有限长度（NaN/±inf）挡在 _ab_len 进 bad_len 并抬升缺陷率；
+   ls_check 的两个隐式前提（n_long>0 / long_p_one 非 None）在 min_n 极端取值下显式
+   判"长层为空"而不是崩；意外降级行带 degraded/error_type 标记且不含 acc 键、其余 run
+   完整、md/json 两分支都能打印并以退出码 3 警示；_fmt_length_strat 的"— + 缺陷后缀"
+   分支矩阵逐格钉死。
 """
 from __future__ import annotations
 
@@ -486,5 +491,214 @@ def test_empty_picks_with_lengths_takes_no_answer_branch():
                              n_items=60, lengths=lengths)
         assert out["verdict"] == "fail" and out["reason"] == "无可用答案"
         assert "length_missing" not in out, "提前 return，根本不进 N5 计算"
+
+
+# ---------------------------------------------------------------- T-N5POLISH 回归
+# f4315d3 会审两席（glm-5.3-flash / qwen3.8-flash）的一般/建议级残留四条：
+# ① 非有限长度（NaN/±inf）能穿透 _ab_len 的类型检查；② ls_check 判定分支的两个隐式
+# 前提（n_long>0、long_p_one 非 None）只靠 min_n 取值域兜着；③ 意外降级行与"真的没过门"
+# 共用 verdict=fail，报告自身的可证伪性被削弱；④ 上述新控制流此前无测试。逐条钉死。
+
+NAN, INF, NINF = float("nan"), float("inf"), float("-inf")
+
+
+def _p_row(model: str, meta: dict, picks: dict) -> dict:
+    row = _run_m(picks, meta)
+    row["model"] = model
+    return row
+
+
+def test_ab_len_rejects_non_finite_but_keeps_finite_numbers():
+    """① 单元级：NaN/±inf 任一侧出现即按坏形状收敛成 None；有限值（含 0 与浮点）原样
+    放行——修的是"非有限值可比较性"，不是把 0/浮点误伤成脏数据。"""
+    for bad in ((NAN, 20), (20, NAN), (NAN, NAN), (INF, INF), (NINF, NINF),
+                (INF, 20), (NINF, 20), (20, INF)):
+        assert BF._ab_len({"x": bad}, "x") is None, f"{bad} 必须按坏形状收敛"
+    assert BF._ab_len({"x": (10, 20)}, "x") == (10, 20)
+    assert BF._ab_len({"x": (0, 0)}, "x") == (0, 0), "0 是有限值，不是脏数据"
+    assert BF._ab_len({"x": (10.5, 20)}, "x") == (10.5, 20)
+    assert BF._ab_len({"x": (True, 20)}, "x") is None       # bool 挡法不变
+    assert BF._ab_len({}, "x") is None and BF._ab_len(None, "x") is None
+
+
+def test_n5_non_finite_lengths_land_in_bad_len_and_raise_defect_rate():
+    """① 端到端：修复前 (NAN,20)+答A 判成 long、(20,NAN)+答B 判成 short（NaN 比较恒
+    False ⇒ 归层由答案字母单方面决定，直接污染承重的长层）、(INF,INF) 判成 equal
+    （T-N5FIX① 要消灭的"伪装"）。修复后四条全部落 bad_len、equal/short/long 不受污染，
+    并且**缺陷率分母第一次摸得到它们**（rate 从 0 抬到 4/28）。"""
+    spec = ([("A", (10, 20), "A"), ("B", (20, 10), "B")] * 6       # 12 短层，全对
+            + [("B", (10, 20), "B"), ("A", (20, 10), "A")] * 6     # 12 长层，全对
+            + [("A", (NAN, 20), "A"), ("B", (20, NAN), "B"),      # 4 条非有限长度
+               ("A", (INF, INF), "A"), ("B", (NINF, 20), "B")])
+    meta, lengths, picks = _mk(spec, prefix="FN")
+    out = BF.falsify_run(meta, _run_m(picks, meta), n_items=len(spec), lengths=lengths)
+    ls = out["length_strat"]
+    assert ls["bad_len"]["n"] == 4 and ls["bad_answer"]["n"] == 0
+    assert ls["equal"]["n"] == 0, "(inf,inf) 不得伪装成等长层"
+    assert (ls["short"]["n"], ls["long"]["n"]) == (12, 12), "NaN 不得混进 short/long 改变层规模"
+    assert ls["short"]["acc"] == 1.0 and ls["long"]["acc"] == 1.0
+    assert out["length_bad"]["n"] == 4
+    assert out["length_defect_rate"] == pytest.approx(round(4 / 28, 4))
+    assert out["length_bad"]["rate"] == pytest.approx(round(4 / 28, 4))
+    # 4/28≈14% < 上限 30% ⇒ 不因缺陷强制判不过；长层 12/12 仍照常过收紧后的单侧门槛
+    assert out["checks"]["length_stratified"] is True
+    cell = BF._fmt_length_strat(ls, BF.GATE["long_layer_min_n"], BF.GATE["len_defect_cap"])
+    assert "[坏数据 4]" in cell
+
+
+def test_n5_empty_long_layer_with_degenerate_min_n_is_undecidable_not_crash(monkeypatch):
+    """② 判定分支的两个隐式前提（除法要 n_long>0、比大小要 long_p_one 已算出）此前只靠
+    默认 min_n=10 的取值域间接成立。把 long_layer_min_n 临时置 0 造出"空长层"：必须
+    既不 ZeroDivisionError 也不 TypeError，且判定可解释（None + reason=长层为空）。
+    默认取值域下同一夹具仍归「样本不足」——新守卫不许劫持常规路径。"""
+    spec = [("A", (10, 20), "A"), ("B", (20, 10), "B")] * 8      # 16 短层、长层恒空
+    meta, lengths, picks = _mk(spec, prefix="EL")
+    assert BF.GATE["long_layer_min_n"] == 10, "本次只加守卫，不许改默认值"
+
+    out0 = BF.falsify_run(meta, _run_m(picks, meta), n_items=16, lengths=lengths)
+    assert out0["length_strat"]["long"]["n"] == 0
+    assert out0["checks"]["length_stratified"] is None
+    assert out0["length_strat_skip"]["reason"] == "样本不足"
+
+    monkeypatch.setitem(BF.GATE, "long_layer_min_n", 0)          # 只改测试期取值
+    out = BF.falsify_run(meta, _run_m(picks, meta), n_items=16, lengths=lengths)
+    assert out["checks"]["length_stratified"] is None, "前提不成立 ⇒ 不可判（既不是崩也不是过）"
+    assert out["length_strat_skip"]["reason"] == "长层为空"
+    assert out["length_strat_skip"]["n_long"] == 0
+    assert out["length_strat_skip"]["min_n"] == 0
+    assert out["length_strat_long_p_one_sided"] is None
+    # 判定可解释：N5 没参与，其余检验照常各归各位（本夹具模型恰等于"选更短"基线，
+    # 唯一没过的是 beats_length；verdict 因此是 weak，不是 None 崩出来的 fail）
+    assert out["checks"]["beats_length"] is False
+    assert all(out["checks"][k] for k in ("perm_p", "sensitivity", "pos_bias", "answered"))
+    assert out["verdict"] == "weak"
+
+    # 对照：min_n=0 但长层非空 ⇒ 判定照常参与（守卫不许把可判的情形一并关掉）
+    meta2, lengths2, picks2 = _mk(_short_hits(6), prefix="EN")
+    out2 = BF.falsify_run(meta2, _run_m(picks2, meta2), n_items=22, lengths=lengths2)
+    assert out2["length_strat"]["long"]["n"] == 10
+    assert out2["checks"]["length_stratified"] is True
+    assert out2["length_strat_skip"] is None
+
+
+def test_degraded_run_is_marked_others_stay_intact_and_md_renders(monkeypatch, capsys):
+    """③+④① 一条 run 真抛异常（TypeError）：只降级它自己那一行——
+    · 形状契约不变：verdict 仍是 "fail"、**不含 acc 键**（main() 的 `if "acc" not in r`
+      渲染守卫正依赖这一点，加键会把它打穿）；
+    · 新增显式标记 degraded / error_type，集合级 n_degraded 计数 + stderr 条数警示；
+    · 其余 run 的检验结果完整不受牵连；
+    · main() 的 --md 分支**真的能打印**这一行（含 "fail（"），文本分支 json 可解析，
+      两分支都以退出码 3 警示"报告不完整"（区别于 _load「集合没有条目」的 1）。"""
+    import json
+    meta, lengths = _meta()
+    picks = {iid: meta[iid][1] for iid in meta}                 # 全对基线（本身可 pass）
+    runs = [_p_row("good-1", meta, picks),
+            {"model": "boom", "n": 60, "correct": 60, "accuracy": 1.0,
+             "picks": dict(picks), "created_at": "t"},
+            _p_row("good-2", meta, picks)]
+    real_run = BF.falsify_run
+
+    def fake_run(m, r, n_items=None, lengths=None):
+        if r["model"] == "boom":
+            raise TypeError("合成意外：picks 引用了已删除的 item")
+        return real_run(m, r, n_items=n_items, lengths=lengths)
+
+    monkeypatch.setattr(BF, "falsify_run", fake_run)
+    monkeypatch.setattr(BF, "_load", lambda sid: (meta, len(meta), runs, lengths))
+    out = BF.falsify_set("BS-synthetic")
+
+    rows = {r["model"]: r for r in out["runs"]}
+    assert len(out["runs"]) == 3, "一条坏 run 不许带走其余 run"
+    bad = rows["boom"]
+    assert bad["verdict"] == "fail"
+    assert "acc" not in bad, "不许给降级行新增 acc 键（main 渲染守卫依赖其缺失）"
+    assert bad["degraded"] is True and bad["error_type"] == "TypeError"
+    assert "检验异常 TypeError" in bad["reason"]
+    assert out["n_degraded"] == 1
+    assert rows["good-1"]["verdict"] == "pass" and rows["good-2"]["verdict"] == "pass"
+    assert rows["good-1"]["checks"]["length_stratified"] is True
+    err = capsys.readouterr().err
+    assert "1/3" in err and "降级" in err, "降级条数必须打到 stderr"
+
+    capsys.readouterr()                                          # 清屏，只验 main 的输出
+    monkeypatch.setattr(BF, "falsify_set", lambda sid: out)
+    monkeypatch.setattr(sys, "argv", ["benchmark_falsify.py", "--set", "BS-synthetic", "--md"])
+    with pytest.raises(SystemExit) as ei:
+        BF.main()
+    assert ei.value.code == 3, "有降级 ⇒ 非零退出码 3"
+    md = capsys.readouterr().out
+    lines = md.splitlines()
+    assert "fail（" in md and "检验异常 TypeError" in md, "降级行必须能在 md 里打印出来"
+    assert sum(1 for ln in lines if ln.startswith("| boom |")) == 1
+    assert sum(1 for ln in lines if ln.startswith("| good-")) == 2, "其余 run 表格行照常"
+    assert "**pass**" in md
+
+    monkeypatch.setattr(sys, "argv", ["benchmark_falsify.py", "--set", "BS-synthetic"])
+    with pytest.raises(SystemExit) as ei2:
+        BF.main()
+    assert ei2.value.code == 3
+    payload = json.loads(capsys.readouterr().out)                # 文本模式与形状无关
+    assert payload["n_degraded"] == 1
+    assert [r for r in payload["runs"] if r["model"] == "boom"][0]["degraded"] is True
+
+
+def test_clean_set_has_no_degraded_marks_and_exits_zero(monkeypatch, capsys):
+    """③ 反向对照：全部 run 正常时不许出现 degraded / n_degraded>0 / stderr 警示，
+    main() 也不抛 SystemExit（退出码 0）——警示不能变成常态噪声。"""
+    meta, lengths = _meta()
+    picks = {iid: meta[iid][1] for iid in meta}
+    runs = [_p_row("good-1", meta, picks), _p_row("good-2", meta, picks)]
+    monkeypatch.setattr(BF, "_load", lambda sid: (meta, len(meta), runs, lengths))
+    out = BF.falsify_set("BS-synthetic")
+    assert out["n_degraded"] == 0
+    assert all("degraded" not in r and "error_type" not in r for r in out["runs"])
+    assert capsys.readouterr().err == "", "无降级不许多打警示"
+    monkeypatch.setattr(BF, "falsify_set", lambda sid: out)
+    monkeypatch.setattr(sys, "argv", ["benchmark_falsify.py", "--set", "BS-synthetic", "--md"])
+    assert BF.main() is None, "干净报告退出码 0（不抛 SystemExit）"
+    assert "fail（" not in capsys.readouterr().out
+
+
+def _p_strat(s_n, l_n, miss=0, bad_ans=0, bad_len=0):
+    """造 length_strat 单元格输入：acc 用固定手算值（短 0.95 / 长 0.60），n=0 的层
+    acc 必为 None——与 falsify_run 的 `round(hit/n,4) if n else None` 口径一致。"""
+    def g(n, acc):
+        return {"n": n, "acc": acc if n else None}
+    return {"short": g(s_n, 0.95), "long": g(l_n, 0.60), "equal": g(0, None),
+            "missing": g(miss, 1.0), "bad_answer": g(bad_ans, 1.0), "bad_len": g(bad_len, 1.0)}
+
+
+def test_fmt_length_strat_branch_matrix_dash_plus_defect_suffixes():
+    """④② _fmt_length_strat 的分支矩阵（f4315d3 写进 docstring 的诉求，逐格钉死）：
+    任一层为空 ⇒ 单元格以 "—" 开头，但 [缺长度 N] / [坏数据 N] **仍然追加**；只有真的
+    一点缺陷都没有、层又不为空时才回到历史格式，只有"层为空且无缺陷"才允许只剩 —。"""
+    # 短层空、长层有值
+    c = BF._fmt_length_strat(_p_strat(0, 12, miss=3, bad_len=2))
+    assert c.startswith("—") and c == "— [缺长度 3] [坏数据 2]"
+    assert c != "—", "旧实现在这里正好返回裸 —，与「根本没长度列」无法区分"
+    # 长层空、短层有值
+    c = BF._fmt_length_strat(_p_strat(12, 0, miss=0, bad_ans=2))
+    assert c.startswith("—") and c == "— [坏数据 2]"
+    # 两层都空 + 缺长度
+    c = BF._fmt_length_strat(_p_strat(0, 0, miss=5))
+    assert c == "— [缺长度 5]"
+    # 两层都空 + 坏答案与坏长度合并计数
+    c = BF._fmt_length_strat(_p_strat(0, 0, bad_ans=1, bad_len=2))
+    assert c == "— [坏数据 3]"
+    # 两层都空且无缺陷 ⇒ 才允许只剩 —
+    assert BF._fmt_length_strat(_p_strat(0, 0)) == "—"
+    # 后缀可叠加：min_n 不足 + defect_cap 超限各自追加
+    c = BF._fmt_length_strat(_p_strat(0, 0, miss=5), min_n=10)
+    assert c == "— [缺长度 5] [N5跳过:n短0/n长0<10]"
+    c = BF._fmt_length_strat(_p_strat(0, 0, miss=5), min_n=10, defect_cap=0.3)
+    assert "[N5缺陷" in c and "[缺长度 5]" in c and "[N5跳过" in c
+    c = BF._fmt_length_strat(_p_strat(4, 6, miss=2), min_n=10)
+    assert c == "0.95/0.60 (n=4/6) [缺长度 2] [N5跳过:n短4/n长6<10]", \
+        "层非空但不足 ⇒ 数值照常显示，跳过与缺陷后缀各自追加（不以 — 开头）"
+    # 不传 min_n/defect_cap ⇒ 历史格式逐字不变（既有精确格式断言依赖这一点）
+    assert BF._fmt_length_strat(_p_strat(12, 12)) == "0.95/0.60 (n=12/12)"
+    assert BF._fmt_length_strat(_p_strat(12, 12), 10, 0.3) == "0.95/0.60 (n=12/12)"
+    assert BF._fmt_length_strat(None) == "—" and BF._fmt_length_strat({}) == "—"
+
 
 
