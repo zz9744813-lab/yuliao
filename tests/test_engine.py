@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 from app import corpus, db, engine, experiments
 from app.main import app
 from app.models import (Candidate, Experiment, Frame, JudgeRun, LlmCall,
-                        ReportFile, ResidualSem, ReviewItem)
+                        ReportFile, ResidualSem, ReviewItem, Segment)
 
 SEED_TEXT = (
     "天擦黑的时候他进了院子。院门没闩，他一推就开。屋里点着灯，人影晃了一下。\n"
@@ -170,6 +170,15 @@ def test_unknown_stage_rejected():
 
 def test_stats_structure_and_llm_attribution():
     eid = _mkexp()
+    # source_check 对已有 integrity 的段幂等跳过（不发调用）。本测试的「llm_calls
+    # 归账 > 0」断言不能依赖「create_experiment 恰好抽到没校勘过的段」——全库采样
+    # 的选中段在其它测试文件写过 integrity 时（跨文件耦合）会全部跳过、静默归零。
+    # 显式清空本实验选中段的 integrity，保证 source_check 必然产生真实调用。
+    with db.session() as s:
+        ids = s.get(Experiment, eid).config["segment_ids"]
+        for seg in s.query(Segment).filter(Segment.id.in_(ids)).all():
+            seg.integrity = None
+        s.commit()
     out = engine.run(eid)
     need = {"status", "attempted", "ok", "failed", "skipped", "seconds",
             "tokens", "llm_calls", "llm_failed", "failure_rate", "runs", "finished_at"}
