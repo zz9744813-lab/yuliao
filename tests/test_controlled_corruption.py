@@ -263,6 +263,7 @@ def test_split_benchmark_excludes_from_training_export(tmp_path, monkeypatch):
         fr = None
         for i in range(4):
             seg = Segment(work_id=w.id, ordinal=i, text=f"第{i}段正文，够长以通过最小字数门槛。",
+                          integrity='{"src_ok": true}',
                           n_sentences=1, n_chars=20)
             s.add(seg)
             s.flush()

@@ -171,8 +171,10 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
             integ = json.loads(seg.integrity or "{}")
         except Exception:
             integ = {}
-        if integ.get("src_ok") is False:
-            return "bad_src"
+        # 军师 P1-6：训练口径要求 src_ok **必须 True**——"没查过=不可用"（铁律）。
+        # 旧口径只排 False，32 条未校勘段就这么混进了 SFT。
+        if integ.get("src_ok") is not True:
+            return "src_unverified"
     # 内容级隔离（P1-5）：无论 role，正文命中基准冻结文本即剔除（跨切分孪生/同文）
     if _hits_bench_text(seg.text_clean or seg.text if seg else None):
         return "benchmark_content"
@@ -464,7 +466,7 @@ def export_sft_from_frames(ver: str, out_dir: Path | None = None) -> dict:
             if reason == "fixture":
                 n_fixture += 1
                 continue
-            if reason == "bad_src":
+            if reason in ("bad_src", "src_unverified"):
                 n_bad += 1
                 continue
             if reason == "benchmark_content":    # P1-5：内容级隔离
@@ -572,7 +574,7 @@ def export_rm(ver: str, out_dir: Path | None = None) -> dict:
                 if reason == "fixture":
                     n_fix += 1
                     continue
-                if reason == "bad_src":
+                if reason in ("bad_src", "src_unverified"):
                     n_bad += 1
                     continue
                 if reason == "benchmark_content":    # P1-5：内容级隔离
@@ -721,7 +723,7 @@ def export_negatives(ver: str, out_dir: Path | None = None) -> dict:
                 if reason == "fixture":
                     n_fix += 1
                     continue
-                if reason == "bad_src":
+                if reason in ("bad_src", "src_unverified"):
                     n_bad += 1
                     continue
                 if reason == "benchmark_content":    # P1-5：内容级隔离

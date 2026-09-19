@@ -87,7 +87,7 @@ def test_rm_fields_and_summary(tmp_path):
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-            w, segs = _work_seg(s, "t-rm-fields", [(0, TEXT, None, None)])
+            w, segs = _work_seg(s, "t-rm-fields", [(0, TEXT, None, '{"src_ok": true}')])
             c, _ = _cand(s, exp, segs[0])
             _review(s, exp, c, "human")
             _judges(s, exp, c, ["human", "human"])
@@ -129,7 +129,7 @@ def test_rm_scores_mapping(tmp_path):
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
         w, segs = _work_seg(s, "t-rm-map",
-                            [(i, TEXT + str(i), None, None) for i in range(5)])
+                            [(i, TEXT + str(i), None, '{"src_ok": true}') for i in range(5)])
         for i, (win, _) in enumerate(wins.items()):
             c, _ = _cand(s, exp, segs[i], text=f"{TEXT}{i}候选版。")
             _review(s, exp, c, win)
@@ -157,7 +157,7 @@ def test_rm_judge_weak_majority(tmp_path):
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
         w, segs = _work_seg(s, "t-rm-judge",
-                            [(0, TEXT, None, None), (1, TEXT + "二", None, None)])
+                            [(0, TEXT, None, '{"src_ok": true}'), (1, TEXT + "二", None, '{"src_ok": true}')])
         c1, _ = _cand(s, exp, segs[0], text=TEXT + "多数候选版。")
         _judges(s, exp, c1, ["candidate", "candidate", "human"])   # 多数 → 候选胜
         c2, _ = _cand(s, exp, segs[1], text=TEXT + "平票候选版。")
@@ -182,7 +182,7 @@ def test_rm_corruption_variable_label(tmp_path):
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
         w, segs = _work_seg(s, "t-rm-corr",
-                            [(0, TEXT, None, None), (1, TEXT + "二", None, None)])
+                            [(0, TEXT, None, '{"src_ok": true}'), (1, TEXT + "二", None, '{"src_ok": true}')])
         c1, _ = _cand(s, exp, segs[0], text=TEXT + "被显式化。", model="corrupt:EXPLICITIZE")
         _cc(s, exp, segs[0], c1, "EXPLICITIZE", variable="显式化")
         c2, _ = _cand(s, exp, segs[1], text=TEXT + "二劣化。", model="corrupt:SUBTEXT_ERASE")
@@ -219,7 +219,7 @@ def test_rm_control_arm_never_exported(tmp_path):
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rm-ctrl", [(0, TEXT, None, None)])
+        w, segs = _work_seg(s, "t-rm-ctrl", [(0, TEXT, None, '{"src_ok": true}')])
         c, _ = _cand(s, exp, segs[0], text=TEXT + "（中性改写）", model="corrupt:NEUTRAL_PARAPHRASE")
         _cc(s, exp, segs[0], c, "NEUTRAL_PARAPHRASE", variable="中性改写")
         _judges(s, exp, c, ["human"])    # 评委判人类胜：若泄漏，中性文本就成了负例
@@ -241,7 +241,7 @@ def test_rm_isolation_keeps_count_unchanged(tmp_path):
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rm-iso", [(0, TEXT, None, None)])
+        w, segs = _work_seg(s, "t-rm-iso", [(0, TEXT, None, '{"src_ok": true}')])
         c, _ = _cand(s, exp, segs[0])
         _review(s, exp, c, "human")
         s.commit()
@@ -256,7 +256,7 @@ def test_rm_isolation_keeps_count_unchanged(tmp_path):
         _review(s, exp, cb, "human")
         _judges(s, exp, cb, ["human", "candidate"])
         # ② 控制臂
-        w3, cs = _work_seg(s, "t-rm-iso-ctrl", [(0, TEXT + "控制段。", None, None)])
+        w3, cs = _work_seg(s, "t-rm-iso-ctrl", [(0, TEXT + "控制段。", None, '{"src_ok": true}')])
         cc, _ = _cand(s, exp, cs[0], text=TEXT + "中性改写。", model="corrupt:NEUTRAL_PARAPHRASE")
         _cc(s, exp, cs[0], cc, "NEUTRAL_PARAPHRASE")
         # ③ 番外区：标题段（ordinal 5）之后的内容段
@@ -309,7 +309,8 @@ def test_rewrite_pairs(tmp_path):
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rw-ok", [(0, TEXT, None, None), (1, TEXT + "续。", None, None)])
+        w, segs = _work_seg(s, "t-rw-ok", [(0, TEXT, None, '{"src_ok": true}'),
+                                           (1, TEXT + "续。", None, '{"src_ok": true}')])
         payload = {"event": "推门无人", "reader_effect": "安静"}
         c1, f1 = _cand(s, exp, segs[0], payload=payload)          # 夹带 L 主帧
         # 同段再来一个 M 帧：L 级优先，一个段只出一条，且用 L 帧
@@ -344,7 +345,7 @@ def test_rewrite_isolation(tmp_path):
     with db.session() as s:
         if not s.get(Experiment, exp):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
-        w, segs = _work_seg(s, "t-rw-iso", [(0, TEXT, None, None)])
+        w, segs = _work_seg(s, "t-rw-iso", [(0, TEXT, None, '{"src_ok": true}')])
         c, f = _cand(s, exp, segs[0])
         s.commit()
     q1 = EX.export_rewrite("rwi", out_dir=tmp_path)
@@ -392,7 +393,7 @@ def test_negatives_fields_and_eligible(tmp_path):
             s.add(Experiment(id=exp, name="t", status="created", config={}, stats={}))
             s.commit()
         w, segs = _work_seg(s, "t-neg-a", [(0, TEXT, None, '{"src_ok": true}'),
-                                           (1, TEXT + "前文。", None, None)])
+                                           (1, TEXT + "前文。", None, '{"src_ok": true}')])
         cand, _ = _cand(s, exp, segs[1])
         _neg_cc(s, exp, segs[1], cand)
         s.commit()
