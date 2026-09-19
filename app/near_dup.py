@@ -12,6 +12,7 @@
 
 is_near_dup() 任何一层过阈值即 True（保守：宁可误杀）。
 基准隔离：Segment.role = "benchmark" 的段禁止进入任何 train 采样（create_experiment 过滤）。
+corpus v2 隔离：v1 的 TYPO_MAP 修复镜像段（Work.v2_of）同文双份，禁止进入采样域与基准切分。
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ import re
 from collections import Counter
 
 from . import config, db
-from .models import Segment
+from .models import Segment, exclude_corpus_v2_segments
 
 _NGRAM = 6
 _MH_PERMS = 128
@@ -127,7 +128,9 @@ def split_benchmark(work_id: str | None = None, n: int = 200, seed: int = 99118,
     """
     import random
     with db.session() as s:
-        q = s.query(Segment).filter(Segment.role.is_(None))
+        # corpus v2 镜像段永不入基准：v1/v2 同文，双份入基准=基准被污染
+        q = s.query(Segment).filter(Segment.role.is_(None),
+                                    exclude_corpus_v2_segments())
         if work_id:
             q = q.filter(Segment.work_id == work_id)
         pool = q.all()
@@ -143,8 +146,12 @@ def split_benchmark(work_id: str | None = None, n: int = 200, seed: int = 99118,
 def train_sampling_pool(s, work_ids: list[str] | None = None,
                         seg_version: int | None = None,
                         eligible_only: bool = False) -> list[Segment]:
-    """create_experiment 的合法采样域：role 不得是 benchmark；可按切分版本/合格率过滤。"""
-    q = s.query(Segment).filter(Segment.role.is_(None) | (Segment.role == "train"))
+    """create_experiment 的合法采样域：role 不得是 benchmark；可按切分版本/合格率过滤。
+
+    corpus v2 镜像段一律排除（v1/v2 同文，双份入池会重复计数）。
+    """
+    q = s.query(Segment).filter(Segment.role.is_(None) | (Segment.role == "train"),
+                                exclude_corpus_v2_segments())
     if work_ids:
         q = q.filter(Segment.work_id.in_(work_ids))
     if seg_version is not None:

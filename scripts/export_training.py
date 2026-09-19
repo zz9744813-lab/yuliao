@@ -54,7 +54,8 @@ import heldout_eval as he  # noqa: E402
 from app import db  # noqa: E402
 from app.context_ablation import neighbors  # noqa: E402
 from app.models import (BenchmarkItem, Candidate, ControlledCorruption,  # noqa: E402
-                        ExpressionStrategy, Frame, JudgeRun, ReviewItem, Segment, Work)
+                        ExpressionStrategy, Frame, JudgeRun, ReviewItem, Segment, Work,
+                        is_corpus_v2_work)
 from make_random_batch import looks_watermarked  # noqa: E402
 
 OUT_DIR = ROOT / "data" / "exports"
@@ -184,7 +185,9 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
     2. 番外区段（集霸 2026-09-17 定的策略：只排番外，其余照抽；
        边界 = 该作品第一个番外正文段的 ordinal，见 _extras_boundary）；
     3. 水印伪影段（盗版 txt 掺拼音/乱码，只污染人类那一侧，会制造不公平比较，
-       见 make_random_batch.looks_watermarked）。
+       见 make_random_batch.looks_watermarked）；
+    4. corpus v2 镜像段（Work.v2_of：v1 的 TYPO_MAP 修复副本，与 v1 同文，
+       双份导出会让 SFT/RM 语料重复计数）。
 
     for_train=True 再加两条质量闸（SFT/RM 口径；DPO 的段在劣化生成端已查过源）：
     fixture_* 夹具作品、源校勘判坏（integrity.src_ok=false）的段。
@@ -195,6 +198,9 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
         return "missing"
     if seg.role == "benchmark":
         return "benchmark"
+    work = s.get(Work, seg.work_id)      # 取一次：corpus v2 与 fixture 判定共用
+    if is_corpus_v2_work(work):          # corpus v2 镜像段：与 v1 同文，永不进导出
+        return "corpus_v2"
     key = (seg.work_id, seg.seg_version)
     if key not in starts:
         starts[key] = _extras_boundary(s, seg.work_id, seg.seg_version)
@@ -204,7 +210,6 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
     if looks_watermarked(seg.text or ""):
         return "watermark"
     if for_train:
-        work = s.get(Work, seg.work_id)
         if work is not None and (work.title or "").startswith("fixture"):
             return "fixture"
         try:

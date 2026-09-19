@@ -32,18 +32,21 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
 from app.ai_flavor import analyze  # noqa: E402
-from app.models import Segment, Work  # noqa: E402
+from app.models import Segment, Work, exclude_corpus_v2_segments  # noqa: E402
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
 
 N_DEFAULT = 18
 
 
 def _eligible_segments(s) -> list:
-    """可抽样段：src_ok=True、非基准、非番外、无水印、≥60 字。"""
+    """可抽样段：src_ok=True、非基准、非番外、无水印、≥60 字、非 corpus v2 镜像段。"""
     out = []
     works = {w.id: w for w in s.query(Work).all()}
     starts: dict = {}
-    for seg in s.query(Segment).filter(Segment.role.is_(None) | (Segment.role == "train")).all():
+    # corpus v2 是 v1 的修复副本（同文双份）：指认清单只认 v1，v2 段永不参评
+    for seg in s.query(Segment).filter(
+            Segment.role.is_(None) | (Segment.role == "train"),
+            exclude_corpus_v2_segments()).all():
         try:
             integ = json.loads(seg.integrity or "{}")
         except Exception:

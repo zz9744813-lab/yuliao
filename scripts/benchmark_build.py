@@ -50,7 +50,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
-from app.models import BenchmarkItem, BenchmarkSet, ControlledCorruption, Segment  # noqa: E402
+from app.models import (BenchmarkItem, BenchmarkSet, ControlledCorruption, Segment,  # noqa: E402
+                        exclude_corpus_v2_segments)
 from app.ids import new_id  # noqa: E402
 
 
@@ -58,7 +59,8 @@ def _eligible_pairs(s) -> list[tuple[ControlledCorruption, Segment]]:
     """基准段上合格的劣化对（三个构建器共用同一套闸门，闸门不一致=子基准不可比）：
     status=ok + 有候选 + 只收 role='benchmark' 段 + 源文本 src_ok + 未被判病句。
     """
-    bm = {x.id: x for x in s.query(Segment).filter(Segment.role == "benchmark").all()}
+    bm = {x.id: x for x in s.query(Segment).filter(
+        Segment.role == "benchmark", exclude_corpus_v2_segments()).all()}
     rows = []
     for cc in (s.query(ControlledCorruption)
                .filter(ControlledCorruption.status == "ok")
@@ -223,7 +225,8 @@ def build_human_vs_ai(name: str, version: int = 1, seed: int = 20260918,
     from app.config import BLIND_REVIEW_PROMPT_VERSIONS
     from app.models import Candidate
     with db.session() as s:
-        bm = {x.id: x for x in s.query(Segment).filter(Segment.role == "benchmark").all()}
+        bm = {x.id: x for x in s.query(Segment).filter(
+            Segment.role == "benchmark", exclude_corpus_v2_segments()).all()}
         rows = []
         for cand in (s.query(Candidate)
                      .filter(Candidate.status == "ok").all()):

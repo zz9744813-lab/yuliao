@@ -35,7 +35,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
-from app.models import Candidate, ControlledCorruption, Experiment, Frame, Segment, Work  # noqa: E402
+from app.models import (Candidate, ControlledCorruption, Experiment, Frame, Segment,  # noqa: E402
+                        Work, exclude_corpus_v2_segments)
 from app.experiments import stage_extract_frames  # noqa: E402
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
 from clean_text import clean_rules, looks_broken, needs_llm  # noqa: E402
@@ -44,11 +45,14 @@ from clean_text import clean_rules, looks_broken, needs_llm  # noqa: E402
 def pick(n: int, seed: int, min_chars: int = 60, works: list[str] | None = None) -> list[str]:
     """挑"从没被任何实验用过"的干净段。
 
-    四条排除：已有候选/劣化记录、fixture、番外、水印或拼音伪影。
+    五条排除：已有候选/劣化记录、fixture、番外、水印或拼音伪影、
+    corpus v2 镜像段（v1 的错字修复副本，同文双份入池=重复计数）。
     （源校勘是下一步，不在这里做——那要花 LLM 调用。）
     """
     with db.session() as s:
-        segs = s.query(Segment).filter(Segment.role.is_(None)).all()
+        # corpus v2 段 role=None，不排就会和 v1 同文双份进扩产池（会审①收口）
+        segs = s.query(Segment).filter(Segment.role.is_(None),
+                                       exclude_corpus_v2_segments()).all()
         used = {r[0] for r in s.query(Candidate.segment_id).distinct()}
         used |= {r[0] for r in s.query(ControlledCorruption.segment_id).distinct()}
         have_frame = {r[0] for r in s.query(Frame.segment_id).distinct()}
