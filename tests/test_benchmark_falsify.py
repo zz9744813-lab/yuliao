@@ -22,14 +22,17 @@ import benchmark_falsify as BF  # noqa: E402
 
 
 def _meta(n_seg=10, per_seg=6, balanced=True):
-    """合成条目：n_seg 段 × per_seg 题；答案 A/B 各半（或偏斜）。"""
+    """合成条目：n_seg 段 × per_seg 题；答案 A/B 各半（或偏斜）。
+    长度表让长度基线平凡可算：A 侧 10 字 / B 侧 20 字（A 恒更短）。"""
     meta = {}
+    lengths = {}
     for g in range(n_seg):
         for j in range(per_seg):
             iid = f"I{g}-{j}"
             ans = "A" if (j % 2 == 0 if balanced else True) else "B"
             meta[iid] = (f"SEG{g}", ans, "T1")
-    return meta
+            lengths[iid] = (10, 20)
+    return meta, lengths
 
 
 def _run(picks: dict, n=None):
@@ -39,12 +42,12 @@ def _run(picks: dict, n=None):
             "created_at": "t"}
 
 
-_ANS = _meta()
+_ANS, _LEN = _meta()
 
 
 def test_all_correct_run_passes_n0():
     picks = {iid: _ANS[iid][1] for iid in _ANS}   # 答案键是 (seg, ans, type)，取 ans
-    out = BF.falsify_run(_ANS, _run(picks))
+    out = BF.falsify_run(_ANS, _run(picks), lengths=_LEN)
     assert out["acc"] == 1.0
     assert out["perm_p"] < 0.001, "全对在段翻转零假设下应几乎不可能"
     lo, hi = out["cluster_ci"]
@@ -56,14 +59,14 @@ def test_coin_flip_run_fails_n0():
     import random
     rng = random.Random(7)
     picks = {iid: rng.choice("AB") for iid in _ANS}
-    out = BF.falsify_run(_ANS, _run(picks))
+    out = BF.falsify_run(_ANS, _run(picks), lengths=_LEN)
     assert out["perm_p"] > 0.05, "纯猜不该过置换检验"
     assert out["verdict"] == "fail"
 
 
 def test_constant_a_run_caught_by_position_bias():
     picks = {iid: "A" for iid in _ANS}
-    out = BF.falsify_run(_ANS, _run(picks))
+    out = BF.falsify_run(_ANS, _run(picks), lengths=_LEN)
     assert out["pick_a_rate"] == 1.0
     assert out["pos_bias"] is not None and out["pos_bias"] >= BF.GATE["pos_bias"], \
         "恒选A必须被位置偏差检查抓住"
@@ -72,7 +75,7 @@ def test_constant_a_run_caught_by_position_bias():
 
 def test_missing_answers_surface_in_n3():
     picks = {iid: _ANS[iid][1] for iid in list(_ANS)[:30]}   # 只答 30/60
-    out = BF.falsify_run(_ANS, _run(picks, n=len(_ANS)))     # run.n = 集合大小
+    out = BF.falsify_run(_ANS, _run(picks, n=len(_ANS)), lengths=_LEN)     # run.n = 集合大小
     assert out["answered_rate"] == pytest.approx(0.5)
     assert out["checks"]["answered"] is False, "一半未答必须被 N3 显形"
 
@@ -81,7 +84,7 @@ def test_falsify_is_reproducible():
     import random
     rng = random.Random(11)
     picks = {iid: (rng.choice("AB") if rng.random() < 0.8 else _ANS[iid]) for iid in _ANS}
-    a = BF.falsify_run(_ANS, _run(picks))
-    b = BF.falsify_run(_ANS, _run(picks))
+    a = BF.falsify_run(_ANS, _run(picks), lengths=_LEN)
+    b = BF.falsify_run(_ANS, _run(picks), lengths=_LEN)
     assert a["perm_p"] == b["perm_p"] and a["cluster_ci"] == b["cluster_ci"], \
         "同种子两次检验结果必须逐位一致"

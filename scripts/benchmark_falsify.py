@@ -55,13 +55,16 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def _load(set_id: str):
-    """读集合条目（段/答案/类型）+ 各 run 的逐题 pick。只读。"""
+    """读集合条目（段/答案/类型/AB 长度）+ 各 run 的逐题 pick。只读。"""
     with db.session() as s:
         items = s.query(BenchmarkItem).filter_by(set_id=set_id).all()
         if not items:
             raise SystemExit(f"集合 {set_id} 没有条目")
         meta = {x.id: (x.segment_id, x.answer, (x.meta or {}).get("corruption_type", ""))
                 for x in items}
+        # 军师 P1-3：长度基线必检——"只选较短文本"的简单规则曾是两个集合上的
+        # 最高分（nat-v1 规则 0.940 vs 模型 0.915；hvai 0.867 vs 0.827）。
+        lengths = {x.id: (len(x.text_a or ""), len(x.text_b or "")) for x in items}
         n_items = len(items)
         runs = []
         for r in s.query(BenchmarkRun).filter_by(set_id=set_id).all():
@@ -69,10 +72,21 @@ def _load(set_id: str):
             runs.append({"model": r.model, "n": r.n, "correct": r.n_correct,
                          "accuracy": r.accuracy, "picks": picks,
                          "created_at": r.created_at})
-    return meta, n_items, runs
+    return meta, n_items, runs, lengths
 
 
-def falsify_run(meta: dict, run: dict, n_items: int | None = None) -> dict:
+def _binom_two_sided(k: int, n: int) -> float:
+    from math import comb
+    if n == 0:
+        return 1.0
+    def pm(x):
+        return comb(n, x) * (0.5 ** n)
+    p0 = pm(k)
+    return min(1.0, sum(pm(x) for x in range(n + 1) if pm(x) <= p0 + 1e-12))
+
+
+def falsify_run(meta: dict, run: dict, n_items: int | None = None,
+                lengths: dict | None = None) -> dict:
     """对单个 run 做四项检验。picks 缺的题按未答处理（不进分母，但进 N3）。
 
     N3 的分母是**集合条目数**（n_items）——DB 里 run.n 是已答数，用它当分母
@@ -135,12 +149,38 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None) -> dict:
 
     # N3 未答率：分母 = 集合条目数（不是 run.n，那已经是已答数）
     answered_rate = n_ans / n_items if n_items else n_ans / (run["n"] or 1)
+    # P1-4：全题有效成功率——漏答按错算（只报已答 acc 是选择性汇报）
+    effective_acc = run["correct"] / n_items if n_items else None
+
+    # N4（军师 P1-3）长度基线："只选较短文本"的简单规则读数 + 配对比较。
+    # 位置已随机化但**长度没有**——若劣化侧普遍更长，"选短"就是免费高分，
+    # 模型读数必须显著超过它才算真信号。
+    len_correct = model_beat = baseline_beat = 0
+    n_both = 0
+    for iid, pick in answered.items():
+        la, lb = (lengths or {}).get(iid, (0, 0))
+        pred = "A" if la < lb else ("B" if lb < la else None)
+        if pred is None:
+            continue                      # 等长：规则无答案，算它错，跳过配对
+        n_both += 1
+        b_ok = (pred == meta[iid][1])
+        m_ok = (pick == meta[iid][1])
+        len_correct += b_ok
+        if m_ok and not b_ok:
+            model_beat += 1
+        if b_ok and not m_ok:
+            baseline_beat += 1
+    len_acc = len_correct / n_both if n_both else None
+    disc = model_beat + baseline_beat
+    beat_p = _binom_two_sided(min(model_beat, baseline_beat), disc) if disc else 1.0
 
     checks = {
         "perm_p": perm_p < GATE["perm_p"],
         "sensitivity": sensitivity < GATE["sensitivity"],
         "pos_bias": pos_bias is None or pos_bias < GATE["pos_bias"],
         "answered": answered_rate >= GATE["answered"],
+        "beats_length": (len_acc is not None and acc > len_acc
+                         and beat_p < 0.05),   # P1-3：不显著优于"只选较短"不许 pass
     }
     verdict = ("pass" if all(checks.values())
                else "fail" if not checks["perm_p"]
@@ -152,14 +192,20 @@ def falsify_run(meta: dict, run: dict, n_items: int | None = None) -> dict:
             "pick_a_rate": round(pick_a_rate, 4), "answer_a_rate": round(ans_a_rate, 4),
             "pos_bias": None if pos_bias is None else round(pos_bias, 4),
             "sensitivity": round(sensitivity, 4), "answered_rate": round(answered_rate, 4),
+            "effective_acc": round(effective_acc, 4) if effective_acc is not None else None,
+            "length_baseline": {"acc": round(len_acc, 4) if len_acc is not None else None,
+                                 "n_pairs": n_both,
+                                 "model_beat": model_beat, "baseline_beat": baseline_beat,
+                                 "sign_p": round(beat_p, 4)},
             "checks": checks, "verdict": verdict, "n_answered": run["n"]}
 
 
 def falsify_set(set_id: str) -> dict:
-    meta, n_items, runs = _load(set_id)
+    meta, n_items, runs, lengths = _load(set_id)
     return {"set_id": set_id, "n_items": n_items,
             "gates": GATE,
-            "runs": [falsify_run(meta, r, n_items=n_items) for r in runs]}
+            "runs": [falsify_run(meta, r, n_items=n_items, lengths=lengths)
+                     for r in runs]}
 
 
 def main() -> None:
@@ -169,15 +215,18 @@ def main() -> None:
     args = ap.parse_args()
     out = falsify_set(args.set)
     if args.md:
-        print("| 模型 | 答对率 | 段bootstrap CI | 置换p(段翻转) | pickA/ansA | 留一波动 | 未答率 | 判定 |")
-        print("|---|---|---|---|---|---|---|---|")
+        print("| 模型 | 已答acc | 全题成功率 | 段bootstrap CI | 置换p(段翻转) | 长度基线(超它?) | pickA/ansA | 留一波动 | 未答率 | 判定 |")
+        print("|---|---|---|---|---|---|---|---|---|---|")
         for r in out["runs"]:
             if "acc" not in r:
-                print(f"| {r['model']} | — | — | — | — | — | — | fail（{r.get('reason','')}）|")
+                print(f"| {r['model']} | — | — | — | — | — | — | — | — | fail（{r.get('reason','')}）|")
                 continue
+            lb = r["length_baseline"]
             pb = r["pos_bias"]
-            print(f"| {r['model']} | {r['acc']:.3f} | [{r['cluster_ci'][0]:.3f},{r['cluster_ci'][1]:.3f}] "
+            print(f"| {r['model']} | {r['acc']:.3f} | {r['effective_acc']:.3f} "
+                  f"| [{r['cluster_ci'][0]:.3f},{r['cluster_ci'][1]:.3f}] "
                   f"| {r['perm_p']:.4f}（{r['flip_groups']}段）"
+                  f"| {lb['acc']:.3f}（{lb['model_beat']}:{lb['baseline_beat']} p={lb['sign_p']:.3f}）"
                   f"| {r['pick_a_rate']:.2f}/{r['answer_a_rate']:.2f} "
                   f"| {r['sensitivity']:.3f} | {r['answered_rate']:.2f} | **{r['verdict']}** |")
     else:
