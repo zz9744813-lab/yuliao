@@ -1,189 +1,97 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>评委竞技场 · 中文文风研究台</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    background: #0e1116; color: #c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    padding: 24px; line-height: 1.5;
-  }
-  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-variant-numeric: tabular-nums; }
-  header { margin-bottom: 20px; }
-  header h1 { font-size: 22px; color: #e6edf3; font-weight: 650; }
-  header p { font-size: 13px; color: #8b949e; margin-top: 4px; }
-  .banner {
-    display: none; background: rgba(210,153,34,.12); border: 1px solid #9e6a03;
-    color: #e3b341; border-radius: 10px; padding: 10px 14px;
-    font-size: 13px; margin-bottom: 16px;
-  }
-  .cards { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
-  .card {
-    background: #161b22; border: 1px solid #263041; border-radius: 10px;
-    padding: 14px 18px; flex: 1 1 160px; min-width: 150px;
-  }
-  .card .val { font-size: 26px; font-weight: 700; color: #58a6ff; }
-  .card .lbl { font-size: 12px; color: #8b949e; margin-top: 4px; }
-  .panel {
-    background: #161b22; border: 1px solid #263041; border-radius: 10px;
-    padding: 18px; margin-bottom: 20px; overflow-x: auto;
-  }
-  .panel h2 { font-size: 15px; color: #e6edf3; margin-bottom: 4px; }
-  .panel .sub { font-size: 12px; color: #8b949e; margin-bottom: 14px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  thead th {
-    position: sticky; top: 0; background: #161b22; z-index: 2;
-    text-align: left; color: #8b949e; font-weight: 600; font-size: 12px;
-    padding: 8px 10px; border-bottom: 1px solid #263041; white-space: nowrap;
-  }
-  tbody td { padding: 8px 10px; border-bottom: 1px solid #21262d; white-space: nowrap; }
-  tbody tr:hover td { background: rgba(88,166,255,.05); }
-  .heat { text-align: center; min-width: 64px; border-radius: 4px; }
-  .empty { text-align: center; color: #8b949e; padding: 28px 0; font-size: 13px; }
-  .bar-wrap { background: #21262d; border-radius: 4px; height: 8px; width: 120px; display: inline-block; vertical-align: middle; }
-  .bar { height: 8px; border-radius: 4px; background: #58a6ff; }
-  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
-  .tag.up { color: #3fb950; background: rgba(63,185,80,.12); }
-  .tag.down { color: #f85149; background: rgba(248,81,73,.12); }
-  .tag.flat { color: #8b949e; background: rgba(139,148,158,.12); }
-  footer { font-size: 12px; color: #8b949e; margin-top: 8px; }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-<header>
-  <h1>评委竞技场</h1>
-  <p>7 个评委口径的 κ / 一致度矩阵、弃权率与基线对比 · 中文文风研究台</p>
-</header>
+    <header class="lg-head">
+      <div class="row">
+        <h1>评委竞技场</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">Judge Arena · 评委调用量 / 弃权与失败率 / 任务类型分布 / 已知方向性偏差</div>
+    </header>
 
-<div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+    <section class="stats" id="stats"></section>
 
-<div class="cards" id="cards"></div>
+    <section class="card">
+      <div class="card-head"><h2>已知偏差（读数必对照）</h2><span class="hint">known_bias</span></div>
+      <div class="card-body" id="biasBox"></div>
+    </section>
 
-<div class="panel">
-  <h2>评委两两一致度矩阵（Cohen's κ）</h2>
-  <div class="sub">颜色越深表示一致度越高；对角线为自身（κ = 1.00）</div>
-  <div id="matrix"></div>
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>判题类型分布</h2><span class="hint">by_kind</span></div>
+        <div class="card-body"><div class="bars" id="barsKind"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>调用状态</h2><span class="hint">by_status</span></div>
+        <div class="card-body"><div class="bars" id="barsStatus"></div></div>
+      </section>
+    </div>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>模型记分板（按调用量降序）</h2>
+        <span class="hint" id="rowCount">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
-<div class="panel">
-  <h2>评委弃权率与基线对比</h2>
-  <div class="sub">弃权率 = 弃权样本数 / 应评样本数；Δ 为相对基线的一致度变化</div>
-  <table>
-    <thead>
-      <tr>
-        <th>评委</th><th>应评样本</th><th>弃权数</th><th>弃权率</th>
-        <th>平均 κ</th><th>基线 κ</th><th>Δ 对比</th>
-      </tr>
-    </thead>
-    <tbody id="judgeRows"></tbody>
-  </table>
-  <div class="empty" id="tableEmpty">暂无数据</div>
-</div>
-
-<footer class="mono" id="foot"></footer>
-
+<script src="/lab/_shared/lg.js"></script>
 <script>
-const $ = s => document.querySelector(s);
-const fmt = n => (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toLocaleString('zh-CN');
-const pct = n => (n === null || n === undefined || isNaN(n)) ? '—' : (n * 100).toFixed(1) + '%';
-const kfmt = n => (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(3);
+LG.init('judge-arena', function (d, el) {
+  var st = d.by_status || {};
+  var rows = (d.leaderboard || []).slice().sort(function (a, b) { return (b.calls || 0) - (a.calls || 0); });
 
-function heatColor(v) {
-  if (v === null || v === undefined || isNaN(v)) return 'background:#21262d;color:#8b949e';
-  const t = Math.max(0, Math.min(1, v));
-  const a = 0.08 + t * 0.55;
-  return `background:rgba(88,166,255,${a.toFixed(2)});color:${t > 0.45 ? '#e6edf3' : '#c9d1d9'}`;
-}
+  LG.statCards(el.stats, [
+    { value: d.judge_runs,       label: '评委调用数', hint: 'judge_runs' },
+    { value: st.ok,              label: '解析成功', tone: 'ok',  hint: 'by_status.ok' },
+    { value: st.failed,          label: '调用失败', tone: 'bad', hint: 'by_status.failed' },
+    { value: st.failed_parse,    label: '解析失败', tone: 'bad', hint: 'by_status.failed_parse' },
+    { value: d.abstain_total,    label: '弃权合计', hint: 'abstain_total' },
+    { value: rows.length,        label: '在榜模型数' }
+  ]);
 
-function renderStats(stats) {
-  const box = $('#cards');
-  box.innerHTML = '';
-  if (!stats || !stats.length) {
-    box.innerHTML = '<div class="card"><div class="val mono">—</div><div class="lbl">暂无指标</div></div>';
-    return;
+  var bias = LG.$('biasBox');
+  if (d.known_bias) {
+    bias.innerHTML = '<span class="badge warn">方向性偏差</span> <span style="color:var(--fg-2)">' +
+                     LG.esc(d.known_bias) + '</span>';
+  } else {
+    bias.innerHTML = '<div class="empty">未登记已知偏差</div>';
   }
-  stats.forEach(s => {
-    const v = (typeof s.value === 'number') ? fmt(s.value) : (s.value ?? '—');
-    box.insertAdjacentHTML('beforeend',
-      `<div class="card"><div class="val mono">${v}</div><div class="lbl">${s.label ?? ''}</div></div>`);
-  });
-}
 
-function renderMatrix(names, matrix) {
-  const box = $('#matrix');
-  if (!names || !names.length || !matrix || !matrix.length) {
-    box.innerHTML = '<div class="empty">暂无数据</div>';
-    return;
-  }
-  let html = '<table><thead><tr><th>κ</th>';
-  names.forEach(n => html += `<th style="text-align:center">${n}</th>`);
-  html += '</tr></thead><tbody>';
-  matrix.forEach((row, i) => {
-    html += `<tr><td style="color:#8b949e">${names[i]}</td>`;
-    row.forEach(v => {
-      html += `<td class="heat mono" style="${heatColor(v)}">${kfmt(v)}</td>`;
-    });
-    html += '</tr>';
-  });
-  html += '</tbody></table>';
-  box.innerHTML = html;
-}
+  LG.bars(LG.$('barsKind'), d.by_kind || {});
+  LG.bars(LG.$('barsStatus'), st);
 
-function renderJudges(rows) {
-  const tb = $('#judgeRows');
-  tb.innerHTML = '';
-  const has = rows && rows.length;
-  $('#tableEmpty').style.display = has ? 'none' : 'block';
-  if (!has) return;
-  rows.forEach(r => {
-    const d = r.delta;
-    let tag = '<span class="tag flat">—</span>';
-    if (typeof d === 'number' && !isNaN(d)) {
-      const cls = d > 0 ? 'up' : (d < 0 ? 'down' : 'flat');
-      const sign = d > 0 ? '+' : '';
-      tag = `<span class="tag ${cls} mono">${sign}${d.toFixed(3)}</span>`;
-    }
-    const rate = (typeof r.abstain_rate === 'number') ? r.abstain_rate : null;
-    const barW = rate !== null ? Math.min(100, rate * 100) : 0;
-    tb.insertAdjacentHTML('beforeend', `<tr>
-      <td>${r.judge ?? '—'}</td>
-      <td class="mono">${fmt(r.total)}</td>
-      <td class="mono">${fmt(r.abstained)}</td>
-      <td class="mono">${pct(rate)} <span class="bar-wrap"><span class="bar" style="width:${barW}%"></span></span></td>
-      <td class="mono">${kfmt(r.avg_kappa)}</td>
-      <td class="mono">${kfmt(r.baseline_kappa)}</td>
-      <td>${tag}</td>
-    </tr>`);
-  });
-}
+  LG.table(el.tbody, rows, [
+    { key: 'model',          label: '模型' },
+    { key: 'prompt_version', label: '提示词版本' },
+    { key: 'calls',          label: '调用数',   num: true },
+    { key: 'abstain_rate',   label: '弃权率',   num: true, render: function (r) { return LG.fmtPct(r.abstain_rate); } },
+    { key: 'failed_rate',    label: '失败率',   num: true, render: function (r) { return LG.fmtPct(r.failed_rate); } }
+  ], { head: el.head });
 
-function renderEmpty() {
-  renderStats([]);
-  renderMatrix(null, null);
-  renderJudges([]);
-  $('#foot').textContent = '';
-}
-
-(async function () {
-  let data = null;
-  try {
-    const res = await fetch('/console/judges');
-    if (!res.ok) throw new Error(res.status);
-    data = await res.json();
-  } catch (e) {
-    $('#banner').style.display = 'block';
-    renderEmpty();
-    return;
-  }
-  renderStats(data.stats);
-  renderMatrix(data.judges || data.judge_names, data.kappa_matrix || data.matrix);
-  renderJudges(data.rows);
-  $('#foot').textContent = data.generated_at ? ('数据生成时间：' + data.generated_at) : (data.note || '');
-})();
+  LG.$('rowCount').textContent = '共 ' + LG.fmtNum(rows.length) + ' 条（模型 × 提示词版本）';
+});
 </script>
 </body>
 </html>

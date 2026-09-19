@@ -1,188 +1,92 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>策略图谱 · 中文文风研究台</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0e1116; color:#c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    padding:24px; line-height:1.5;
-  }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
-  header { margin-bottom:20px; }
-  h1 { font-size:22px; font-weight:600; color:#e6edf3; }
-  .subtitle { font-size:13px; color:#8b949e; margin-top:4px; }
-  #banner {
-    display:none; background:rgba(210,153,34,.12); border:1px solid #d29922;
-    color:#e3b341; border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
-  }
-  .stats-grid {
-    display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
-    gap:14px; margin-bottom:22px;
-  }
-  .stat-card {
-    background:#161b22; border:1px solid #263041; border-radius:10px; padding:16px 18px;
-  }
-  .stat-value { font-size:26px; font-weight:700; color:#58a6ff; }
-  .stat-label { font-size:12px; color:#8b949e; margin-top:4px; }
-  .panel {
-    background:#161b22; border:1px solid #263041; border-radius:10px; overflow:hidden;
-  }
-  .panel-head {
-    padding:14px 18px; border-bottom:1px solid #263041;
-    display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
-  }
-  .panel-title { font-size:15px; font-weight:600; color:#e6edf3; }
-  .legend { display:flex; align-items:center; gap:8px; font-size:12px; color:#8b949e; }
-  .legend-bar {
-    width:120px; height:10px; border-radius:5px;
-    background:linear-gradient(90deg, #1c2b45, #1f6feb, #58a6ff);
-  }
-  .table-wrap { overflow-x:auto; }
-  table { width:100%; border-collapse:collapse; font-size:13px; min-width:720px; }
-  thead th {
-    position:sticky; top:0; background:#161b22; z-index:2;
-    text-align:left; padding:10px 14px; font-size:12px; color:#8b949e;
-    border-bottom:1px solid #263041; white-space:nowrap; font-weight:600;
-  }
-  tbody td { padding:10px 14px; border-bottom:1px solid #21262d; white-space:nowrap; }
-  tbody tr:hover { background:#1c2129; }
-  .cell-rate {
-    display:inline-block; min-width:64px; text-align:center;
-    padding:4px 10px; border-radius:6px; font-weight:600; font-size:12px;
-  }
-  .ci { color:#8b949e; font-size:12px; }
-  .n-badge { color:#8b949e; font-size:12px; }
-  .empty { padding:48px 20px; text-align:center; color:#8b949e; font-size:14px; }
-  .note { margin-top:14px; font-size:12px; color:#8b949e; }
-  footer { margin-top:18px; font-size:12px; color:#6e7681; }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-<header>
-  <h1>策略图谱</h1>
-  <div class="subtitle">策略 × 场景成功率热力图 · 置信区间 · 样本量统计</div>
-</header>
+    <header class="lg-head">
+      <div class="row">
+        <h1>策略图谱</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">Strategy Atlas · 表达策略聚类 · 规模 / 成功率 / Wilson 区间</div>
+    </header>
 
-<div id="banner">数据接口不可用，以下为示例结构</div>
+    <section class="stats" id="stats"></section>
 
-<div class="stats-grid" id="statsGrid"></div>
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>聚类方法</h2><span class="hint">by_method</span></div>
+        <div class="card-body"><div class="bars" id="barsMethod"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>聚类规模</h2><span class="hint">top_by_size.n_items</span></div>
+        <div class="card-body"><div class="bars" id="barsSize"></div></div>
+      </section>
+    </div>
 
-<div class="panel">
-  <div class="panel-head">
-    <div class="panel-title">策略 × 场景成功率热力图</div>
-    <div class="legend"><span>低</span><div class="legend-bar"></div><span>高</span></div>
-  </div>
-  <div class="table-wrap">
-    <table id="heatTable">
-      <thead><tr id="headRow"></tr></thead>
-      <tbody id="heatBody"></tbody>
-    </table>
-  </div>
-  <div class="empty" id="emptyMsg" style="display:none">暂无数据</div>
+    <section class="card">
+      <div class="card-head">
+        <h2>策略明细（按条目数降序）</h2>
+        <span class="hint" id="rowCount">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="note">
+      Wilson 区间是成功率的 95% 置信下界/上界——区间宽说明样本少，别只看点估计。
+      策略来自表达层聚类，供"哪种写法更常被偏好"参考，不构成因果结论。
+    </p>
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
-<div class="note" id="noteLine"></div>
-<footer>中文文风研究台 · Language Genome · <span id="genAt" class="mono"></span></footer>
-
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function(){
-  var $ = function(id){ return document.getElementById(id); };
-  function fmt(n){ return (typeof n === 'number' && isFinite(n)) ? n.toLocaleString('zh-CN') : '—'; }
-  function pct(x){ return (typeof x === 'number' && isFinite(x)) ? (x*100).toFixed(1) + '%' : '—'; }
+LG.init('strategy-atlas', function (d, el) {
+  var rows = d.top_by_size || [];
+  var sizeMap = {};
+  rows.forEach(function (r) { sizeMap[r.name] = r.n_items; });
 
-  function rateColor(r){
-    if (typeof r !== 'number' || !isFinite(r)) return { bg:'#21262d', fg:'#8b949e' };
-    var t = Math.max(0, Math.min(1, r));
-    // 深蓝 -> 亮蓝
-    var rC = Math.round(28 + (88-28)*t);
-    var gC = Math.round(43 + (166-43)*t);
-    var bC = Math.round(69 + (255-69)*t);
-    return { bg:'rgba('+rC+','+gC+','+bC+','+(0.25+0.65*t)+')', fg: t>0.45 ? '#fff' : '#c9d1d9' };
-  }
+  LG.statCards(el.stats, [
+    { value: d.strategies,          label: '策略总数' },
+    { value: d.cluster_items_total, label: '归属条目总数', hint: 'cluster_items_total' },
+    { value: rows.length,           label: '本页展示', hint: 'top_by_size' },
+    { value: Object.keys(d.by_method || {}).length, label: '聚类方法数' }
+  ]);
 
-  function renderStats(stats){
-    var grid = $('statsGrid');
-    grid.innerHTML = '';
-    if (!Array.isArray(stats) || !stats.length){
-      ['策略总数','场景总数','总样本量','平均成功率'].forEach(function(l){
-        grid.innerHTML += '<div class="stat-card"><div class="stat-value mono">—</div><div class="stat-label">'+l+'</div></div>';
-      });
-      return;
-    }
-    stats.forEach(function(s){
-      var v = (typeof s.value === 'number') ? fmt(s.value) : (s.value != null ? String(s.value) : '—');
-      grid.innerHTML += '<div class="stat-card"><div class="stat-value mono">'+v+'</div><div class="stat-label">'+(s.label||'指标')+'</div></div>';
-    });
-  }
+  LG.bars(LG.$('barsMethod'), d.by_method || {});
+  LG.bars(LG.$('barsSize'), sizeMap);
 
-  function renderTable(rows){
-    var head = $('headRow'), body = $('heatBody');
-    head.innerHTML = ''; body.innerHTML = '';
-    if (!Array.isArray(rows) || !rows.length){
-      head.innerHTML = '<th>策略</th><th>场景</th><th>成功率</th><th>95% 置信区间</th><th>样本量</th>';
-      $('emptyMsg').style.display = 'block';
-      return;
-    }
-    $('emptyMsg').style.display = 'none';
+  LG.table(el.tbody, rows, [
+    { key: 'name',         label: '策略名' },
+    { key: 'method',       label: '方法' },
+    { key: 'n_items',      label: '条目数', num: true },
+    { key: 'success_rate', label: '成功率', num: true, render: function (r) { return LG.fmtPct(r.success_rate); } },
+    { key: 'wilson',       label: 'Wilson 95% 区间', num: true, render: function (r) {
+        var w = r.wilson;
+        return (Array.isArray(w) && w.length === 2) ? (LG.fmtPct(w[0]) + ' ~ ' + LG.fmtPct(w[1])) : '—';
+      } },
+    { key: 'version',      label: '版本' },
+    { key: 'id',           label: 'ID', num: true }
+  ], { head: el.head });
 
-    // 收集场景列
-    var scenarios = [];
-    rows.forEach(function(r){
-      var cells = r.cells || r.scenarios || {};
-      var keys = Array.isArray(cells) ? cells.map(function(c){return c.scenario;}) : Object.keys(cells);
-      keys.forEach(function(k){ if (k && scenarios.indexOf(k) < 0) scenarios.push(k); });
-    });
-
-    var html = '<th>策略</th>';
-    scenarios.forEach(function(s){ html += '<th>'+s+'</th>'; });
-    html += '<th>总体成功率</th><th>95% 置信区间</th><th>样本量</th>';
-    head.innerHTML = html;
-
-    rows.forEach(function(r){
-      var tr = '<tr><td style="font-weight:600;color:#e6edf3">'+(r.strategy||r.name||'—')+'</td>';
-      var cells = r.cells || r.scenarios || {};
-      scenarios.forEach(function(sc){
-        var c = Array.isArray(cells)
-          ? cells.filter(function(x){return x.scenario===sc;})[0]
-          : cells[sc];
-        if (c && typeof c.rate === 'number'){
-          var col = rateColor(c.rate);
-          tr += '<td><span class="cell-rate mono" style="background:'+col.bg+';color:'+col.fg+'">'+pct(c.rate)+'</span>'
-              + ' <span class="n-badge mono">n='+fmt(c.n||0)+'</span></td>';
-        } else {
-          tr += '<td><span class="cell-rate mono" style="background:#21262d;color:#8b949e">—</span></td>';
-        }
-      });
-      var ci = (r.ci_low != null && r.ci_high != null)
-        ? '<span class="ci mono">['+pct(r.ci_low)+', '+pct(r.ci_high)+']</span>' : '<span class="ci">—</span>';
-      tr += '<td class="mono" style="color:#58a6ff;font-weight:600">'+pct(r.rate)+'</td>'
-          + '<td>'+ci+'</td>'
-          + '<td class="n-badge mono">'+fmt(r.n||r.sample_size||0)+'</td></tr>';
-      body.innerHTML += tr;
-    });
-  }
-
-  function fail(){
-    $('banner').style.display = 'block';
-    renderStats(null);
-    renderTable([]);
-  }
-
-  fetch('/console/strategy')
-    .then(function(res){ if (!res.ok) throw new Error(res.status); return res.json(); })
-    .then(function(data){
-      renderStats(data.stats);
-      renderTable(data.rows);
-      $('noteLine').textContent = data.note || '';
-      $('genAt').textContent = data.generated_at ? ('数据生成时间：' + data.generated_at) : '';
-    })
-    .catch(fail);
-})();
+  LG.$('rowCount').textContent = '共 ' + LG.fmtNum(rows.length) + ' 个（Top N）';
+});
 </script>
 </body>
 </html>

@@ -1,166 +1,93 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>训练数据 · 中文文风研究台</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0e1116; color:#c9d1d9;
-    font-family:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
-    padding:24px; min-height:100vh;
-  }
-  .wrap { max-width:1200px; margin:0 auto; }
-  header h1 { font-size:22px; font-weight:600; color:#e6edf3; }
-  header p { font-size:13px; color:#8b949e; margin-top:6px; }
-  .banner {
-    display:none; margin-top:16px; padding:10px 14px;
-    background:rgba(210,153,34,.12); border:1px solid #d29922;
-    color:#e3b341; border-radius:10px; font-size:13px;
-  }
-  .cards {
-    display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
-    gap:14px; margin-top:20px;
-  }
-  .card {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    padding:18px 20px;
-  }
-  .card .val {
-    font-size:28px; font-weight:700; color:#58a6ff;
-    font-variant-numeric:tabular-nums; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  }
-  .card .lbl { font-size:12px; color:#8b949e; margin-top:6px; }
-  .panel {
-    margin-top:22px; background:#161b22; border:1px solid #263041;
-    border-radius:10px; overflow:hidden;
-  }
-  .panel h2 {
-    font-size:14px; font-weight:600; color:#e6edf3;
-    padding:14px 18px; border-bottom:1px solid #263041;
-  }
-  .table-scroll { overflow:auto; max-height:520px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th {
-    position:sticky; top:0; z-index:2;
-    background:#161b22; color:#8b949e; font-weight:600; text-align:left;
-    padding:10px 16px; border-bottom:1px solid #263041; white-space:nowrap;
-  }
-  tbody td {
-    padding:10px 16px; border-bottom:1px solid #21262e; white-space:nowrap;
-  }
-  tbody tr:hover { background:#1c2330; }
-  td.num { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-variant-numeric:tabular-nums; }
-  .tag {
-    display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px;
-    border:1px solid #263041; color:#58a6ff; background:rgba(88,166,255,.08);
-  }
-  .empty { padding:40px; text-align:center; color:#8b949e; font-size:13px; }
-  .note { margin-top:14px; font-size:12px; color:#8b949e; }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>训练数据</h1>
-    <p>SFT / DPO / RM / Rewrite 导出物 · 条数 · 体积 · 最近导出时间</p>
-  </header>
-  <div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-  <div class="cards" id="cards"></div>
+    <header class="lg-head">
+      <div class="row">
+        <h1>训练数据</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">Training Data · 导出物清单 / 扰动样本库 / 负面池 / 隔离审计</div>
+    </header>
 
-  <div class="panel">
-    <h2>导出物清单</h2>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>导出物</th><th>类型</th><th>条数</th><th>体积</th><th>最近导出时间</th>
-          </tr>
-        </thead>
-        <tbody id="tbody"></tbody>
-      </table>
-      <div class="empty" id="empty" style="display:none">暂无数据</div>
+    <section class="stats" id="stats"></section>
+
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>扰动样本状态</h2><span class="hint">corruptions.by_status</span></div>
+        <div class="card-body"><div class="bars" id="barsCorrupt"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>口径备注</h2><span class="hint">sft_note / benchmark_isolation</span></div>
+        <div class="card-body" id="notesBox"></div>
+      </section>
     </div>
-  </div>
-  <div class="note" id="note"></div>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>导出物清单（按体积降序）</h2>
+        <span class="hint" id="rowCount">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="note">
+      导出物是训练管线的输入（SFT / DPO / RM / rewrite 口径）。体积只反映文件大小，
+      条数口径见各导出器说明；<span class="mono">rejected_*</span> 是在闸门处被拦下的样本，
+      不是"报废"——它们记录了闸门的实际拦下量。
+    </p>
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function(){
-  var banner = document.getElementById('banner');
-  var cardsEl = document.getElementById('cards');
-  var tbody = document.getElementById('tbody');
-  var emptyEl = document.getElementById('empty');
-  var noteEl = document.getElementById('note');
+LG.init('training-data', function (d, el) {
+  var cor = d.corruptions || {};
+  var cs = cor.by_status || {};
+  var files = (d.export_files || []).slice().sort(function (a, b) { return (b.bytes || 0) - (a.bytes || 0); });
+  var totalBytes = files.reduce(function (n, f) { return n + (f.bytes || 0); }, 0);
 
-  function fmtNum(n){
-    if (typeof n !== 'number' || isNaN(n)) return '—';
-    return n.toLocaleString('zh-CN');
-  }
-  function esc(s){
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
-      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-    });
-  }
+  LG.statCards(el.stats, [
+    { value: files.length,                 label: '导出物数' },
+    { value: Math.round(totalBytes / 1048576 * 10) / 10, label: '导出总体积 MB', hint: LG.fmtBytes(totalBytes) },
+    { value: cor.total,                    label: '扰动样本总数', hint: 'corruptions.total' },
+    { value: cs.ok,                        label: '扰动合格', tone: 'ok',  hint: 'by_status.ok' },
+    { value: cs.failed,                    label: '扰动失败', tone: 'bad', hint: 'by_status.failed' },
+    { value: d.negative_pool_eligible,     label: '负面池可用', hint: 'negative_pool_eligible' }
+  ]);
 
-  function renderStats(stats){
-    cardsEl.innerHTML = '';
-    if (!Array.isArray(stats) || !stats.length){
-      ['SFT 条数','DPO 条数','RM 条数','Rewrite 条数'].forEach(function(l){
-        cardsEl.innerHTML += '<div class="card"><div class="val">—</div><div class="lbl">'+esc(l)+'</div></div>';
-      });
-      return;
-    }
-    stats.forEach(function(s){
-      var v = (typeof s.value === 'number') ? fmtNum(s.value) : esc(s.value);
-      cardsEl.innerHTML += '<div class="card"><div class="val">'+v+'</div><div class="lbl">'+esc(s.label)+'</div></div>';
-    });
-  }
+  LG.bars(LG.$('barsCorrupt'), cs);
 
-  function renderRows(rows){
-    tbody.innerHTML = '';
-    if (!Array.isArray(rows) || !rows.length){
-      emptyEl.style.display = 'block';
-      return;
-    }
-    emptyEl.style.display = 'none';
-    rows.forEach(function(r){
-      var tr = document.createElement('tr');
-      var cells = [
-        '<td>'+esc(r.name || r.artifact || r.file || '—')+'</td>',
-        '<td><span class="tag">'+esc(r.type || r.kind || '—')+'</span></td>',
-        '<td class="num">'+fmtNum(r.count != null ? r.count : r.rows)+'</td>',
-        '<td class="num">'+esc(r.size || r.bytes_human || '—')+'</td>',
-        '<td class="num">'+esc(r.exported_at || r.updated_at || '—')+'</td>'
-      ];
-      tr.innerHTML = cells.join('');
-      tbody.appendChild(tr);
-    });
-  }
+  var notes = LG.$('notesBox');
+  var parts = [];
+  if (d.sft_note) parts.push('<div style="margin-bottom:8px"><span class="badge">SFT</span> <span style="color:var(--fg-2)">' + LG.esc(d.sft_note) + '</span></div>');
+  if (d.benchmark_isolation) parts.push('<div><span class="badge warn">隔离</span> <span style="color:var(--fg-2)">' + LG.esc(d.benchmark_isolation) + '</span></div>');
+  notes.innerHTML = parts.length ? parts.join('') : '<div class="empty">未登记备注</div>';
 
-  function renderEmpty(){
-    renderStats(null);
-    renderRows([]);
-  }
+  LG.table(el.tbody, files, [
+    { key: 'file',  label: '文件名', render: function (r) { return '<span class="mono">' + LG.esc(r.file) + '</span>'; } },
+    { key: 'bytes', label: '体积',   num: true, render: function (r) { return LG.fmtBytes(r.bytes); } }
+  ], { head: el.head });
 
-  fetch('/console/training')
-    .then(function(res){
-      if (!res.ok) throw new Error('HTTP '+res.status);
-      return res.json();
-    })
-    .then(function(data){
-      renderStats(data.stats);
-      renderRows(data.rows);
-      if (data.note) noteEl.textContent = data.note;
-      if (data.generated_at) noteEl.textContent = (noteEl.textContent ? noteEl.textContent + ' · ' : '') + '生成时间：' + data.generated_at;
-    })
-    .catch(function(){
-      banner.style.display = 'block';
-      renderEmpty();
-    });
-})();
+  LG.$('rowCount').textContent = '共 ' + LG.fmtNum(files.length) + ' 个';
+});
 </script>
 </body>
 </html>

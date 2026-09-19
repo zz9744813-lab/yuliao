@@ -1,242 +1,86 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>偏好实验室 · 中文文风研究台</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0e1116; color:#c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    padding: 24px; min-height:100vh;
-  }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
-
-  header { margin-bottom: 20px; }
-  header h1 { font-size: 22px; font-weight: 600; color:#c9d1d9; }
-  header h1 .accent { color:#58a6ff; }
-  header p { font-size: 13px; color:#8b949e; margin-top: 4px; }
-
-  #banner {
-    display:none; background:rgba(210,153,34,.12); border:1px solid #d29922;
-    color:#e3b341; border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
-  }
-
-  .stats { display:flex; flex-wrap:wrap; gap:14px; margin-bottom:20px; }
-  .stat-card {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    padding:16px 20px; flex:1 1 180px; min-width:160px;
-  }
-  .stat-card .value { font-size:28px; font-weight:600; color:#58a6ff; }
-  .stat-card .label { font-size:12px; color:#8b949e; margin-top:6px; }
-
-  .panel {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    padding:18px 20px; margin-bottom:20px;
-  }
-  .panel h2 { font-size:15px; font-weight:600; margin-bottom:14px; color:#c9d1d9; }
-  .panel h2 .sub { font-size:12px; font-weight:400; color:#8b949e; margin-left:8px; }
-
-  .table-wrap { overflow:auto; max-height:520px; border:1px solid #263041; border-radius:10px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th {
-    position:sticky; top:0; background:#1c2230; color:#8b949e; text-align:left;
-    padding:10px 12px; font-weight:500; border-bottom:1px solid #263041; white-space:nowrap;
-  }
-  tbody td { padding:10px 12px; border-bottom:1px solid #21262e; white-space:nowrap; }
-  tbody tr:hover { background:#1a212b; }
-  .empty { text-align:center; color:#8b949e; padding:40px 0; font-size:13px; }
-
-  .bar-row { display:flex; align-items:center; gap:12px; margin-bottom:10px; font-size:13px; }
-  .bar-row .name { width:140px; flex-shrink:0; color:#c9d1d9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .bar-track { flex:1; background:#21262e; border-radius:6px; height:18px; position:relative; overflow:hidden; }
-  .bar-fill { height:100%; background:#58a6ff; border-radius:6px; min-width:2px; transition:width .4s; }
-  .bar-fill.win { background:#3fb950; }
-  .bar-fill.lose { background:#f85149; }
-  .bar-val { width:110px; flex-shrink:0; text-align:right; color:#8b949e; }
-
-  .ci-row { display:flex; align-items:center; gap:12px; margin-bottom:12px; font-size:13px; }
-  .ci-name { width:140px; flex-shrink:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .ci-track { flex:1; position:relative; height:22px; background:#21262e; border-radius:6px; }
-  .ci-range { position:absolute; top:8px; height:6px; background:rgba(88,166,255,.35); border-radius:3px; }
-  .ci-point { position:absolute; top:4px; width:4px; height:14px; background:#58a6ff; border-radius:2px; transform:translateX(-2px); }
-  .ci-mid { position:absolute; left:50%; top:0; bottom:0; width:1px; background:#8b949e55; }
-  .ci-val { width:170px; flex-shrink:0; text-align:right; color:#8b949e; }
-
-  .progress-track { background:#21262e; border-radius:6px; height:14px; overflow:hidden; }
-  .progress-fill { height:100%; background:linear-gradient(90deg,#1f6feb,#58a6ff); border-radius:6px; }
-  .stratum { margin-bottom:14px; font-size:13px; }
-  .stratum .meta { display:flex; justify-content:space-between; margin-bottom:5px; }
-  .stratum .meta .pct { color:#58a6ff; }
-
-  .note { font-size:12px; color:#8b949e; margin-top:8px; }
-  @media (max-width:640px) {
-    body { padding:14px; }
-    .bar-row .name, .ci-name { width:90px; }
-    .bar-val { width:80px; } .ci-val { width:120px; font-size:12px; }
-  }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-<header>
-  <h1><span class="accent">偏好实验室</span> · Preference Lab</h1>
-  <p>人类盲评批次的胜率、置信区间与分层抽样进度 · 中文文风研究台（Language Genome）</p>
-</header>
+    <header class="lg-head">
+      <div class="row">
+        <h1>偏好实验室</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">Preference Lab · 盲评队列进度 / 判定去向 / 批次分布 / 一致性门禁</div>
+    </header>
 
-<div id="banner">数据接口不可用，以下为示例结构</div>
+    <section class="stats" id="stats"></section>
 
-<section class="stats" id="stats"></section>
+    <section class="card">
+      <div class="card-head"><h2>一致性门禁</h2><span class="hint">gate</span></div>
+      <div class="card-body" id="gateBox"></div>
+    </section>
 
-<section class="panel">
-  <h2>盲评批次明细 <span class="sub">胜率与 95% 置信区间</span></h2>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>批次</th><th>模型 A</th><th>模型 B</th><th>样本数</th>
-          <th>A 胜率</th><th>95% 置信区间</th><th>显著性</th><th>状态</th>
-        </tr>
-      </thead>
-      <tbody id="batchBody">
-        <tr><td colspan="8" class="empty">暂无数据</td></tr>
-      </tbody>
-    </table>
-  </div>
-</section>
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>队列状态</h2><span class="hint">by_status</span></div>
+        <div class="card-body"><div class="bars" id="barsStatus"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>判定去向</h2><span class="hint">winner_resolved</span></div>
+        <div class="card-body"><div class="bars" id="barsWinner"></div></div>
+      </section>
+    </div>
 
-<section class="panel">
-  <h2>胜率对比 <span class="sub">按批次</span></h2>
-  <div id="winBars"><div class="empty">暂无数据</div></div>
-</section>
+    <section class="card">
+      <div class="card-head"><h2>批次分布</h2><span class="hint">batches</span></div>
+      <div class="card-body"><div class="bars" id="barsBatches"></div></div>
+    </section>
 
-<section class="panel">
-  <h2>置信区间图 <span class="sub">中线为 50%（无偏好）</span></h2>
-  <div id="ciChart"><div class="empty">暂无数据</div></div>
-</section>
+    <p class="note">
+      判定写入在盲评台 <span class="mono">/</span>，本页只读。判定去向里
+      <span class="mono">human / candidate</span> 表示人类稿或候选稿被选中（构成可用偏好对），
+      <span class="mono">tie / both_bad / cant_judge</span> 为无效信号，
+      <span class="mono">A / B</span> 是历史遗留的匿名标签（数据口径未统一，如实呈现）。
+    </p>
+    <footer class="lg-foot"></footer>
+  </main>
+</div>
 
-<section class="panel">
-  <h2>分层抽样进度 <span class="sub">各文风/领域分层的目标完成度</span></h2>
-  <div id="strata"><div class="empty">暂无数据</div></div>
-  <div class="note" id="noteLine"></div>
-</section>
-
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function(){
-  const $ = s => document.querySelector(s);
-  const fmt = n => (typeof n === 'number' && isFinite(n)) ? n.toLocaleString('zh-CN') : '—';
-  const pct = n => (typeof n === 'number' && isFinite(n)) ? (n*100).toFixed(1) + '%' : '—';
+LG.init('preference-lab', function (d, el) {
+  var st = d.by_status || {};
+  var win = d.winner_resolved || {};
+  var ZH = { human: '人类稿胜', candidate: '候选稿胜', tie: '平局', both_bad: '都差', cant_judge: '无法判', A: 'A（历史）', B: 'B（历史）' };
+  var winZh = {};
+  Object.keys(win).forEach(function (k) { winZh[ZH[k] || k] = win[k]; });
 
-  function renderStats(list){
-    const box = $('#stats'); box.innerHTML = '';
-    if (!Array.isArray(list) || !list.length) {
-      box.innerHTML = '<div class="stat-card"><div class="value mono">—</div><div class="label">暂无数据</div></div>';
-      return;
-    }
-    list.forEach(s => {
-      const v = (typeof s.value === 'number')
-        ? (Math.abs(s.value) <= 1 && !Number.isInteger(s.value) ? pct(s.value) : fmt(s.value))
-        : String(s.value);
-      const d = document.createElement('div');
-      d.className = 'stat-card';
-      d.innerHTML = '<div class="value mono">' + v + '</div><div class="label"></div>';
-      d.querySelector('.label').textContent = s.label || '指标';
-      box.appendChild(d);
-    });
-  }
+  LG.statCards(el.stats, [
+    { value: d.review_items,  label: '队列题数', hint: 'review_items' },
+    { value: st.done,         label: '已判定', tone: 'ok',  hint: 'by_status.done' },
+    { value: st.pending,      label: '待判定', hint: 'by_status.pending' },
+    { value: win.human,       label: '人类稿胜出' },
+    { value: win.candidate,   label: '候选稿胜出' },
+    { value: Object.keys(d.batches || {}).length, label: '批次数' }
+  ]);
 
-  function renderTable(rows){
-    const tb = $('#batchBody'); tb.innerHTML = '';
-    if (!rows.length) { tb.innerHTML = '<tr><td colspan="8" class="empty">暂无数据</td></tr>'; return; }
-    rows.forEach(r => {
-      const sig = r.significant === true ? '<span style="color:#3fb950">显著</span>'
-                : r.significant === false ? '<span style="color:#8b949e">不显著</span>' : '—';
-      const ci = (typeof r.ci_low === 'number' && typeof r.ci_high === 'number')
-        ? '[' + pct(r.ci_low) + ', ' + pct(r.ci_high) + ']' : '—';
-      const tr = document.createElement('tr');
-      tr.innerHTML =
-        '<td></td><td></td><td></td>' +
-        '<td class="mono">' + fmt(r.samples) + '</td>' +
-        '<td class="mono" style="color:#58a6ff">' + pct(r.win_rate) + '</td>' +
-        '<td class="mono">' + ci + '</td><td>' + sig + '</td><td></td>';
-      tr.children[0].textContent = r.batch || '—';
-      tr.children[1].textContent = r.model_a || '—';
-      tr.children[2].textContent = r.model_b || '—';
-      tr.children[7].textContent = r.status || '—';
-      tb.appendChild(tr);
-    });
-  }
+  var gate = LG.$('gateBox');
+  gate.innerHTML = d.gate
+    ? '<span class="badge bad">未过门</span> <span style="color:var(--fg-2)">' + LG.esc(d.gate) + '</span>'
+    : '<div class="empty">未登记门禁口径</div>';
 
-  function renderBars(rows){
-    const box = $('#winBars'); box.innerHTML = '';
-    const data = rows.filter(r => typeof r.win_rate === 'number');
-    if (!data.length) { box.innerHTML = '<div class="empty">暂无数据</div>'; return; }
-    data.forEach(r => {
-      const p = r.win_rate * 100;
-      const cls = r.win_rate > 0.5 ? 'win' : (r.win_rate < 0.5 ? 'lose' : '');
-      const row = document.createElement('div');
-      row.className = 'bar-row';
-      row.innerHTML = '<div class="name"></div>' +
-        '<div class="bar-track"><div class="bar-fill ' + cls + '" style="width:' + p.toFixed(1) + '%"></div></div>' +
-        '<div class="bar-val mono">' + pct(r.win_rate) + '</div>';
-      row.querySelector('.name').textContent = r.batch || '批次';
-      box.appendChild(row);
-    });
-  }
-
-  function renderCI(rows){
-    const box = $('#ciChart'); box.innerHTML = '';
-    const data = rows.filter(r => typeof r.win_rate === 'number' && typeof r.ci_low === 'number' && typeof r.ci_high === 'number');
-    if (!data.length) { box.innerHTML = '<div class="empty">暂无数据</div>'; return; }
-    data.forEach(r => {
-      const lo = Math.max(0, r.ci_low) * 100, hi = Math.min(1, r.ci_high) * 100, pt = r.win_rate * 100;
-      const row = document.createElement('div');
-      row.className = 'ci-row';
-      row.innerHTML = '<div class="ci-name"></div>' +
-        '<div class="ci-track"><div class="ci-mid"></div>' +
-        '<div class="ci-range" style="left:' + lo + '%;width:' + (hi - lo) + '%"></div>' +
-        '<div class="ci-point" style="left:' + pt + '%"></div></div>' +
-        '<div class="ci-val mono">' + pct(r.win_rate) + ' [' + pct(r.ci_low) + ', ' + pct(r.ci_high) + ']</div>';
-      row.querySelector('.ci-name').textContent = r.batch || '批次';
-      box.appendChild(row);
-    });
-  }
-
-  function renderStrata(list){
-    const box = $('#strata'); box.innerHTML = '';
-    if (!Array.isArray(list) || !list.length) { box.innerHTML = '<div class="empty">暂无数据</div>'; return; }
-    list.forEach(s => {
-      const done = s.completed || 0, target = s.target || 0;
-      const p = target > 0 ? Math.min(100, done / target * 100) : 0;
-      const d = document.createElement('div');
-      d.className = 'stratum';
-      d.innerHTML = '<div class="meta"><span></span>' +
-        '<span class="mono"><span class="pct">' + p.toFixed(1) + '%</span> · ' + fmt(done) + ' / ' + fmt(target) + '</span></div>' +
-        '<div class="progress-track"><div class="progress-fill" style="width:' + p + '%"></div></div>';
-      d.querySelector('.meta span').textContent = s.stratum || '分层';
-      box.appendChild(d);
-    });
-  }
-
-  function renderAll(data){
-    renderStats(data.stats);
-    const rows = Array.isArray(data.rows) ? data.rows : [];
-    renderTable(rows);
-    renderBars(rows);
-    renderCI(rows);
-    renderStrata(data.strata);
-    $('#noteLine').textContent = data.note || '';
-  }
-
-  fetch('/console/preference')
-    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(renderAll)
-    .catch(() => {
-      $('#banner').style.display = 'block';
-      renderAll({ stats: [], rows: [], strata: [], note: '' });
-    });
-})();
+  LG.bars(LG.$('barsStatus'), st);
+  LG.bars(LG.$('barsWinner'), winZh);
+  LG.bars(LG.$('barsBatches'), d.batches || {});
+});
 </script>
 </body>
 </html>

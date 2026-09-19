@@ -1,169 +1,100 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>硬样本库 · 中文文风研究台</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0e1116; color:#c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    padding:24px; min-height:100vh;
-  }
-  .wrap { max-width:1200px; margin:0 auto; }
-  header h1 { font-size:22px; font-weight:600; color:#e6edf3; }
-  header p { font-size:13px; color:#8b949e; margin-top:6px; }
-  .banner {
-    display:none; margin-top:16px; padding:10px 14px;
-    background:rgba(210,153,34,.12); border:1px solid #9e6a03;
-    border-radius:10px; color:#e3b341; font-size:13px;
-  }
-  .stats {
-    display:flex; flex-wrap:wrap; gap:14px; margin-top:20px;
-  }
-  .card {
-    flex:1 1 180px; min-width:160px;
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    padding:16px 18px;
-  }
-  .card .value {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-size:28px; font-weight:600; color:#58a6ff;
-  }
-  .card .label { font-size:12px; color:#8b949e; margin-top:6px; }
-  .panel {
-    margin-top:22px; background:#161b22; border:1px solid #263041;
-    border-radius:10px; overflow:hidden;
-  }
-  .panel-head {
-    padding:14px 18px; border-bottom:1px solid #263041;
-    display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
-  }
-  .panel-head h2 { font-size:15px; font-weight:600; color:#e6edf3; }
-  .panel-head .meta { font-size:12px; color:#8b949e; font-family:ui-monospace, Menlo, monospace; }
-  .table-scroll { overflow-x:auto; max-height:560px; overflow-y:auto; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th {
-    position:sticky; top:0; z-index:2;
-    background:#161b22; color:#8b949e; font-weight:500; text-align:left;
-    padding:10px 14px; border-bottom:1px solid #263041; white-space:nowrap;
-  }
-  tbody td { padding:10px 14px; border-bottom:1px solid #21262d; vertical-align:top; }
-  tbody tr:hover { background:#1c2129; }
-  .num { font-family:ui-monospace, Menlo, Consolas, monospace; }
-  .tag {
-    display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px;
-    background:rgba(88,166,255,.12); color:#58a6ff; border:1px solid rgba(88,166,255,.35);
-    white-space:nowrap;
-  }
-  .bar-cell { min-width:140px; }
-  .bar-track { background:#21262d; border-radius:5px; height:8px; overflow:hidden; margin-top:4px; }
-  .bar-fill { height:100%; background:#58a6ff; border-radius:5px; }
-  .empty { padding:40px; text-align:center; color:#8b949e; font-size:13px; }
-  .note { margin-top:14px; font-size:12px; color:#8b949e; }
-  .snippet { max-width:340px; color:#8b949e; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>硬样本库 <span style="color:#8b949e;font-weight:400;font-size:14px;">Hardcase</span></h1>
-    <p>分歧超阈值的样本归档：样本进入条件、分歧指标与已挖掘条数总览。</p>
-  </header>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-  <div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+    <header class="lg-head">
+      <div class="row">
+        <h1>硬样本库</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">Hard Cases · 分歧超阈值的样本归档 / 三类待办 / 严重度榜</div>
+    </header>
 
-  <section class="stats" id="stats"></section>
+    <section class="stats" id="stats"></section>
 
-  <section class="panel">
-    <div class="panel-head">
-      <h2>硬样本明细</h2>
-      <span class="meta" id="meta"></span>
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>进入条件分布</h2><span class="hint">by_kind</span></div>
+        <div class="card-body"><div class="bars" id="barsKind"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>三类待办</h2><span class="hint">need_*</span></div>
+        <div class="card-body"><div class="bars" id="barsNeed"></div></div>
+      </section>
     </div>
-    <div class="table-scroll">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>样本 ID</th>
-            <th>进入条件</th>
-            <th>分歧度</th>
-            <th>样本摘要</th>
-            <th>入库时间</th>
-          </tr>
-        </thead>
-        <tbody id="tbody"></tbody>
-      </table>
-      <div class="empty" id="empty" style="display:none;">暂无数据</div>
-    </div>
-  </section>
 
-  <p class="note" id="note"></p>
+    <section class="card">
+      <div class="card-head">
+        <h2>严重度榜（降序）</h2>
+        <span class="hint" id="rowCount">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p class="note">
+      "进入条件"里多个标签用逗号并列（如 <span class="mono">human_lost_to_judges,unanimous_vs_user</span>）
+      表示同一批样本同时满足多条进入规则，不是数据重复。
+      待办三类的含义：需人工裁定 / 需本体补充 / 需策略修订。
+    </p>
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function () {
-  const $ = s => document.querySelector(s);
-  const fmt = n => (typeof n === 'number' && isFinite(n)) ? n.toLocaleString('zh-CN') : String(n ?? '—');
-  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+LG.init('hard-cases', function (d, el) {
+  var rows = d.top_by_severity || [];
 
-  function renderStats(stats) {
-    const box = $('#stats');
-    box.innerHTML = '';
-    if (!Array.isArray(stats) || !stats.length) {
-      box.innerHTML = '<div class="card"><div class="value">—</div><div class="label">暂无指标</div></div>';
-      return;
-    }
-    stats.forEach(s => {
-      const d = document.createElement('div');
-      d.className = 'card';
-      d.innerHTML = `<div class="value">${esc(fmt(s.value))}</div><div class="label">${esc(s.label)}</div>`;
-      box.appendChild(d);
-    });
-  }
+  LG.statCards(el.stats, [
+    { value: d.hard_cases,     label: '硬样本总数' },
+    { value: d.need_human,     label: '待人工裁定', tone: 'warn', hint: 'need_human' },
+    { value: d.need_ontology,  label: '待本体补充', hint: 'need_ontology' },
+    { value: d.need_strategy,  label: '待策略修订', hint: 'need_strategy' },
+    { value: rows.length,      label: '本页展示', hint: 'top_by_severity' }
+  ]);
 
-  function renderRows(rows) {
-    const tb = $('#tbody');
-    tb.innerHTML = '';
-    if (!Array.isArray(rows) || !rows.length) {
-      $('#empty').style.display = 'block';
-      return;
-    }
-    $('#empty').style.display = 'none';
-    const scores = rows.map(r => Number(r.divergence ?? r.score ?? 0)).filter(isFinite);
-    const max = Math.max(...scores, 1e-9);
-    rows.forEach((r, i) => {
-      const div = Number(r.divergence ?? r.score ?? 0);
-      const pct = isFinite(div) ? Math.min(100, (div / max) * 100) : 0;
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td class="num">${i + 1}</td>
-        <td class="num">${esc(r.id ?? r.sample_id ?? '—')}</td>
-        <td><span class="tag">${esc(r.condition ?? r.entry_condition ?? '—')}</span></td>
-        <td class="bar-cell">
-          <span class="num">${isFinite(div) ? div.toLocaleString('zh-CN', {maximumFractionDigits:4}) : '—'}</span>
-          <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
-        </td>
-        <td><div class="snippet" title="${esc(r.text ?? r.snippet ?? '')}">${esc(r.text ?? r.snippet ?? '—')}</div></td>
-        <td class="num">${esc(r.created_at ?? r.mined_at ?? '—')}</td>`;
-      tb.appendChild(tr);
-    });
-  }
+  LG.bars(LG.$('barsKind'), d.by_kind || {});
+  LG.bars(LG.$('barsNeed'), {
+    '待人工裁定': d.need_human, '待本体补充': d.need_ontology, '待策略修订': d.need_strategy
+  });
 
-  function render(data, isReal) {
-    renderStats(data.stats || []);
-    renderRows(data.rows || []);
-    $('#meta').textContent = data.generated_at ? ('生成时间 ' + data.generated_at) : '';
-    $('#note').textContent = data.note || '';
-    if (!isReal) $('#banner').style.display = 'block';
-  }
+  LG.table(el.tbody, rows, [
+    { key: 'severity', label: '严重度', num: true, render: function (r) {
+        var v = Number(r.severity);
+        return isFinite(v) ? v.toLocaleString('zh-CN', { maximumFractionDigits: 4 }) : '—';
+      } },
+    { key: 'kind',     label: '进入条件', render: function (r) {
+        return String(r.kind || '').split(',').map(function (t) {
+          return '<span class="tag">' + LG.esc(t.trim()) + '</span>';
+        }).join('');
+      } },
+    { key: 'why',      label: '说明/摘要', render: function (r) {
+        var s = r.why == null ? '—' : String(r.why);
+        return '<div title="' + LG.esc(s) + '">' + LG.esc(s.length > 90 ? s.slice(0, 90) + '…' : s) + '</div>';
+      } },
+    { key: 'need_human',     label: '需人工', num: true, render: function (r) { return r.need_human ? '是' : '否'; } },
+    { key: 'experiment_id',  label: '实验' },
+    { key: 'id',             label: 'ID', num: true }
+  ], { head: el.head });
 
-  fetch('/console/hardcase')
-    .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(d => render(d, true))
-    .catch(() => render({ stats: [], rows: [], note: '' }, false));
-})();
+  LG.$('rowCount').textContent = '共 ' + LG.fmtNum(rows.length) + ' 条（Top N）';
+});
 </script>
 </body>
 </html>

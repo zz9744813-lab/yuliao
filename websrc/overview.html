@@ -1,181 +1,88 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>总览总控台 · 中文文风研究台</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0e1116; color:#c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-    padding: 28px 24px 48px;
-  }
-  .wrap { max-width: 1200px; margin: 0 auto; }
-  header { margin-bottom: 22px; }
-  h1 { font-size: 22px; font-weight: 600; color:#e6edf3; }
-  .sub { font-size: 13px; color:#8b949e; margin-top: 6px; }
-  .banner {
-    display:none; background:#3a2e05; border:1px solid #9e6a03; color:#e3b341;
-    padding:10px 14px; border-radius:10px; font-size:13px; margin-bottom:18px;
-  }
-  .banner.show { display:block; }
-  .cards {
-    display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap:14px; margin-bottom: 22px;
-  }
-  .card {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    padding:16px 18px;
-  }
-  .card .val {
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size:26px; font-weight:600; color:#58a6ff; line-height:1.2;
-    word-break: break-all;
-  }
-  .card .lbl { font-size:12px; color:#8b949e; margin-top:8px; }
-  .panel {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    overflow:hidden;
-  }
-  .panel-head {
-    padding:14px 18px; border-bottom:1px solid #263041;
-    display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;
-  }
-  .panel-title { font-size:14px; font-weight:600; color:#e6edf3; }
-  .meta { font-size:12px; color:#8b949e; font-family: ui-monospace, Menlo, Consolas, monospace; }
-  .table-box { overflow:auto; max-height: 520px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th {
-    position:sticky; top:0; z-index:2; background:#161b22;
-    text-align:left; padding:10px 14px; color:#8b949e; font-weight:500;
-    border-bottom:1px solid #263041; white-space:nowrap;
-  }
-  tbody td { padding:10px 14px; border-bottom:1px solid #21262d; color:#c9d1d9; }
-  tbody tr:hover { background:#1c2129; }
-  td.num { font-family: ui-monospace, Menlo, Consolas, monospace; color:#58a6ff; }
-  .empty { padding:36px; text-align:center; color:#8b949e; font-size:13px; }
-  .badge {
-    display:inline-block; padding:2px 8px; border-radius:10px; font-size:12px;
-    background:#1f6feb22; color:#58a6ff; border:1px solid #1f6feb55;
-  }
-  .note { margin-top:14px; font-size:12px; color:#8b949e; }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
-<div class="wrap">
-  <header>
-    <h1>总览总控台</h1>
-    <div class="sub">中文文风研究台（Language Genome）· 全项目健康度：语料量 / 帧量 / 候选量 / 评委一致度 / 最近实验状态</div>
-  </header>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-  <div id="banner" class="banner">数据接口不可用，以下为示例结构</div>
+    <header class="lg-head">
+      <div class="row">
+        <h1>总览总控台</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">全项目健康度 · 语料 / 语义帧 / 候选 / 判定 / 基准，一屏总览</div>
+    </header>
 
-  <div id="cards" class="cards"></div>
+    <section class="stats" id="stats"></section>
 
-  <div class="panel">
-    <div class="panel-head">
-      <span class="panel-title">最近实验 / 运行记录</span>
-      <span class="meta" id="genAt">generated_at: —</span>
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>实验状态分布</h2><span class="hint">experiments.by_status</span></div>
+        <div class="card-body"><div class="bars" id="bars"></div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h2>基准最佳模型</h2><span class="hint">benchmark_runs 均值</span></div>
+        <div class="card-body" id="bestModel"></div>
+      </section>
     </div>
-    <div class="table-box">
-      <table>
-        <thead id="thead"><tr><th>暂无数据</th></tr></thead>
-        <tbody id="tbody"><tr><td class="empty">暂无数据</td></tr></tbody>
-      </table>
-    </div>
-  </div>
 
-  <div class="note" id="note"></div>
+    <p class="note">
+      本页读数直接来自只读聚合接口 <span class="mono">/console/dashboard</span>，不做二次计算。
+      指标口径与各模块页一致；写操作全部在盲评台（第一界面），研究台只读。
+    </p>
+
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function(){
-  var banner = document.getElementById('banner');
-  var cardsEl = document.getElementById('cards');
-  var thead = document.getElementById('thead');
-  var tbody = document.getElementById('tbody');
-  var genAt = document.getElementById('genAt');
-  var noteEl = document.getElementById('note');
+LG.init('dashboard', function (d, el) {
+  var exp = d.experiments || {};
+  var best = d.best_benchmark_model || null;
 
-  function fmtNum(n){
-    if (typeof n === 'number' && isFinite(n)) {
-      return n.toLocaleString('zh-CN');
-    }
-    return String(n);
-  }
-  function esc(s){
-    return String(s).replace(/[&<>"']/g, function(c){
-      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-    });
-  }
+  LG.statCards(el.stats, [
+    { value: d.human_anchors,   label: '人类锚点段', hint: 'segments (distinct)' },
+    { value: d.works,           label: '作品数' },
+    { value: d.semantic_frames, label: '语义帧',     hint: 'frames (distinct)' },
+    { value: d.candidates_ok,   label: '可用候选',   hint: 'status = ok' },
+    { value: d.human_judged,    label: '已判定题',   hint: 'review_items done' },
+    { value: d.preference_pairs,label: '偏好对',     hint: 'human vs candidate' },
+    { value: d.hard_cases,      label: '硬样本' },
+    { value: d.benchmark_items, label: '基准题目' },
+    { value: exp.total,         label: '实验总数',   hint: '运行中 ' + LG.fmtNum(d.active_experiments || 0) },
+    { value: d.llm_calls_total, label: 'LLM 调用',   hint: '累计' },
+    best ? { value: best.model, label: '基准最佳模型', hint: '均值准确率 ' + LG.fmtPct(best.avg_accuracy), tone: 'accent' }
+         : { value: '—',        label: '基准最佳模型', hint: '暂无跑分' }
+  ]);
 
-  function renderCards(stats){
-    if (!Array.isArray(stats) || stats.length === 0) {
-      cardsEl.innerHTML = '<div class="card"><div class="val">—</div><div class="lbl">暂无数据</div></div>';
-      return;
-    }
-    cardsEl.innerHTML = stats.map(function(s){
-      var v = (s && s.value !== undefined && s.value !== null) ? fmtNum(s.value) : '—';
-      var l = (s && s.label) ? esc(s.label) : '未命名指标';
-      return '<div class="card"><div class="val">'+v+'</div><div class="lbl">'+l+'</div></div>';
-    }).join('');
-  }
+  LG.bars(LG.$('bars'), exp.by_status || {});
 
-  function renderRows(rows){
-    if (!Array.isArray(rows) || rows.length === 0) {
-      thead.innerHTML = '<tr><th>暂无数据</th></tr>';
-      tbody.innerHTML = '<tr><td class="empty">暂无数据</td></tr>';
-      return;
-    }
-    // 收集所有行的键并集作为列
-    var cols = [];
-    rows.forEach(function(r){
-      if (r && typeof r === 'object') {
-        Object.keys(r).forEach(function(k){
-          if (cols.indexOf(k) === -1) cols.push(k);
-        });
-      }
-    });
-    if (cols.length === 0) {
-      thead.innerHTML = '<tr><th>暂无数据</th></tr>';
-      tbody.innerHTML = '<tr><td class="empty">暂无数据</td></tr>';
-      return;
-    }
-    thead.innerHTML = '<tr>' + cols.map(function(c){ return '<th>'+esc(c)+'</th>'; }).join('') + '</tr>';
-    tbody.innerHTML = rows.map(function(r){
-      return '<tr>' + cols.map(function(c){
-        var v = (r && r[c] !== undefined && r[c] !== null) ? r[c] : '—';
-        var isNum = typeof v === 'number';
-        var txt = isNum ? fmtNum(v) : esc(v);
-        var cls = isNum ? ' class="num"' : '';
-        // 状态类字段加徽章
-        if (!isNum && /状态|status/i.test(c)) {
-          return '<td><span class="badge">'+txt+'</span></td>';
-        }
-        return '<td'+cls+'>'+txt+'</td>';
-      }).join('') + '</tr>';
-    }).join('');
+  var box = LG.$('bestModel');
+  if (!best) {
+    box.innerHTML = '<div class="empty">暂无基准跑分记录</div>';
+  } else {
+    box.innerHTML =
+      '<div class="bar-row"><div class="k">模型</div>' +
+        '<div><span class="badge">' + LG.esc(best.model) + '</span></div><div class="v"></div></div>' +
+      '<div class="bar-row" style="margin-top:10px"><div class="k">均值准确率</div>' +
+        '<div class="track"><div class="fill" style="width:' +
+          Math.max(2, Math.round((best.avg_accuracy || 0) * 100)) + '%"></div></div>' +
+        '<div class="v">' + LG.fmtPct(best.avg_accuracy) + '</div></div>' +
+      '<p class="note">口径：benchmark_runs 按模型分组的 accuracy 均值（全量记录，非时间窗）。</p>';
   }
 
-  function render(data){
-    renderCards(data && data.stats);
-    renderRows(data && data.rows);
-    genAt.textContent = 'generated_at: ' + (data && data.generated_at ? data.generated_at : '—');
-    noteEl.textContent = (data && data.note) ? data.note : '';
-  }
-
-  fetch('/console/overview')
-    .then(function(res){
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      return res.json();
-    })
-    .then(function(data){ render(data); })
-    .catch(function(){
-      banner.classList.add('show');
-      render({ stats: [], rows: [], generated_at: null, note: '' });
-    });
-})();
+  el.genAt.textContent = d.generated_at ? LG.fmtTime(d.generated_at) : '';
+});
 </script>
 </body>
 </html>

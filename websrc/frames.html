@@ -1,213 +1,80 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>语义实验室 · Frame 抽取</title>
-<style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-  body {
-    background:#0e1116; color:#c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    padding: 24px; line-height:1.5;
-  }
-  header { margin-bottom: 20px; }
-  header h1 { font-size: 22px; font-weight:600; color:#e6edf3; }
-  header p { font-size: 13px; color:#8b949e; margin-top:4px; }
-  .banner {
-    display:none; background:#3d2e00; color:#e3b341; border:1px solid #9e6a03;
-    border-radius:10px; padding:10px 14px; font-size:13px; margin-bottom:16px;
-  }
-  .banner.show { display:block; }
-  .stats {
-    display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap:14px; margin-bottom:20px;
-  }
-  .stat-card {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    padding:16px 18px;
-  }
-  .stat-card .value {
-    font-size:26px; font-weight:700; color:#58a6ff;
-    font-variant-numeric: tabular-nums;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  }
-  .stat-card .label { font-size:12px; color:#8b949e; margin-top:6px; }
-  .panel {
-    background:#161b22; border:1px solid #263041; border-radius:10px;
-    overflow:hidden;
-  }
-  .panel-head {
-    padding:14px 18px; border-bottom:1px solid #263041;
-    display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;
-  }
-  .panel-head h2 { font-size:15px; font-weight:600; color:#e6edf3; }
-  .filters { display:flex; gap:8px; flex-wrap:wrap; }
-  .filters select, .filters input {
-    background:#0e1116; color:#c9d1d9; border:1px solid #263041;
-    border-radius:8px; padding:6px 10px; font-size:12px; outline:none;
-  }
-  .filters select:focus, .filters input:focus { border-color:#58a6ff; }
-  .table-wrap { overflow-x:auto; max-height:560px; overflow-y:auto; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  thead th {
-    position:sticky; top:0; z-index:2; background:#161b22;
-    text-align:left; padding:10px 14px; color:#8b949e; font-weight:600;
-    font-size:12px; border-bottom:1px solid #263041; white-space:nowrap;
-  }
-  tbody td {
-    padding:10px 14px; border-bottom:1px solid #1c2330;
-    vertical-align:top;
-  }
-  tbody tr:hover { background:#1a2230; }
-  .num { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
-  .badge {
-    display:inline-block; padding:2px 10px; border-radius:999px;
-    font-size:11px; font-weight:600; white-space:nowrap;
-  }
-  .badge.ok { background:#12361f; color:#3fb950; border:1px solid #238636; }
-  .badge.repaired { background:#3d2e00; color:#e3b341; border:1px solid #9e6a03; }
-  .badge.failed { background:#3d1418; color:#f85149; border:1px solid #da3633; }
-  .badge.unknown { background:#21262d; color:#8b949e; border:1px solid #30363d; }
-  .level { font-weight:600; }
-  .level.S { color:#f778ba; } .level.M { color:#58a6ff; } .level.L { color:#3fb950; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
-  .empty { padding:40px; text-align:center; color:#8b949e; font-size:13px; }
-  .compare { display:flex; gap:8px; flex-wrap:wrap; }
-  .cmp-item { font-size:11px; padding:2px 8px; border-radius:6px; background:#0e1116; border:1px solid #263041; }
-  .cmp-item.same { color:#3fb950; } .cmp-item.diff { color:#f85149; }
-  footer { margin-top:16px; font-size:12px; color:#8b949e; }
-  @media (max-width:640px){ body{padding:14px;} }
-</style>
+<title>语义实验室 · 中文文风研究台</title>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-<header>
-  <h1>语义实验室 · Frame 抽取</h1>
-  <p>S / M / L 三级帧浏览 · Schema 校验状态（ok / repaired / failed）· 双抽取器对照</p>
-</header>
+    <header class="lg-head">
+      <div class="row">
+        <h1>语义实验室</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">SemanticFrame 抽取 · 粒度 / 状态 / 抽取模型分布 · 泄漏分数分层</div>
+    </header>
 
-<div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+    <section class="stats" id="stats"></section>
 
-<div class="stats" id="stats"></div>
-
-<div class="panel">
-  <div class="panel-head">
-    <h2>帧列表</h2>
-    <div class="filters">
-      <select id="fLevel">
-        <option value="">全部层级</option>
-        <option value="S">S 级</option>
-        <option value="M">M 级</option>
-        <option value="L">L 级</option>
-      </select>
-      <select id="fStatus">
-        <option value="">全部状态</option>
-        <option value="ok">ok</option>
-        <option value="repaired">repaired</option>
-        <option value="failed">failed</option>
-      </select>
-      <input id="fSearch" type="text" placeholder="搜索帧名…">
+    <div class="grid-2">
+      <section class="card">
+        <div class="card-head"><h2>粒度分布</h2><span class="hint">by_granularity（L 主帧）</span></div>
+        <div class="card-body"><div class="bars" id="barsGran"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>抽取状态</h2><span class="hint">by_status</span></div>
+        <div class="card-body"><div class="bars" id="barsStatus"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>抽取模型</h2><span class="hint">by_extractor</span></div>
+        <div class="card-body"><div class="bars" id="barsExtractor"></div></div>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>泄漏分数超阈值层</h2><span class="hint">over_0.6_by_layer</span></div>
+        <div class="card-body"><div class="bars" id="barsLeakHi"></div></div>
+      </section>
     </div>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>层级</th><th>帧名称</th><th>Schema 校验</th>
-          <th>抽取器 A</th><th>抽取器 B</th><th>一致性</th>
-        </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-    <div class="empty" id="empty" style="display:none;">暂无数据</div>
-  </div>
+
+    <section class="card">
+      <div class="card-head"><h2>泄漏层全量</h2><span class="hint">leakage_scores.by_layer</span></div>
+      <div class="card-body"><div class="bars" id="barsLeak"></div></div>
+    </section>
+
+    <p class="note" id="note"></p>
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
-<footer id="foot"></footer>
-
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function(){
-  const fmt = n => (typeof n === 'number') ? n.toLocaleString('zh-CN') : String(n ?? '—');
-  const tbody = document.getElementById('tbody');
-  const emptyEl = document.getElementById('empty');
-  let rows = [];
+LG.init('semantic-lab', function (d, el) {
+  var lk = d.leakage_scores || {};
 
-  function statusBadge(s){
-    const v = String(s||'').toLowerCase();
-    const cls = ['ok','repaired','failed'].includes(v) ? v : 'unknown';
-    return '<span class="badge '+cls+'">'+(v||'未知')+'</span>';
-  }
+  LG.statCards(el.stats, [
+    { value: d.frames,             label: '语义帧', hint: 'frames (distinct)' },
+    { value: d.segments_covered,   label: '覆盖段落', hint: 'segments_covered' },
+    { value: d.propositions,       label: '命题数' },
+    { value: lk.total,             label: '泄漏样本', hint: 'leakage_scores.total' },
+    { value: Object.keys(d.by_granularity || {}).length, label: '粒度档位' }
+  ]);
 
-  function renderStats(stats){
-    const box = document.getElementById('stats');
-    box.innerHTML = '';
-    (Array.isArray(stats)?stats:[]).forEach(s=>{
-      const d = document.createElement('div');
-      d.className = 'stat-card';
-      d.innerHTML = '<div class="value">'+fmt(s.value)+'</div><div class="label">'+(s.label||'')+'</div>';
-      box.appendChild(d);
-    });
-    if(!box.children.length){
-      box.innerHTML = '<div class="stat-card"><div class="value">—</div><div class="label">等待接口数据</div></div>';
-    }
-  }
+  LG.bars(LG.$('barsGran'), d.by_granularity || {});
+  LG.bars(LG.$('barsStatus'), d.by_status || {});
+  LG.bars(LG.$('barsExtractor'), d.by_extractor || {});
+  LG.bars(LG.$('barsLeak'), lk.by_layer || {});
+  LG.bars(LG.$('barsLeakHi'), lk['over_0.6_by_layer'] || {});
 
-  function renderTable(){
-    const lv = document.getElementById('fLevel').value;
-    const st = document.getElementById('fStatus').value;
-    const q = document.getElementById('fSearch').value.trim().toLowerCase();
-    const list = rows.filter(r=>{
-      if(lv && String(r.level||'').toUpperCase()!==lv) return false;
-      if(st && String(r.schema_status||r.status||'').toLowerCase()!==st) return false;
-      if(q && !String(r.name||r.frame||'').toLowerCase().includes(q)) return false;
-      return true;
-    });
-    tbody.innerHTML = '';
-    list.forEach(r=>{
-      const name = r.name || r.frame || '—';
-      const level = String(r.level||'—').toUpperCase();
-      const a = r.extractor_a ?? r.extractorA ?? '—';
-      const b = r.extractor_b ?? r.extractorB ?? '—';
-      const same = (a!=='—' && b!=='—') ? (String(a)===String(b)) : null;
-      const cmp = same===null ? '<span class="cmp-item">—</span>'
-        : '<span class="cmp-item '+(same?'same':'diff')+'">'+(same?'一致':'不一致')+'</span>';
-      const tr = document.createElement('tr');
-      tr.innerHTML =
-        '<td><span class="level '+level+'">'+level+'</span></td>'+
-        '<td class="mono">'+name+'</td>'+
-        '<td>'+statusBadge(r.schema_status ?? r.status)+'</td>'+
-        '<td class="mono">'+a+'</td>'+
-        '<td class="mono">'+b+'</td>'+
-        '<td><div class="compare">'+cmp+'</div></td>';
-      tbody.appendChild(tr);
-    });
-    emptyEl.style.display = list.length ? 'none' : 'block';
-  }
-
-  ['fLevel','fStatus','fSearch'].forEach(id=>{
-    document.getElementById(id).addEventListener('input', renderTable);
-  });
-
-  renderStats([]);
-  renderTable();
-
-  fetch('/console/frames')
-    .then(r => { if(!r.ok) throw new Error(r.status); return r.json(); })
-    .then(data => {
-      renderStats(data.stats);
-      rows = Array.isArray(data.rows) ? data.rows : [];
-      renderTable();
-      document.getElementById('foot').textContent =
-        '数据生成时间：' + (data.generated_at || '—');
-    })
-    .catch(() => {
-      document.getElementById('banner').classList.add('show');
-      renderStats([]);
-      rows = [];
-      renderTable();
-    });
-})();
+  LG.$('note').textContent =
+    '泄漏分数 = 帧被盲眼模型重建回原句的程度；阈值 0.6 以上的层需重点看。' +
+    '粒度 L 为主帧（本文档口径），M/S 为下位分解。';
+});
 </script>
 </body>
 </html>

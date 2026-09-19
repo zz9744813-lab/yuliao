@@ -1,0 +1,206 @@
+/* Language Genome · 研究台组件层（2026-09-19）
+   ─────────────────────────────────────────────────────────────
+   只引用 tokens.css 的语义层令牌，不写死颜色值。
+   组件：侧栏导航 / 页头 / 指标卡 / 面板 / 表格 / 徽章 / 分布条 / 空态 / 提示条 / 骨架屏
+
+   ⚠ 动画铁律（2026-09-18 事故教训，见 docs/HANDOVER.md §0.8）：
+     入场动画永不碰 opacity —— 后台标签页或绘制节流会让 Web Animation 停在
+     from 帧上，若 from{opacity:0} 内容就整体隐形。只动 transform，坏掉也只是位置偏几像素。
+*/
+
+*,*::before,*::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0; background:var(--bg); color:var(--fg);
+  font-family:var(--sans); font-size:13.5px; line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:var(--accent); text-decoration:none}
+a:hover{text-decoration:underline}
+h1,h2,h3{margin:0; font-weight:600; line-height:1.35}
+.num{font-family:var(--mono); font-variant-numeric:tabular-nums}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--scroll); border-radius:6px; border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:var(--scroll-hover)}
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px; border-radius:var(--radius-sm)}
+
+/* ── 布局骨架：左侧栏 + 主区 ──────────────────────────────── */
+.lg-shell{display:flex; min-height:100vh}
+
+.lg-nav{
+  width:var(--nav-w); flex:none; background:var(--surface);
+  border-right:1px solid var(--line); padding:16px 0 12px;
+  display:flex; flex-direction:column; position:sticky; top:0; height:100vh; overflow-y:auto;
+}
+.lg-brand{padding:0 16px 14px; border-bottom:1px solid var(--line); margin-bottom:10px}
+.lg-brand .mark{
+  display:inline-block; width:9px; height:9px; background:var(--accent);
+  border-radius:2px; margin-right:7px; vertical-align:1px;
+}
+.lg-brand .t{font-size:13.5px; font-weight:600; letter-spacing:.2px}
+.lg-brand .s{font-size:11px; color:var(--dim); margin-top:3px; font-family:var(--mono)}
+
+.lg-nav-list{flex:1; padding:0 8px; display:flex; flex-direction:column; gap:1px}
+.lg-nav-item{
+  display:flex; align-items:baseline; gap:6px; padding:6px 8px; border-radius:var(--radius-sm);
+  color:var(--fg-2); font-size:12.5px; border-left:2px solid transparent;
+  transition:background .15s, color .15s;
+}
+.lg-nav-item:hover{background:var(--surface-2); color:var(--fg); text-decoration:none}
+.lg-nav-item .zh{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.lg-nav-item .en{font-size:10.5px; color:var(--dim); font-family:var(--mono); flex:none}
+.lg-nav-item.on{
+  background:var(--accent-soft); color:var(--accent);
+  border-left-color:var(--accent); font-weight:600;
+}
+.lg-nav-item.on .en{color:var(--accent)}
+.lg-nav-sep{height:1px; background:var(--line); margin:8px 8px}
+
+.lg-nav-foot{padding:10px 16px 0; border-top:1px solid var(--line); margin-top:10px; display:flex; gap:8px; align-items:center}
+.lg-nav-foot .tg{
+  flex:1; background:transparent; border:1px solid var(--line); color:var(--fg-2);
+  border-radius:var(--radius-sm); padding:5px 8px; font-size:11.5px; font-family:inherit; cursor:pointer;
+}
+.lg-nav-foot .tg:hover{border-color:var(--line-2); color:var(--fg)}
+.lg-back{
+  display:block; text-align:center; font-size:11.5px; color:var(--dim);
+  padding:7px 8px; border:1px solid var(--line); border-radius:var(--radius-sm);
+}
+.lg-back:hover{color:var(--accent); border-color:var(--accent); text-decoration:none}
+
+/* ── 主区 ────────────────────────────────────────────────── */
+.lg-main{flex:1; min-width:0; padding:22px 26px 56px; max-width:var(--page-max); margin:0 auto; width:100%}
+
+.lg-head{margin-bottom:18px}
+.lg-head h1{font-size:19px; letter-spacing:.2px}
+.lg-head .sub{font-size:12.5px; color:var(--dim); margin-top:5px}
+.lg-head .row{display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap}
+.lg-head .meta{font-size:11.5px; color:var(--dim); font-family:var(--mono)}
+
+/* ── 指标卡 ──────────────────────────────────────────────── */
+.stats{display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr)); gap:12px; margin-bottom:18px}
+.stat-card{
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+  padding:13px 15px; box-shadow:var(--shadow-sm);
+}
+.stat-card .value{
+  font-family:var(--mono); font-variant-numeric:tabular-nums;
+  font-size:23px; font-weight:600; line-height:1.2; color:var(--fg); word-break:break-all;
+}
+/* 文本型读数（模型名、版本号、状态串）：别用 23px 等宽硬断——模型名会被切成
+   三行碎片（如 agy/gemini-3.8-flash-hi | gh）。降到正文级字号、按词换行。 */
+.stat-card .value.text{
+  font-family:var(--sans); font-size:14.5px; line-height:1.45;
+  word-break:break-word; overflow-wrap:anywhere; font-weight:600;
+}
+.stat-card .value.accent{color:var(--accent)}
+.stat-card .value.ok{color:var(--ok)}
+.stat-card .value.bad{color:var(--bad)}
+.stat-card .label{font-size:11.5px; color:var(--dim); margin-top:7px}
+.stat-card .hint{font-size:11px; color:var(--dim); margin-top:3px; font-family:var(--mono)}
+
+/* ── 面板 / 卡片 ─────────────────────────────────────────── */
+.card{
+  background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+  box-shadow:var(--shadow-sm); margin-bottom:16px; overflow:hidden;
+}
+.card-head{
+  padding:12px 16px; border-bottom:1px solid var(--line);
+  display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap;
+}
+.card-head h2{font-size:13.5px}
+.card-head .hint{font-size:11.5px; color:var(--dim); font-family:var(--mono)}
+.card-body{padding:14px 16px}
+.grid-2{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px}
+
+/* ── 表格 ────────────────────────────────────────────────── */
+.table-wrap{overflow:auto; max-height:560px}
+table{width:100%; border-collapse:collapse; font-size:12.5px}
+thead th{
+  position:sticky; top:0; z-index:2; background:var(--surface); text-align:left;
+  padding:9px 14px; color:var(--dim); font-weight:500; white-space:nowrap;
+  border-bottom:1px solid var(--line); font-size:11.5px;
+}
+tbody td{padding:9px 14px; border-bottom:1px solid var(--line); color:var(--fg-2); vertical-align:top}
+tbody tr:hover{background:var(--row-hover)}
+tbody tr:last-child td{border-bottom:0}
+td.num,th.num{font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--fg)}
+.th-sort{cursor:pointer; user-select:none}
+.th-sort:hover{color:var(--accent)}
+.mono{font-family:var(--mono)}
+
+/* ── 徽章 / 标签 ─────────────────────────────────────────── */
+.badge{
+  display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px;
+  background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent-soft);
+  white-space:nowrap;
+}
+.badge.ok{background:var(--ok-soft); color:var(--ok); border-color:var(--ok-line)}
+.badge.bad{background:var(--bad-soft); color:var(--bad); border-color:var(--bad-line)}
+.badge.warn{background:var(--warn-soft); color:var(--warn); border-color:var(--warn-line)}
+.badge.info{background:var(--info-soft); color:var(--info); border-color:var(--info-line)}
+.tag{
+  display:inline-block; padding:1px 7px; margin:0 4px 3px 0; border-radius:10px;
+  font-size:11px; background:var(--surface-2); color:var(--fg-2); border:1px solid var(--line);
+}
+
+/* ── 分布条（by_* 计数可视化） ───────────────────────────── */
+.bars{display:flex; flex-direction:column; gap:8px}
+.bar-row{display:grid; grid-template-columns:minmax(80px,160px) 1fr auto; gap:10px; align-items:center}
+.bar-row .k{font-size:12px; color:var(--fg-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.bar-row .track{background:var(--surface-2); border-radius:5px; height:9px; overflow:hidden; min-width:40px}
+.bar-row .fill{height:100%; background:var(--accent); border-radius:5px; transition:width .3s}
+.bar-row .v{font-family:var(--mono); font-size:11.5px; color:var(--fg); min-width:44px; text-align:right}
+
+/* ── 空态 / 提示条 ───────────────────────────────────────── */
+.empty{padding:30px 16px; text-align:center; color:var(--dim); font-size:12.5px}
+.banner{
+  display:none; background:var(--warn-soft); border:1px solid var(--warn-line); color:var(--warn);
+  padding:9px 14px; border-radius:var(--radius); font-size:12.5px; margin-bottom:16px;
+}
+.banner.show{display:block}
+.banner.err{background:var(--bad-soft); border-color:var(--bad-line); color:var(--bad)}
+.note{font-size:11.5px; color:var(--dim); margin-top:10px; line-height:1.6}
+
+/* ── 骨架屏（加载占位）── ⚠ 不碰 opacity，只动 background-position ── */
+.skel{border-radius:var(--radius); background:var(--skel-1); background-image:linear-gradient(90deg,var(--skel-1) 0%,var(--skel-2) 50%,var(--skel-1) 100%); background-size:200% 100%; animation:lg-shimmer 1.1s linear infinite}
+.skel-line{height:13px; margin-bottom:9px}
+.skel-card{height:66px; margin-bottom:10px}
+@keyframes lg-shimmer{from{background-position:180% 0} to{background-position:-20% 0}}
+@media (prefers-reduced-motion: reduce){ .skel{animation:none} .bar-row .fill{transition:none} }
+@media (prefers-reduced-motion: no-preference){
+  .fade-up{animation:lg-rise .26s ease-out}
+  @keyframes lg-rise{from{transform:translateY(6px)} to{transform:none}}
+}
+
+footer.lg-foot{
+  margin-top:22px; padding-top:12px; border-top:1px solid var(--line);
+  font-size:11.5px; color:var(--dim); font-family:var(--mono);
+}
+
+/* ── 窄屏（≤860px）：侧栏收成横向滚动条 ─────────────────── */
+@media (max-width:860px){
+  .lg-shell{display:block}
+  .lg-nav{
+    width:auto; height:auto; position:sticky; top:0; z-index:20;
+    padding:10px 10px 8px; border-right:0; border-bottom:1px solid var(--line);
+  }
+  .lg-brand{padding:0 4px 9px; margin-bottom:8px; display:flex; align-items:baseline; gap:8px}
+  .lg-brand .s{display:none}
+  .lg-nav-list{flex-direction:row; overflow-x:auto; gap:6px; padding:0 0 4px}
+  .lg-nav-item{
+    border-left:0; border-bottom:2px solid transparent; white-space:nowrap;
+    padding:5px 9px; background:var(--surface-2);
+  }
+  .lg-nav-item.on{border-left:0; border-bottom-color:var(--accent)}
+  .lg-nav-item .en{display:none}
+  .lg-nav-sep{display:none}
+  .lg-nav-foot{border-top:0; margin-top:8px; padding:0 4px}
+  .lg-main{padding:16px 14px 44px}
+  .lg-head h1{font-size:17px}
+  .stats{grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:9px}
+  .stat-card .value{font-size:20px}
+  .table-wrap{max-height:none}
+  .bar-row{grid-template-columns:minmax(70px,110px) 1fr auto}
+}

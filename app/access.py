@@ -15,6 +15,8 @@
   故：只有在 host 是本机 **且没有** `CF-Connecting-IP` / `X-Forwarded-For` 时才免鉴权。
 - **`?t=<token>` 一次性换 cookie 并跳回干净 URL** → 手机上点一下链接就长期免输；
   也避免令牌留在地址栏/历史/分享里。
+  ⚠ 2026-09-19 修正：此前表单硬编码跳回 `/?t=`，从研究台 `/lab/*` 被拦时会跳到盲评台首页。
+  现改为**换完跳回原路径**，并保留原查询参数（如 `?batch=` 这类批改队列参数）。
 - 比较用 `hmac.compare_digest`，避免时序侧信道。
 """
 from __future__ import annotations
@@ -91,7 +93,8 @@ _GATE_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
              display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0">
 <form style="background:#fff;border:1px solid #e6e3dd;border-radius:12px;padding:26px 28px;
              box-shadow:0 2px 12px rgba(0,0,0,.05);width:300px" method="get"
-      onsubmit="location.replace('/?t='+encodeURIComponent(document.getElementById('t').value));return false">
+      onsubmit="var u=new URL(location.href);u.searchParams.set('t',document.getElementById('t').value);
+                location.replace(u.pathname+u.search+u.hash);return false">
   <div style="font-size:15px;font-weight:600;margin-bottom:4px">需要访问令牌</div>
   <div style="font-size:12.5px;color:#8d887d;margin-bottom:14px">本页面含私密内容，粘贴令牌后进入</div>
   <input id="t" autocomplete="off" autofocus  style="width:100%;box-sizing:border-box;padding:9px 11px;

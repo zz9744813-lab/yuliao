@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -36,6 +36,9 @@ from .models import Candidate, Experiment, Job, ReviewItem, Segment, Work, LlmCa
 app = FastAPI(title="Language Genome — SemanticFrame Calibration Lab", version="0.2.0")
 
 _STATIC = Path(__file__).resolve().parent / "static"
+# 研究台（第二界面正式版，websrc/）：16 模块只读页。与 _STATIC 分离是为了让
+# 前端源码留在仓库根、不混进应用包；挂载点见下方 /lab 路由。
+_WEBSRC = Path(__file__).resolve().parent.parent / "websrc"
 
 # 远程访问门：本机直连免鉴权；经隧道/代理的请求需令牌（见 app/access.py）。
 # 未配置令牌时不做任何事，本机使用行为完全不变。
@@ -54,6 +57,12 @@ def index():
 
 
 app.mount("/static", StaticFiles(directory=_STATIC), name="static")
+
+# 研究台共享件（tokens.css / base.css / lg.js）。
+# 用 StaticFiles 而非 FileResponse：靠 Last-Modified/ETag 自动失效，改完即生效，
+# 不需要像 HTML 页那样打 no-store。目录缺失时不挂载，避免静默启动失败。
+if (_WEBSRC / "_shared").is_dir():
+    app.mount("/lab/_shared", StaticFiles(directory=_WEBSRC / "_shared"), name="lab-shared")
 
 
 # ── 语料 ────────────────────────────────────────────────────
@@ -662,9 +671,14 @@ def console_index():
 
 @app.get("/console/ui", include_in_schema=False)
 def console_ui():
-    """第二界面评审台（T3）：16 模块只读外壳。写操作一律回第一界面。"""
-    return FileResponse(_STATIC / "console.html",
-                        headers={"Cache-Control": "no-store"})
+    """第二界面旧外壳（T3，2026-09-19 起降级）：302 跳研究台正式版。
+
+    2026-09-19：websrc 16 页接通后，本页不再是入口。**文件保留不删**
+    （app/static/console.html 与 tests/test_console_page.py 的静态契约仍在跑），
+    只是访问它会被送到 /lab/overview.html，避免两个第二界面并存让人走错。
+    集霸决策 ②A，见 docs/frontend-plan-2026-09-19.md。
+    """
+    return RedirectResponse(url="/lab/overview.html", status_code=302)
 
 
 @app.get("/console/{module}")
@@ -674,3 +688,38 @@ def console_module(module: str):
         return console.module_data(module)
     except KeyError:
         raise HTTPException(404, f"未知控制台模块：{module}；可用：{console.MODULE_ORDER}")
+
+
+# ── 研究工作台（websrc 16 页，2026-09-19 接通）──────────────
+# 第二界面的正式版：每模块一页、左侧栏导航、GET-only 只读台账。
+# 与 /console/ui（旧外壳）的关系：旧外壳保留代码但前端已不再指向它，见 docs/frontend-plan-2026-09-19.md。
+# 访问门（app/access.py）是全局 http middleware，/lab/* 自动继承令牌闸，无需在此重复鉴权。
+
+_LAB_PAGES = {
+    "overview.html", "corpus.html", "frames.html", "arena.html", "residual.html",
+    "strategy.html", "judges.html", "preference.html", "hardcase.html", "benchmark.html",
+    "experiments.html", "models.html", "training.html", "workflow.html",
+    "observability.html", "settings.html",
+}
+
+
+@app.get("/lab", include_in_schema=False)
+def lab_root():
+    """研究台首页（总览总控台）。"""
+    return RedirectResponse(url="/lab/overview.html", status_code=302)
+
+
+@app.get("/lab/{page}", include_in_schema=False)
+def lab_page(page: str):
+    """研究台单页。
+
+    白名单式取文件：只认 websrc/ 下的 16 个页面名，挡掉目录穿越
+    （`..%2f`、绝对路径、非常规扩展名一律 404）。HTML 走 no-store，
+    与本项目其它页面同一约定——改完必须立刻可见，不被浏览器钉在旧版。
+    """
+    if page not in _LAB_PAGES:
+        raise HTTPException(404, f"未知研究台页面：{page}")
+    target = (_WEBSRC / page).resolve()
+    if target.parent != _WEBSRC.resolve() or not target.is_file():
+        raise HTTPException(404, f"研究台页面缺失：{page}")
+    return FileResponse(target, headers={"Cache-Control": "no-store"})

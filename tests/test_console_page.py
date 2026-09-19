@@ -3,12 +3,14 @@
 沿 test_frontend_invariants.py 的思路：前端没有构建/类型检查，"功能被顺手删掉"
 没有任何机制能发现，用静态断言钉住本页的硬契约：
 
-1. 路由 /console/ui 可达 + no-store（控制台是仪器读数，禁缓存）；
-2. 导航**不硬编码**模块清单 —— 必须从 GET /console 索引动态渲染
+0. **2026-09-19 起 `/console/ui` 降级为 302 跳研究台**（websrc 16 页成为第二界面正式版，
+   集霸决策 ②A）。**降级 ≠ 删除**：console.html 仍在磁盘上，本文件其余 4 项静态契约
+   继续钉住它，防止"顺手删掉"。
+1. 导航**不硬编码**模块清单 —— 必须从 GET /console 索引动态渲染
    （后端加模块自动出现；把 16 个 slug 写死进 HTML 反而会红）；
-3. 只读：页面对后端只发 GET —— 出现任何 POST/DELETE/PUT 字样即红；
-4. 一切插值过 esc()（库内字符串是数据不是 HTML）；
-5. 取数失败显形（纪律④：静默失败比崩溃更糟）。
+2. 只读：页面对后端只发 GET —— 出现任何 POST/DELETE/PUT 字样即红；
+3. 一切插值过 esc()（库内字符串是数据不是 HTML）；
+4. 取数失败显形（纪律④：静默失败比崩溃更糟）。
 """
 from __future__ import annotations
 
@@ -29,13 +31,19 @@ client = TestClient(app)
 PAGE = ROOT / "app" / "static" / "console.html"
 
 
-def test_console_ui_route_serves_page_no_store():
-    r = client.get("/console/ui")
+def test_console_ui_route_redirects_to_lab():
+    """旧外壳入口降级：302 → 研究台正式版；文件保留（降级不是删除）。"""
+    r = client.get("/console/ui", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers["location"] == "/lab/overview.html"
+    assert PAGE.exists(), "旧外壳文件被删了——降级只换入口，不删页"
+
+
+def test_console_ui_legacy_page_still_served_by_lab_route():
+    """保留页仍可被直接取到（/lab 路由只服务 websrc；这条确认旧页没被人为破坏）。"""
+    r = client.get("/static/console.html")
     assert r.status_code == 200
-    assert r.headers["cache-control"] == "no-store"
     assert "第二界面评审台" in r.text
-    # 与 index.html 同级同权：都必须是磁盘上的真实文件（不许内联改名漂移）
-    assert PAGE.exists()
 
 
 def test_nav_is_api_driven_not_hardcoded():

@@ -1,0 +1,82 @@
+/* Language Genome · 研究台共享令牌（2026-09-19）
+   ─────────────────────────────────────────────────────────────
+   来源：盲评台 app/static/index.html 的 Round 5「冷纸 / 石墨」体系。
+   结构刻意沿用同一套两层令牌：原语层（--n-* / --acc-*）→ 语义层（--bg/--surface/--fg/...），
+   组件只引用语义层，换肤只重映射语义层。
+
+   集霸 2026-09-19 决策 ①A：研究台与盲评台**共用同一套色值**，
+   弃用 websrc 原先的 GitHub Dark 蓝（#0e1116 / #58a6ff）——
+   两张脸同框时不打架，金棕是唯一的彩色。
+
+   原语层 / 语义层之外，diff/批注/判定专用的令牌（--del-* --ins-* --k0..k6 --kbd-* --toast-*）
+   留在盲评台、不搬过来：研究台是只读台账，没有正文对照与批注。
+*/
+
+:root{
+  /* ── 原语层：中性色阶去彩化（冷灰）+ 棕金强调 ── */
+  --n-0:#ffffff; --n-50:#fafaf8; --n-100:#f3f2ef; --n-200:#ebeae6;
+  --n-300:#e0dfdb; --n-400:#d2d1cb; --n-500:#aeada6; --n-600:#7c7b74;
+  --n-700:#555450; --n-800:#35342f; --n-900:#201f1c; --n-950:#141310;
+  --acc-100:#f0e8da; --acc-300:#c9b28a; --acc-500:#8a6d3b; --acc-600:#755c30; --acc-700:#5e4926;
+
+  /* ── 语义层 ── */
+  --bg:var(--n-100); --surface:var(--n-0); --surface-2:var(--n-50);
+  --line:var(--n-300); --line-2:var(--n-400);
+  --fg:var(--n-900); --fg-2:var(--n-700); --dim:var(--n-600);
+  --accent:var(--acc-500); --accent-soft:var(--acc-100); --accent-strong:var(--acc-600);
+
+  /* 状态色：与盲评台同源，语义化命名（涨/正常=绿，异常=红，提示=蓝） */
+  --ok:#2f6f4f; --bad:#a8412f; --warn:#8a6d3b; --info:#3a6ea5;
+  --ok-soft:#eef5f0; --bad-soft:#fdf0ec; --warn-soft:#fdf6e8; --info-soft:#eef2f8;
+  --ok-line:#cfe3d6; --bad-line:#eccfc8; --warn-line:#ecd9ab; --info-line:#cfdff0;
+
+  /* 浮层与深度：三级（卡片 / 浮层 / 侧栏） */
+  --shadow-sm:0 1px 2px rgba(38,36,31,.05), 0 3px 10px rgba(38,36,31,.045);
+  --shadow-md:0 2px 6px rgba(38,36,31,.06), 0 14px 32px rgba(38,36,31,.09);
+
+  /* 表格斑马纹与悬停 */
+  --row-hover:var(--n-50);
+
+  /* 滚动条 */
+  --scroll:var(--n-400); --scroll-hover:var(--n-500);
+
+  /* 骨架屏（加载占位） */
+  --skel-1:#eceae3; --skel-2:#f7f5f0;
+
+  /* 字体：与盲评台一致（正文无衬线、标题可用衬线增强印刷感） */
+  --sans:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
+  --serif:"Source Han Serif SC","Noto Serif SC","Songti SC","STSong","SimSun",Georgia,serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,"Cascadia Mono",monospace;
+
+  --radius:9px;
+  --radius-sm:6px;
+  --radius-lg:12px;
+
+  /* 布局尺度 */
+  --nav-w:212px;
+  --page-max:1240px;
+}
+
+html[data-theme="dark"]{
+  /* 石墨：近黑底 + 纯灰结构 + 金色单点（同盲评台 Round 5） */
+  --n-0:#161619; --n-50:#1b1b1f; --n-100:#101013; --n-200:#232327;
+  --n-300:#2b2b30; --n-400:#3a3a40; --n-500:#56565f; --n-600:#8b8b94;
+  --n-700:#a9a9b0; --n-800:#cfcdd2; --n-900:#ecebe8; --n-950:#f7f6f3;
+  --acc-100:#2e2616; --acc-300:#c9b28a; --acc-500:#c9a86a; --acc-600:#d8bc85; --acc-700:#e3cd9c;
+
+  --bg:#0c0c0e; --surface:#151517; --surface-2:#1b1b1f;
+  --line:#26262b; --line-2:#35363c;
+  --fg:#ecebe7; --fg-2:#a8a7a0; --dim:#84837d;
+
+  --ok:#7fb094; --bad:#e08d78; --warn:#d9bd76; --info:#8fb8d9;
+  --ok-soft:rgba(127,191,154,.12); --bad-soft:rgba(224,141,120,.12);
+  --warn-soft:rgba(217,189,118,.12); --info-soft:rgba(143,184,217,.12);
+  --ok-line:#2c4a3a; --bad-line:#5a3c30; --warn-line:#4a3d20; --info-line:#2c4258;
+
+  --shadow-sm:0 1px 2px rgba(0,0,0,.30), 0 3px 10px rgba(0,0,0,.28);
+  --shadow-md:0 2px 6px rgba(0,0,0,.35), 0 14px 32px rgba(0,0,0,.42);
+
+  --row-hover:#1e1e22;
+  --scroll:#33333a; --scroll-hover:#4a4a53;
+  --skel-1:#26262c; --skel-2:#32323a;
+}

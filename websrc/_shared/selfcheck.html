@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>研究台自检 · 16 页运行时体检</title>
+<style>
+ body{margin:0;padding:18px 20px;background:#101013;color:#ecebe8;
+      font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.65}
+ h1{font-size:15px;font-weight:600;margin:0 0 4px}
+ .sub{color:#84837d;margin-bottom:14px;font-size:12px}
+ #out{white-space:pre;background:#151517;border:1px solid #26262b;border-radius:9px;padding:14px 16px}
+ .ok{color:#7fb094}.bad{color:#e08d78}.warn{color:#d9bd76}
+ iframe{position:absolute;width:1180px;height:900px;left:-9999px;top:0;border:0}
+</style>
+</head>
+<body>
+<h1>研究台自检 · 16 页运行时体检</h1>
+<div class="sub">在 iframe 里真实加载每一页，读回渲染结果：导航项数 / 指标卡数 / 表格行数 / 错误横幅。本页也在数据接口自检范围内，改动共享层或页面后开一次即可。</div>
+<pre id="out">运行中…（每页 fetch 真实接口，约需数秒）</pre>
+<div id="host"></div>
+<script>
+var PAGES = ['overview','corpus','frames','arena','residual','strategy','judges','preference',
+             'hardcase','benchmark','experiments','models','training','workflow','observability','settings'];
+var EXPECT_SLUG = {
+  overview:'dashboard', corpus:'corpus', frames:'semantic-lab', arena:'reconstruction-arena',
+  residual:'expression-residual', strategy:'strategy-atlas', judges:'judge-arena',
+  preference:'preference-lab', hardcase:'hard-cases', benchmark:'benchmarks',
+  experiments:'experiments', models:'models', training:'training-data', workflow:'workflow',
+  observability:'observability', settings:'settings'
+};
+
+var host = document.getElementById('host');
+
+function probe(page){
+  return new Promise(function(resolve){
+    var f = document.createElement('iframe');
+    f.src = '/lab/' + page + '.html';
+    var done = false;
+    function finish(r){ if(!done){ done = true; resolve(r); } }
+    f.onload = function(){
+      setTimeout(function(){
+        var r = { page: page, ok: false };
+        try{
+          var d = f.contentDocument;
+          r.title = (d.title || '').split(' · ')[0];
+          r.declared = d.documentElement.getAttribute('data-page') || '';
+          r.nav = d.querySelectorAll('.lg-nav-item').length;
+          r.navOn = d.querySelectorAll('.lg-nav-item.on').length;
+          r.cards = d.querySelectorAll('.stat-card').length;
+          r.rows = d.querySelectorAll('tbody tr').length;
+          r.bars = d.querySelectorAll('.bar-row').length;
+          var b = d.getElementById('banner');
+          r.errBanner = b && b.className.indexOf('err') >= 0 ? b.textContent.trim() : '';
+          r.warnBanner = b && b.className.indexOf('show') >= 0 && !r.errBanner ? b.textContent.trim() : '';
+          var emptyCells = d.querySelectorAll('tbody td.empty').length;
+          r.emptyTables = emptyCells;
+          r.ok = !r.errBanner && r.nav === 16 && r.declared === EXPECT_SLUG[page];
+        }catch(e){
+          r.error = String(e);
+        }
+        finish(r);
+      }, 2600);   // 等 fetch 落定：corpus 这类聚合查询偶有 >1.6s，等短了会把"还没跑完"误报成空页
+    };
+    f.onerror = function(){ finish({ page: page, ok:false, error:'iframe 加载失败' }); };
+    host.appendChild(f);
+  });
+}
+
+Promise.all(PAGES.map(probe)).then(function(rs){
+  var bad = 0, lines = [];
+  rs.forEach(function(r){
+    if(!r.ok) bad++;
+    var flag = r.ok ? '<span class="ok">OK </span>' : '<span class="bad">BAD</span>';
+    var detail = 'nav=' + (r.nav||0) + '/on=' + (r.navOn||0) +
+                 ' 卡=' + String(r.cards||0).padStart(2) +
+                 ' 行=' + String(r.rows||0).padStart(3) +
+                 ' 条=' + String(r.bars||0).padStart(3) +
+                 ' slug=' + (r.declared||'?') +
+                 (r.emptyTables ? ' <span class="warn">空表' + r.emptyTables + '</span>' : '') +
+                 (r.errBanner ? ' <span class="bad">✗' + r.errBanner.slice(0,40) + '</span>' : '') +
+                 (r.error ? ' <span class="bad">' + r.error.slice(0,60) + '</span>' : '');
+    lines.push(flag + ' ' + r.page.padEnd(14) + detail);
+  });
+  var head = (bad === 0)
+    ? '<span class="ok">全部通过：16/16 页导航完整、模块声明正确、无接口错误横幅。</span>\n'
+    : '<span class="bad">有 ' + bad + ' 页异常，见下行明细。</span>\n';
+  document.getElementById('out').innerHTML = head + '\n' + lines.join('\n');
+  document.title = bad === 0 ? '研究台自检 · 全部通过' : '研究台自检 · ' + bad + ' 页异常';
+}).catch(function(e){
+  document.getElementById('out').textContent = '自检脚本异常：' + e;
+});
+</script>
+</body>
+</html>

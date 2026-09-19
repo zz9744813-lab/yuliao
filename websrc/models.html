@@ -1,254 +1,102 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>模型管理 · 中文文风研究台</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: #0e1116;
-    color: #c9d1d9;
-    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-    padding: 24px;
-    min-height: 100vh;
-  }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
-
-  header { margin-bottom: 24px; }
-  header h1 { font-size: 22px; font-weight: 600; color: #e6edf3; }
-  header p { font-size: 13px; color: #8b949e; margin-top: 6px; }
-
-  .banner {
-    display: none;
-    background: rgba(210, 153, 34, 0.12);
-    border: 1px solid #d29922;
-    color: #e3b341;
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: 13px;
-    margin-bottom: 20px;
-  }
-  .banner.show { display: block; }
-
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 14px;
-    margin-bottom: 24px;
-  }
-  .stat-card {
-    background: #161b22;
-    border: 1px solid #263041;
-    border-radius: 10px;
-    padding: 16px 18px;
-  }
-  .stat-card .value {
-    font-size: 26px;
-    font-weight: 700;
-    color: #58a6ff;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    font-variant-numeric: tabular-nums;
-  }
-  .stat-card .label { font-size: 12px; color: #8b949e; margin-top: 6px; }
-
-  .panel {
-    background: #161b22;
-    border: 1px solid #263041;
-    border-radius: 10px;
-    overflow: hidden;
-    margin-bottom: 24px;
-  }
-  .panel-title {
-    padding: 14px 18px;
-    font-size: 14px;
-    font-weight: 600;
-    color: #e6edf3;
-    border-bottom: 1px solid #263041;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .panel-title .meta { font-size: 12px; color: #8b949e; font-weight: 400; }
-
-  .table-wrap { overflow-x: auto; max-height: 520px; overflow-y: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  thead th {
-    position: sticky; top: 0; z-index: 2;
-    background: #1c2330;
-    color: #8b949e;
-    text-align: left;
-    font-weight: 600;
-    font-size: 12px;
-    padding: 10px 14px;
-    border-bottom: 1px solid #263041;
-    white-space: nowrap;
-  }
-  tbody td {
-    padding: 10px 14px;
-    border-bottom: 1px solid #21262e;
-    color: #c9d1d9;
-    white-space: nowrap;
-  }
-  tbody tr:hover { background: #1a2230; }
-  .empty { text-align: center; color: #8b949e; padding: 36px 0; font-size: 13px; }
-
-  .badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-  .badge.ok    { background: rgba(63,185,80,.15);  color: #3fb950; border: 1px solid rgba(63,185,80,.4); }
-  .badge.warn  { background: rgba(210,153,34,.15); color: #e3b341; border: 1px solid rgba(210,153,34,.4); }
-  .badge.down  { background: rgba(248,81,73,.15);  color: #f85149; border: 1px solid rgba(248,81,73,.4); }
-  .badge.unknown { background: rgba(139,148,158,.12); color: #8b949e; border: 1px solid #30363d; }
-
-  .bar-cell { display: flex; align-items: center; gap: 8px; min-width: 160px; }
-  .bar-track { flex: 1; height: 6px; background: #21262e; border-radius: 3px; overflow: hidden; }
-  .bar-fill { height: 100%; background: #58a6ff; border-radius: 3px; }
-
-  footer { font-size: 12px; color: #8b949e; margin-top: 8px; }
-</style>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="/lab/_shared/tokens.css">
+<link rel="stylesheet" href="/lab/_shared/base.css">
 </head>
 <body>
+<div class="lg-shell">
+  <main class="lg-main">
+    <div id="banner" class="banner"></div>
 
-<header>
-  <h1>模型管理</h1>
-  <p>各通道（relay / agy / qoder / wb / zcode）健康度、实测延迟、额度与串行约束</p>
-</header>
+    <header class="lg-head">
+      <div class="row">
+        <h1>模型管理</h1>
+        <span class="meta" id="genAt">—</span>
+      </div>
+      <div class="sub">Models · 实测登记表 / 调用量与令牌消耗 / 串行纪律</div>
+    </header>
 
-<div class="banner" id="banner">数据接口不可用，以下为示例结构</div>
+    <section class="stats" id="stats"></section>
 
-<div class="stats" id="stats"></div>
+    <section class="card">
+      <div class="card-head"><h2>串行纪律</h2><span class="hint">serial_discipline</span></div>
+      <div class="card-body" id="serialBox"></div>
+    </section>
 
-<div class="panel">
-  <div class="panel-title">
-    <span>通道状态明细</span>
-    <span class="meta mono" id="genAt"></span>
-  </div>
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>通道</th>
-          <th>健康度</th>
-          <th>实测延迟 (ms)</th>
-          <th>额度使用</th>
-          <th>剩余额度</th>
-          <th>串行约束</th>
-          <th>备注</th>
-        </tr>
-      </thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
+    <section class="card">
+      <div class="card-head"><h2>模型角色登记</h2><span class="hint" id="regMeta">registry</span></div>
+      <div class="card-body" id="registryBox"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>调用量明细（按累计调用降序）</h2>
+        <span class="hint" id="rowCount">—</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead id="thead"></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="lg-foot"></footer>
+  </main>
 </div>
 
-<footer id="note"></footer>
-
+<script src="/lab/_shared/lg.js"></script>
 <script>
-(function () {
-  var CHANNELS = ['relay', 'agy', 'qoder', 'wb', 'zcode'];
+LG.init('models', function (d, el) {
+  var reg = d.registry || {};
+  var rows = (d.usage_all_time || []).slice().sort(function (a, b) { return (b.calls || 0) - (a.calls || 0); });
+  var roles = reg.roles || {};
 
-  function fmt(n) {
-    if (n === null || n === undefined || n === '' || isNaN(Number(n))) return '—';
-    return Number(n).toLocaleString('zh-CN');
+  LG.statCards(el.stats, [
+    { value: d.llm_calls_total, label: '累计 LLM 调用' },
+    { value: rows.length,       label: '有过调用的模型', hint: 'usage_all_time' },
+    { value: Object.keys(roles).length, label: '登记角色数', hint: 'registry.roles' },
+    { value: Object.keys(roles).reduce(function (n, k) { return n + (roles[k] || []).length; }, 0),
+      label: '登记模型条目' }
+  ]);
+
+  var s = LG.$('serialBox');
+  s.innerHTML = d.serial_discipline
+    ? '<span class="badge warn">串行</span> <span style="color:var(--fg-2)">' + LG.esc(d.serial_discipline) + '</span>'
+    : '<div class="empty">未登记串行纪律</div>';
+
+  var box = LG.$('registryBox');
+  var rk = Object.keys(roles);
+  if (!rk.length) {
+    box.innerHTML = '<div class="empty">登记表为空</div>';
+  } else {
+    box.innerHTML = rk.map(function (role) {
+      var list = (roles[role] || []).map(function (m) {
+        return '<span class="tag">' + LG.esc(typeof m === 'string' ? m : (m.model || JSON.stringify(m))) + '</span>';
+      }).join('');
+      return '<div style="margin-bottom:12px"><div class="badge" style="margin-bottom:6px">' + LG.esc(role) + '</div>' +
+             '<div>' + list + '</div></div>';
+    }).join('');
+    if (reg.note) box.innerHTML += '<p class="note">' + LG.esc(reg.note) + '</p>';
+    if (reg.updated) LG.$('regMeta').textContent = 'registry · 更新于 ' + reg.updated;
   }
 
-  function healthBadge(h) {
-    if (h === null || h === undefined || h === '') return '<span class="badge unknown">未知</span>';
-    var v = Number(h);
-    if (!isNaN(v)) {
-      if (v >= 90) return '<span class="badge ok">健康 ' + v + '%</span>';
-      if (v >= 60) return '<span class="badge warn">波动 ' + v + '%</span>';
-      return '<span class="badge down">异常 ' + v + '%</span>';
-    }
-    var s = String(h).toLowerCase();
-    if (s === 'ok' || s === 'healthy' || s === '健康') return '<span class="badge ok">健康</span>';
-    if (s === 'warn' || s === 'degraded') return '<span class="badge warn">波动</span>';
-    if (s === 'down' || s === 'error') return '<span class="badge down">异常</span>';
-    return '<span class="badge unknown">' + String(h) + '</span>';
-  }
+  LG.table(el.tbody, rows, [
+    { key: 'model',       label: '模型' },
+    { key: 'calls',       label: '调用数',   num: true },
+    { key: 'failed',      label: '失败数',   num: true },
+    { key: 'failed_rate', label: '失败率',   num: true, render: function (r) { return LG.fmtPct(r.failed_rate); } },
+    { key: 'tokens_in',   label: '输入令牌', num: true },
+    { key: 'tokens_out',  label: '输出令牌', num: true }
+  ], { head: el.head });
 
-  function quotaBar(used, total) {
-    var u = Number(used), t = Number(total);
-    if (isNaN(u) || isNaN(t) || t <= 0) return '<span style="color:#8b949e">—</span>';
-    var pct = Math.min(100, Math.round(u / t * 100));
-    var color = pct >= 90 ? '#f85149' : (pct >= 70 ? '#e3b341' : '#58a6ff');
-    return '<div class="bar-cell">' +
-      '<div class="bar-track"><div class="bar-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
-      '<span class="mono" style="font-size:12px;color:#8b949e">' + pct + '%</span></div>';
-  }
-
-  function renderStats(stats) {
-    var box = document.getElementById('stats');
-    box.innerHTML = '';
-    var list = (stats && stats.length) ? stats : [
-      { label: '通道总数', value: '' },
-      { label: '健康通道', value: '' },
-      { label: '平均延迟 (ms)', value: '' },
-      { label: '额度告警', value: '' }
-    ];
-    list.forEach(function (s) {
-      var card = document.createElement('div');
-      card.className = 'stat-card';
-      var v = (s.value === '' || s.value === null || s.value === undefined) ? '—'
-        : (isNaN(Number(s.value)) ? String(s.value) : fmt(s.value));
-      card.innerHTML = '<div class="value">' + v + '</div><div class="label">' + (s.label || '指标') + '</div>';
-      box.appendChild(card);
-    });
-  }
-
-  function renderRows(rows) {
-    var tb = document.getElementById('tbody');
-    tb.innerHTML = '';
-    if (!rows || !rows.length) {
-      tb.innerHTML = '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
-      return;
-    }
-    rows.forEach(function (r) {
-      var tr = document.createElement('tr');
-      var serial = r.serial_constraint;
-      var serialTxt = (serial === true || serial === 1 || serial === 'serial') ? '串行'
-        : (serial === false || serial === 0 || serial === 'parallel') ? '并行'
-        : (serial || '—');
-      tr.innerHTML =
-        '<td class="mono" style="color:#58a6ff;font-weight:600">' + (r.channel || r.name || '—') + '</td>' +
-        '<td>' + healthBadge(r.health) + '</td>' +
-        '<td class="mono">' + fmt(r.latency_ms) + '</td>' +
-        '<td>' + quotaBar(r.quota_used, r.quota_total) + '</td>' +
-        '<td class="mono">' + fmt(r.quota_remaining) + '</td>' +
-        '<td>' + serialTxt + '</td>' +
-        '<td style="color:#8b949e">' + (r.note || '—') + '</td>';
-      tb.appendChild(tr);
-    });
-  }
-
-  function load() {
-    fetch('/console/models')
-      .then(function (res) {
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        return res.json();
-      })
-      .then(function (data) {
-        renderStats(data.stats);
-        renderRows(data.rows);
-        if (data.generated_at) {
-          document.getElementById('genAt').textContent = '生成时间：' + data.generated_at;
-        }
-        if (data.note) document.getElementById('note').textContent = data.note;
-      })
-      .catch(function () {
-        document.getElementById('banner').classList.add('show');
-        renderStats(null);
-        renderRows([]);
-      });
-  }
-
-  load();
-})();
+  LG.$('rowCount').textContent = '共 ' + LG.fmtNum(rows.length) + ' 个模型';
+});
 </script>
 </body>
 </html>
