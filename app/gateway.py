@@ -159,9 +159,17 @@ def _run_bridge(cmd: list[str], *, env_extra: dict | None = None,
     # 只要那个管道不 EOF，桥接就**一直挂着不发请求**——表现是"进程活着、日志没动静、
     # 一次调用都没发出去"（2026-09-18 实测：WB 通道因此静默卡了 12 分钟）。
     # 这也是 serve_remote.sh 里记过的同一条坑。
+    # 子进程静默：不弹控制台黑框（Windows 上批量调用会刷屏，朱十一要求）
+    import sys as _sys
+    _sys.path.insert(0, r"F:\Hermes\scripts")
+    try:
+        import no_window as _nw
+        _kw = _nw.kwargs()
+    except Exception:                      # noqa: BLE001
+        _kw = {}
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, env=env,
-                          stdin=subprocess.DEVNULL)
+                          stdin=subprocess.DEVNULL, **_kw)
     return proc.stdout or "", proc.stderr or "", proc.returncode
 
 
