@@ -141,3 +141,28 @@ def test_apply_is_idempotent_and_golden():
 def test_hits_none_and_empty():
     assert hits(None) == {} and hits("") == {}
     assert apply("") == ("", 0)
+
+
+# ── 4. 会审①：v2 段不继承 role ─────────────────────────────
+
+def test_corpus_v2_segments_do_not_inherit_role(tmp_path):
+    """v1 里 role='benchmark' 的段若被 v2 原样继承，同一内容会双份入池/入 gold。
+    v2 段必须 role=None（docstring 承诺的行为）。"""
+    _seed_v1_work("斗罗大陆（唐家三少）-v2role")
+    with db.session() as s:
+        # 额外造一个 benchmark 角色的 v1 段
+        w = s.query(Work).filter(Work.title.like("斗罗大陆%v2role")).one()
+        s.add(Segment(work_id=w.id, ordinal=9, text="吴天宗的千雪又来了。",
+                      text_clean="吴天宗的千雪又来了。", role="benchmark",
+                      integrity='{"src_ok": true}', n_sentences=1, n_chars=11))
+        s.commit()
+    import scripts.corpus_fix_v2 as CF
+    out = CF.build(only=("斗罗大陆",), map_path=tmp_path / "m-role.jsonl")
+    with db.session() as s:
+        # 按本测试专属 v2 标题精确查（共享库里其它测试也建过 v2）
+        v2 = s.query(Work).filter(
+            Work.title == "斗罗大陆（唐家三少）-v2role（corpus v2）").one()
+        rows = s.query(Segment).filter(Segment.work_id == v2.id).all()
+    assert len(rows) == 3
+    assert all(r.role is None for r in rows), \
+        "v2 段继承了 v1 的 role——同文双份入池/入 gold，基准被污染"

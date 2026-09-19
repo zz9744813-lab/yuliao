@@ -37,10 +37,9 @@ sys.path.insert(0, str(ROOT))
 
 from app import db  # noqa: E402
 from app.models import Segment, Work  # noqa: E402
+from app.typo_map import V2_TITLE_SUFFIX as V2_SUFFIX  # noqa: E402
 from app.typo_map import apply as typo_apply  # noqa: E402
 from app.typo_map import hits as typo_hits  # noqa: E402
-
-V2_SUFFIX = "（corpus v2）"
 # 频次自洽确认过错字的作品（typo_map 的证据来源：docs/typo-normalization-20260919.md）
 AFFECTED = ("斗罗大陆", "将夜")
 MAP_PATH = ROOT / "data" / "exports" / "corpus_v2_map.jsonl"
@@ -124,7 +123,10 @@ def build(only: tuple[str, ...] | None = None,
                     text=new_text,                     # v2 正文 = 修复后清洗文本
                     text_clean=seg.text_clean,          # 清洗层随行携带（审计可对照）
                     n_sentences=seg.n_sentences, n_chars=len(new_text),
-                    integrity=integ, role=seg.role, seg_version=seg.seg_version,
+                    integrity=integ,
+                    role=None,                          # 会审①：不继承 role——v1 的
+                    # benchmark/gold 段若被 v2 原样继承，同一内容会双份入池/入 gold
+                    seg_version=seg.seg_version,
                 ))
                 map_rows.append({"work": w.title, "v1_segment": seg.id,
                                  "ordinal": seg.ordinal})

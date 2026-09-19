@@ -15,6 +15,10 @@ from __future__ import annotations
 
 import re
 
+# corpus v2 的可过滤标记（T-CORPUS-V2）：出现在 Work.title 里即代表
+# 「TYPO_MAP 修复的镜像版本」。采样/建批侧据此排除，防止 v1/v2 同文双份入池。
+V2_TITLE_SUFFIX = "（corpus v2）"
+
 RULES: tuple[dict, ...] = (
     {"bad": "了天斗罗", "good": "昊天斗罗", "lookbehind": None},
     {"bad": "吴天", "good": "昊天", "lookbehind": None},
