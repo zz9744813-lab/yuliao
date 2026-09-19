@@ -156,9 +156,12 @@ def test_dry_run_touches_nothing():
 def test_human_vs_ai_builder_whitelist_and_answer():
     """hvai：只收白名单口径的自由重建候选；答案=人类侧；文本冻结。"""
     from app.config import BLIND_REVIEW_PROMPT_VERSIONS
+    _seed_pair("hvai", ctype="EXPLICITIZE")     # 自建基准段+帧，不依赖共享库状态
     with db.session() as s:
-        seg = s.query(Segment).filter_by(role="benchmark").first()
-        assert seg is not None
+        seg = s.query(Segment).filter_by(role="benchmark").filter(
+            Segment.id.in_([x[0] for x in s.query(
+                Frame.segment_id).distinct().all()])).first()
+        assert seg is not None, "找不到带帧的基准段"
         fr = s.query(Frame).filter_by(segment_id=seg.id).first()
         for pv, status in (("reconstruct_v1", "ok"), ("recon_ctx_v1", "ok"),
                            ("recon_ctxonly_v1", "ok"), ("reconstruct_v1", "failed")):
