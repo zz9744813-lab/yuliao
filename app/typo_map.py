@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import re
 
-# corpus v2 的可过滤标记（T-CORPUS-V2）：出现在 Work.title 里即代表
-# 「TYPO_MAP 修复的镜像版本」。采样/建批侧据此排除，防止 v1/v2 同文双份入池。
+# corpus v2 的标题标记（T-CORPUS-V2）：出现在 Work.title 里代表「TYPO_MAP 修复的
+# 镜像版本」。权威键是 Work.v2_of（存 v1 Work.id），标题只是人类可读的兼容通道
+# （回填前的历史行只有它）。判定统一走 app.models.is_corpus_v2_work /
+# exclude_corpus_v2_segments，消费方：scripts/corpus_fix_v2（产出+回填）、
+# app/near_dup（训练采样域 + 基准切分）、scripts/scale_corpus.pick、
+# scripts/goldpick_build、scripts/export_training、scripts/benchmark_build。
 V2_TITLE_SUFFIX = "（corpus v2）"
 
 RULES: tuple[dict, ...] = (

@@ -8,12 +8,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, or_, select
 from sqlalchemy.dialects.sqlite import JSON  # SQLite/Postgres 均可用 JSON 普通列
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
 from .ids import new_id
+from .typo_map import V2_TITLE_SUFFIX
 
 
 def _now() -> str:
@@ -29,6 +30,9 @@ class Work(Base):
     source: Mapped[str] = mapped_column(String(300))  # inbox:文件名 / distiller:xxx / file:路径
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     anchors: Mapped[str | None] = mapped_column(Text, nullable=True)  # T7 三重锚 JSON
+    # corpus v2 的稳定血缘键：本 Work 是哪本 v1 Work 的 TYPO_MAP 修复镜像（存 v1 Work.id）。
+    # 幂等判定只认它（外加标题后缀兼容回填前的历史行），**不认标题**——同名多 Work 会被标题键静默丢弃。
+    v2_of: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
 
 
@@ -51,6 +55,31 @@ class Segment(Base):
     role: Mapped[str | None] = mapped_column(String(20), nullable=True)  # train/benchmark/None
     seg_version: Mapped[int] = mapped_column(Integer, default=1)  # 切分器版本（v2=Phase 1.5）
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+# ── corpus v2 镜像的单一判定口径（T-CORPUS-V2 / 会审①收口）────────────
+# v2 = v1 的 TYPO_MAP 修复副本：同一内容在库里存在两份。基准只在 v1 侧维护，
+# v2 段**永不**参与采样/建批/基准/训练导出——所有下游一律用下面两个入口判定，
+# 不再各自硬编码标题字面量。
+
+def corpus_v2_work_subq():
+    """全部 corpus v2 镜像 Work 的 id 子查询（SQL 侧口径）。"""
+    return select(Work.id).where(or_(
+        Work.v2_of.isnot(None), Work.title.like(f"%{V2_TITLE_SUFFIX}%")))
+
+
+def exclude_corpus_v2_segments():
+    """Segment 查询用：排除属于 corpus v2 镜像作品的段。
+
+        s.query(Segment).filter(...).filter(exclude_corpus_v2_segments())
+    """
+    return ~Segment.work_id.in_(corpus_v2_work_subq())
+
+
+def is_corpus_v2_work(work: "Work | None") -> bool:
+    """Python 侧判定（已拿到 Work 对象时用），与 exclude_corpus_v2_segments 同口径。"""
+    return bool(work is not None
+                and (work.v2_of or V2_TITLE_SUFFIX in (work.title or "")))
 
 
 class Experiment(Base):

@@ -38,7 +38,7 @@ def _migrate(engine) -> None:
     additions = {"llm_calls": {"experiment_id": "TEXT"},
                  "segments": {"integrity": "TEXT", "role": "TEXT", "seg_version": "INTEGER DEFAULT 1",
                  "text_clean": "TEXT"},
-                 "works": {"anchors": "TEXT"}}
+                 "works": {"anchors": "TEXT", "v2_of": "TEXT"}}
     with engine.begin() as conn:
         for table, cols in additions.items():
             existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
