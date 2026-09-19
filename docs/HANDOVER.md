@@ -294,10 +294,72 @@ bash scripts/serve_remote.sh                         # 起评审台（集霸批�
     Fisher p=0.048）**——错字对仪器读数的影响被定量；斗罗历史读数偏低部分
     归因于此（provisional）。详见 `docs/typo-normalization-20260919.md`。
     复跑：`scripts/normalize_typos.py --scan/--apply/--report`。
-14. **运维**：评审台服务 8787 曾掉线，10:00 已重启（`data/_dbg/serve_20260919_1000.log`，
+14. **授权代行四项（2026-09-19 晚）**：
+    · **项1 gold standard 双轨**：(c) 负面库 v2 已是主线（103 条，`23b3140`）；
+      (b) AI-vs-AI 相对排序上线——`scripts/ai_ranking_build.py`（自然度轴三评委
+      多数决、weak 标签、断点续跑、`LG_RANKING_JUDGES` 可覆盖；deepseek 网关
+      晚间连败后降级 kimi+agnes 双评委），产物 `ai_ranking_v1.jsonl`（~150 对）。
+    · **项2 字表归一化**：见上条 13（`ca74785`/`fef07a0`，0.700→0.900）。
+    · **项3 令牌轮换**：见上条 11（`0fc6935`）。
+    · **项4 训练可行性评估**：`docs/training-feasibility-20260919.md`（`8322819`）。
+15. **运维**：评审台服务 8787 曾掉线，10:00 已重启（`data/_dbg/serve_20260919_1000.log`，
    令牌不变，隧道 URL 会变）。后台管线曾于 10:13 集体停摆 ~5 分钟（两进程同时
    无调用流、无子进程，疑似网关/代理抖动）——按纪律杀掉重启后恢复；重启的作业
-   都幂等。
+    都幂等。
+
+## 0.8 2026-09-19 晚间 · 前端优化（websrc 接通，集霸批准方案）
+
+**背景**：`websrc/` 16 页由 Hermes 于 19:29 入库（`b0b02f9`），入库时是**死页**——
+① `api.py` 未 mount，浏览器访问不到；② 10/16 页 fetch 的 slug 与 `console.MODULE_ORDER`
+不一致（页面写 `/console/overview`，API 叫 `dashboard`；`frames`→`semantic-lab`；
+`arena`→`reconstruction-arena`；`residual`→`expression-residual`；`strategy`→`strategy-atlas`；
+`judges`→`judge-arena`；`preference`→`preference-lab`；`hardcase`→`hard-cases`；
+`benchmark`→`benchmarks`；`training`→`training-data`）；③ 页面直接读 `data.stats`，
+而 API 返回 `{module,title,data}` 信封，缺解包层；④ 页面期望统一 `{stats,rows}`，
+而 `console.py` 16 模块各有各的真实键，形状不符 → 即使接通也只能渲染空态。
+
+**集霸批准的三项决策**：①**A** 视觉走金棕统一（弃用 websrc 原 GitHub Dark 蓝
+`#58a6ff`，对齐盲评台石墨底 + 金棕体系）；②**A** `console.html` 旧外壳降级为重定向
+（代码保留不删）；③**A** 盲评台 `index.html` 头部加一个"研究台"入口 `<a>`（其余零改动）。
+
+**方案与坑点**：见 `docs/frontend-plan-2026-09-19.md`（五阶段 P1~P5 + 8 条坑点 + 硬边界）。
+关键边界：**`app/console.py` 与 16 模块返回 shape 一字不动**（`test_console_each_module_shapes`
+钉住），契约对齐全部在 websrc 侧完成；写操作仍全部留在第一界面，研究台保持 GET-only。
+
+**对新入口的影响**：`app/access.py` 是全路径 `@app.middleware("http")`，`/lab/*`
+自动继承令牌闸，无需额外配置；但 `_GATE_HTML` 的 `onsubmit` 原先把 `?t=` 换 cookie 后
+硬跳回 `/?t=`，从研究台被拦时会跳到盲评台 —— 已改为跳回**当前路径**（首页行为不变）。
+
+### §0.8 执行结果（当晚 P1–P5 全部完成）
+
+**新入口**：`/lab/overview.html`（首页 `/lab` 自动跳此）。
+- 16 页全部接通真实数据；`/lab/_shared/{tokens.css,base.css,lg.js}` 为共享层；
+  `/lab/_shared/selfcheck.html` 是 **16 页运行时体检页**（在 iframe 里真实加载并读回渲染结果，
+  改完共享层或页面开一次即可，一屏看 16 页）。
+- `/console/ui` 旧外壳 **302 → /lab/overview.html**（`console.html` 文件保留，
+  其 4 项静态契约测试仍在跑；`test_console_ui_route_serves_page_no_store` 已按新契约演进为
+  `test_console_ui_route_redirects_to_lab`）。
+- 盲评台 `index.html` 头部新增一个 `<a id="lab-entry">研究台 ↗</a>`（其余一字未动，
+  不变量测试原样全绿）。
+
+**关键判断修正**：websrc 并非"通用键并集表格"——每页已有定制可视化（arena 候选对照、
+judges 记分板、preference 胜率分布、strategy Wilson 区间）。故**保留各页 renderer**，
+只抽令牌 / 组件样式 / 工具函数 / 导航 / 信封解包，未推倒重来。
+
+**实测抓到的真 bug**：`frames.html` 写了 `lk.over_0.6_by_layer` —— 属性名以数字开头是非法 JS 语法，
+整块 renderer 静默不执行（导航都建不出来）。**用方括号访问**修正。
+据此补两条防线：`tests/test_websrc_contract.py` 里的 `node --check` 语法校验（每页内联脚本 + `lg.js`），
+以及上面那页浏览器自检 —— 这是"没有构建工具时"能拿到的最低成本编译检查。
+
+**未闭合缺口（未用假数据顶替）**：`/console/*` 是聚合口径，两页原设计要明细而没有数据源 ——
+`reconstruction-arena`（对阵记录 + 候选正文并排）与 `semantic-lab`（Frame 清单 + 筛选器）
+本次改为等价的分布视图，页内写明边界。**注意** `test_console_each_module_shapes` 用的是
+`need <= set(data)` 子集断言 —— 后端加字段不会破坏测试，故若要让这两页恢复原设计，
+扩 API 是安全路径，但属范围决策，**留待集霸拍板**。
+
+**测试**：全量 **405 项全绿**（新增 `tests/test_websrc_contract.py` 18 项）；
+16 页路由 16/16 通过 + no-store；目录穿越 404；浏览器自检 16/16 通过；
+深/浅双主题截图核对（`data/_dbg/lab-shots/`）。详见 `docs/frontend-plan-2026-09-19.md` §5。
 
 ## 1. 交接时点状态
 
