@@ -30,7 +30,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import access, config, corpus, db, engine, experiments, observability
+from . import access, config, console, corpus, db, engine, experiments, observability
 from .models import Candidate, Experiment, Job, ReviewItem, Segment, Work, LlmCall
 
 app = FastAPI(title="Language Genome — SemanticFrame Calibration Lab", version="0.2.0")
@@ -650,3 +650,20 @@ def llm_stats(hours: int = 24, exp: str | None = None):
             # 查无此实验：报错，不静默给空窗口（纪律④）
             raise HTTPException(404, str(e))
         return resp
+
+
+# ── 只读控制台（总方案 §18 的 16 个模块页，T2）──────────────
+
+@app.get("/console")
+def console_index():
+    """模块索引：slug/标题清单（前端外壳按此渲染导航）。"""
+    return {"modules": console.index()}
+
+
+@app.get("/console/{module}")
+def console_module(module: str):
+    """GET-only 数据面；聚合逻辑在 app/console.py（全部只读，回归测试钉住）。"""
+    try:
+        return console.module_data(module)
+    except KeyError:
+        raise HTTPException(404, f"未知控制台模块：{module}；可用：{console.MODULE_ORDER}")
