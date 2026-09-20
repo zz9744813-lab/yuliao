@@ -96,6 +96,9 @@ class KnowledgePackage(Contract):
 
 
 class Budget(Contract):
+    # 语感体检开关：只把"干瘪/AI 味"变成修稿指令与体检数据，
+    # 不参与 hard 判定（见 app/style_contract.py 的失败留档）。
+    style_feedback: bool = False
     max_calls: int = Field(default=6, ge=2, le=20)
     max_rewrites: int = Field(default=2, ge=0, le=2)
     max_input_chars: int = Field(default=24000, ge=100, le=100000)
