@@ -305,15 +305,11 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
                    .filter_by(name=name, kind="length_balanced").first())
         conflict = None if existed is None else {"set_id": existed.id,
                                                  "n_items": existed.n_items}
-        if existed is not None and not dry_run:
-            if not replace:
-                raise SystemExit(
-                    f"同名长度平衡集已存在：{name}（{existed.id}，{existed.n_items} 题）。"
-                    f"要重建用 --replace（旧集及条目将被删除）。")
-            s.query(BenchmarkItem).filter_by(set_id=existed.id).delete()
-            s.query(BenchmarkSet).filter_by(id=existed.id).delete()
-            s.commit()
-        replaced = dict(conflict) if (conflict and replace and not dry_run) else None
+        # 拒绝语义先于一切副作用（glm 席严重项：删旧不得早于建新成功的把握）
+        if existed is not None and not dry_run and not replace:
+            raise SystemExit(
+                f"同名长度平衡集已存在：{name}（{existed.id}，{existed.n_items} 题）。"
+                f"要重建用 --replace（旧集及条目将被删除）。")
 
         rows = _eligible_pairs(s)
         s_side, l_side = [], []
@@ -339,10 +335,11 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
         if dry_run:
             return {"would_build": {"S": len(s_side), "L": len(l_side),
                                      "per_side": min(per_side, len(l_side), len(s_side))},
-                    "universe": universe, "replaced": replaced,
+                    "universe": universe, "replaced": None,
                     "name_conflict": conflict,
-                    "on_conflict": ("replace（删旧建新，见 replaced）" if replace
-                                    else "refuse（SystemExit）")}
+                    "on_conflict": (None if conflict is None else
+                                    ("replace（删旧建新，旧集见 name_conflict）"
+                                     if replace else "refuse（SystemExit）"))}
         rng = random.Random(seed)
         rng.shuffle(s_side)
         rng.shuffle(l_side)
@@ -352,6 +349,15 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
                 f"建不出配平集：per_side={per_side}，实测库存 S={len(s_side)} / "
                 f"L={len(l_side)}——一侧为 0 两侧都配不平；先 --dry-run 看库存，"
                 "别建空集占名（同名守卫会挡住后续重建）。")
+        replaced = None
+        if existed is not None and replace:
+            # 事务内删旧、不提前 commit：建新任一步失败（异常/SystemExit）→
+            # 回滚 → 旧集幸存（glm 席严重项）。n_items 用 delete() 的
+            # rowcount——计数列与实际行数脱钩时以真删数为准。
+            del_n = s.query(BenchmarkItem).filter_by(set_id=existed.id).delete()
+            s.query(BenchmarkSet).filter_by(id=existed.id).delete()
+            replaced = {"set_id": existed.id, "n_items": del_n,
+                        "prior": (existed.spec or {}).get("replaced")}
         picked = s_side[:k] + l_side[:k]
         st = BenchmarkSet(id=new_id("BS"), name=name, version=version,
                           kind="length_balanced", n_items=len(picked),

@@ -251,7 +251,10 @@ already==0 非零退出、--exp 透传）+ 测试卫生（链测试 monkeypatch 
 **bal-v2-prod 干净重建：BS-5543d4b7ac4c，180 题 = S 90 + L 90**（seed
 20260925，per_side 90）。实测宇宙：L 侧行宇宙 = **纯 EXP-BAL2-PROD**
 （实测库存 93 行；核验=scripts/verify_bal_universe.py 逐题按变体文本回连
-ControlledCorruption，证据 outputs/bal2-prod-verify/BS-5543d4b7ac4c.json：
+ControlledCorruption。重跑：`"$PY" scripts/verify_bal_universe.py --set
+BS-5543d4b7ac4c --json <任意路径>.json`——证据目录 outputs/ 在仓库外
+（gitignore），文件可由该命令一键再生；09-20 实测证据
+outputs/bal2-prod-verify/BS-5543d4b7ac4c.json：
 L/EXP-BAL2-PROD 90、S/EXP-0918-BENCH 57、S/EXP-0918-CORR 33、0 mismatch）；S 侧未限定（结构事实：窗口化产线只产 L 方向，PROD 无
 S 库存，纯 PROD 平衡集不可行），S 侧 90 题来自 legacy EXP-0918-BENCH（57）+
 EXP-0918-CORR（33），spec 已声明 s_universe=all、s_stock_measured=195。
@@ -264,7 +267,16 @@ replaced={set_id,n_items} 删旧痕迹（role='benchmark' 不回收——持久�
 3 条测试假阴性通过，已补两侧 seed）；新增 scripts/verify_bal_universe.py
 （建集函数自证不算数：逐题回连、mismatch exit 1、--json 落证据）；
 链测试池夹具快照缩到可翻转集（role 空白段），teardown 只回滚被翻外段，
-不再两次全表物化。
+不再两次全表物化。**两席 BLOCK 第二轮修复（同日第三笔）**：replace 改
+事务内删旧、删旧与建新同一 commit（建新失败 → 回滚 → 旧集幸存，k=0 守卫
+前移到删除之前，回归=replace+库存不足旧集原样保留）；replaced.n_items
+改用 delete() rowcount 并随 spec 携带 prior（链式 replace 追溯不断链）；
+verify_bal_universe 硬化：只核 length_balanced 且非空集、spec 宇宙键坏
+值报错不降级、两侧 all 报「无从核验」、answer≠A/B 与 EQ 计 mismatch、
+ambiguous/not-linked 只分型不猜行、大清单截断显式标
+mismatch_truncated、--l-experiments 空串拒绝；池夹具 teardown 改查
+role=='benchmark' 小集 + Python 求交（不下发大 IN 参数），加漂移哨兵
+（split 若开始改标非空 role 段必须红）。
 下一步：BS-5543d4b7ac4c 三评委跑分（qoder/kimi/agnes 全报，
 不许只挑好看的一家）+ benchmark_falsify 全套 N0~N5 → 档一读数（预注册：
 两侧各 n≥40，方向识别 ≥0.80 达标线，judge 面板含 N4 长度基线）。

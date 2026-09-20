@@ -44,6 +44,7 @@ _UNIQ = _uuid.uuid4().hex[:8]
 _CREATED: dict[str, set] = {"exp": set(), "work": set(), "seg": set(),
                            "frame": set(), "cand": set(), "cc": set()}
 _FLIP: dict = {}   # 可翻转外段快照（id → 原 role），_pool_guard setup 存 teardown 用
+_BENCH: set = set()  # 开测前已是 benchmark 的段 id——teardown 漂移哨兵的基线
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +66,9 @@ def _pool_guard():
         _FLIP.clear()
         _FLIP.update(s.query(Segment.id, Segment.role)
                      .filter((Segment.role.is_(None)) | (Segment.role == "")).all())
+        _BENCH.clear()
+        _BENCH.update(sid for (sid,) in
+                      s.query(Segment.id).filter(Segment.role == "benchmark").all())
     yield
     with db.session() as s:
         mine = s.query(BenchmarkSet).filter(
@@ -84,14 +88,19 @@ def _pool_guard():
             s.query(Work).filter_by(id=w_id).delete()
         for e_id in _CREATED["exp"]:
             s.query(Experiment).filter_by(id=e_id).delete()
-        # 只回滚「快照为空 role、期间被 split 翻成 benchmark」的外段，
-        # 按 id 集合一次圈出、恢复原值，无逐行 s.get（role='benchmark' 是
-        # 持久单调标记，测试无权替生产改库底）。
-        flipped = s.query(Segment).filter(
-            Segment.id.in_(set(_FLIP) - _CREATED["seg"]),
-            Segment.role == "benchmark").all()
-        for seg in flipped:
+        # 回滚被 split 翻成 benchmark 的外段：查 role=='benchmark' 的小结果集、
+        # Python 侧与 _FLIP 求交——不下发大 IN 参数（现场空 role 段数千~数万，
+        # 会撞 SQLite 变量上限，teardown 抛错=脏池留在共享库里）。
+        bench_now = {sid for (sid,) in
+                     s.query(Segment.id).filter(Segment.role == "benchmark").all()}
+        for seg in s.query(Segment).filter(
+                Segment.id.in_(list(bench_now & set(_FLIP)))).all():
             seg.role = _FLIP[seg.id]
+        # 漂移哨兵：可翻转集与（已删的）自造段之外出现新 benchmark 段 =
+        # split 开始给非空 role 段改标——夹具快照有盲区，必须红出来。
+        drifted = bench_now - _BENCH - set(_FLIP) - _CREATED["seg"]
+        assert not drifted, \
+            f"split 标了快照外的段（语义漂移，夹具回滚不覆盖）：{sorted(drifted)[:10]}"
         s.commit()
 LONG_HUMAN = ("他把茶喝完才起身，屋外风声很紧，谁也没有再说话，窗纸被吹得鼓了一下，"
               "远处还有狗吠。")                        # 37 字（>min_chars=60 会被夹具外口径排除？
@@ -261,7 +270,7 @@ def test_split_benchmark_none_exp_marks_both():
 def test_same_name_refused_then_replace_reports():
     name = f"bal-guard-{_UNIQ}"
     _seed_pair(f"EXP-G1-{_UNIQ}", "benchmark", "L")
-    _seed_pair(f"EXP-G1-{_UNIQ}", "benchmark", "S")   # 只 seed L → k=0 空集假阴性
+    _seed_pair(f"EXP-G1-{_UNIQ}", "benchmark", "S")   # 补 seed S：只 seed L → k=0 空集假阴性
     out1 = BB.build_length_balanced(name, version=1, seed=71, per_side=5)
     # 同名重跑：默认拒绝（防重复集——监督实测 builder 无按名查重，此守卫即新契约）
     with pytest.raises(SystemExit, match="同名长度平衡集已存在"):
@@ -270,7 +279,8 @@ def test_same_name_refused_then_replace_reports():
     out2 = BB.build_length_balanced(name, version=1, seed=71, per_side=5,
                                     replace=True)
     assert out2["replaced"]["set_id"] == out1["set_id"], "replace 必须留删旧痕迹"
-    assert out2["replaced"]["n_items"] == out1["items"]
+    assert out2["replaced"]["n_items"] == out1["items"], \
+        "n_items 用 delete() rowcount——计数列与实删行数脱钩时以实删为准"
     with db.session() as s:
         assert s.get(BenchmarkSet, out1["set_id"]) is None, "旧集没删干净"
         st2 = s.get(BenchmarkSet, out2["set_id"])
@@ -280,17 +290,43 @@ def test_same_name_refused_then_replace_reports():
         n = s.query(BenchmarkSet).filter_by(name=name,
                                             kind="length_balanced").count()
         assert n == 1, "replace 后必须恰好一个同名集"
+    # 连续 replace：第三任的 replaced.prior 必须携带第二任所记的第一任痕迹（链不许断在一跳）
+    out3 = BB.build_length_balanced(name, version=1, seed=71, per_side=5,
+                                    replace=True)
+    assert out3["replaced"]["set_id"] == out2["set_id"]
+    assert out3["replaced"]["prior"]["set_id"] == out1["set_id"], \
+        "上任自己的 replaced 随行删除消失——追溯链必须随 spec 继承"
+
+
+def test_replace_insufficient_stock_keeps_old_set():
+    """glm 席严重项回归：replace 建新失败（k=0）时旧集必须幸存——
+    删旧不得早于建新成功的把握（先删后 commit 的旧实现里旧集已不可逆消失）。"""
+    es = f"EXP-RP-{_UNIQ}"
+    _seed_pair(es, "benchmark", "L")
+    _seed_pair(es, "benchmark", "S")
+    name = f"bal-rp-{_UNIQ}"
+    out1 = BB.build_length_balanced(name, version=1, seed=141, per_side=1)
+    with pytest.raises(SystemExit, match="建不出配平集"):
+        BB.build_length_balanced(name, version=1, seed=141, per_side=1,
+                                 replace=True,
+                                 l_experiments=("EXP-NOPE",))  # L 库存=0 → k=0
+    with db.session() as s:
+        st = s.get(BenchmarkSet, out1["set_id"])
+        assert st is not None, "建新失败旧集被删——删旧必须随建新同一事务提交"
+        n = s.query(BenchmarkItem).filter_by(set_id=out1["set_id"]).count()
+        assert n == out1["items"], "旧集条目必须原样幸存"
 
 
 def test_dry_run_reports_name_conflict():
     """dry-run 也报同名冲突：预演就能看出真跑会被拒绝还是要删哪个集
     （qwen 席 BLOCK 项：dry_run 整体跳过守卫，replaced 恒 None）。"""
     _seed_pair(f"EXP-DRY-{_UNIQ}", "benchmark", "L")
-    _seed_pair(f"EXP-DRY-{_UNIQ}", "benchmark", "S")   # 只 seed L → k=0 空集假阴性
+    _seed_pair(f"EXP-DRY-{_UNIQ}", "benchmark", "S")   # 补 seed S：只 seed L → k=0 空集假阴性
     name = f"bal-dry-{_UNIQ}"
     d1 = BB.build_length_balanced(name, version=1, seed=97, per_side=1,
                                   dry_run=True)
-    assert d1["name_conflict"] is None and d1["on_conflict"].startswith("refuse")
+    assert d1["name_conflict"] is None and d1["on_conflict"] is None, \
+        "无冲突时 on_conflict 不该说 refuse（读起来像这次会被拒）"
     out = BB.build_length_balanced(name, version=1, seed=97, per_side=1)
     d2 = BB.build_length_balanced(name, version=1, seed=97, per_side=1,
                                   dry_run=True)
@@ -306,7 +342,7 @@ def test_dry_run_reports_name_conflict():
 def test_bal_v2_carries_split_marker_and_universe():
     """spec 带 split=2 版本标记 + 实测宇宙字段（l/s_universe + 两侧实测库存）。"""
     _seed_pair(f"EXP-SP-{_UNIQ}", "benchmark", "L")
-    _seed_pair(f"EXP-SP-{_UNIQ}", "benchmark", "S")   # 只 seed L → k=0 空集假阴性
+    _seed_pair(f"EXP-SP-{_UNIQ}", "benchmark", "S")   # 补 seed S：只 seed L → k=0 空集假阴性
     out = BB.build_length_balanced(f"bal-sp-{_UNIQ}", version=1, seed=81, per_side=1)
     with db.session() as s:
         st = s.get(BenchmarkSet, out["set_id"])
@@ -340,6 +376,8 @@ def test_verify_bal_universe_clean_set_passes():
     out = BB.build_length_balanced(f"bal-vc-{_UNIQ}", version=1, seed=117,
                                    per_side=1, l_experiments=(enew,))
     rep = VU.verify_set(out["set_id"])
+    assert rep["l_universe_expected"] == [enew], \
+        "spec 默认路径必须真读到建集时写的宇宙——键名/类型漂移会让核验静默降级成 all"
     assert rep["n_mismatch"] == 0, f"干净集不该报 mismatch：{rep['mismatch']}"
     assert any(k.startswith("L/") and enew in k
                for k in rep["per_direction_experiment"]), \
@@ -353,10 +391,97 @@ def test_verify_bal_universe_flags_foreign_l_rows():
     """L 侧有行落在预期宇宙外 → n_mismatch≥1 且逐题列出（exit 1 的判据来自这里）。"""
     evf = f"EXP-VF-{_UNIQ}"
     _seed_pair(evf, "benchmark", "L")
-    _seed_pair(evf, "benchmark", "S")   # 不 seed S → k=0 建空集 → 0 mismatch 假阴性
+    _seed_pair(evf, "benchmark", "S")   # 补 seed S：只 seed L → k=0 建空集 → 0 mismatch 假阴性
     out = BB.build_length_balanced(f"bal-vf-{_UNIQ}", version=1, seed=127, per_side=1)
     assert out["items"] >= 2, "两侧都有库存时必须有题（空集的 mismatch 没有判别力）"
     rep = VU.verify_set(out["set_id"], l_experiments=("EXP-NOPE",))
     assert rep["n_mismatch"] >= 1, "宇宙外的 L 行必须被点出（宁报错不放过）"
     assert any(m["reason"] == "outside_universe" for m in rep["mismatch"]), \
         "mismatch 必须带原因分型（outside_universe/ambiguous/not_linked/EQ）"
+
+
+# ── verify_bal_universe 边界组（两席二轮 BLOCK：EQ 静默、spec 坏值降级、空集假绿、CLI 无权测） ──
+
+def _hand_set(items_spec, kind="length_balanced", spec=None):
+    """手工造核验用小集（绕过建集闸门，专测 verify 自身的分型与拒收）。
+    items_spec: (text_a, text_b, answer, segment_id) 元组序列。"""
+    with db.session() as s:
+        st = BenchmarkSet(id=BB.new_id("BS"), name=f"bal-hv-{_UNIQ}", version=1,
+                          kind=kind, n_items=len(items_spec),
+                          spec=(spec if spec is not None else
+                                {"l_universe": [], "s_universe": "all"}),
+                          note="hand-built for verify tests")
+        s.add(st)
+        s.flush()
+        for ta, tb, ans, seg_id in items_spec:
+            s.add(BenchmarkItem(set_id=st.id, segment_id=seg_id, kind=kind,
+                                context="", text_a=ta, text_b=tb, answer=ans,
+                                meta={}))
+        s.commit()
+        return st.id
+
+
+def _seeded_pair_rows(exp_id):
+    """seed 一对可回连的行，返回 (seg_id, human_text, variant_text)。"""
+    seg_id = _seed_pair(exp_id, "benchmark", "L")
+    with db.session() as s:
+        seg = s.get(Segment, seg_id)
+        cc = (s.query(ControlledCorruption).filter_by(segment_id=seg_id)
+              .order_by(ControlledCorruption.id).first())
+        return seg_id, (seg.text_clean or seg.text), (cc.text or "")
+
+
+def test_verify_eq_and_bad_answer_flagged():
+    """EQ（两侧等长）与坏 answer 必须进 mismatch——docstring 承诺过，
+    此前实现只计数不 flag（glm/qwen 席：静默假绿的典型）。"""
+    seg_id, human, var = _seeded_pair_rows(f"EXP-HV1-{_UNIQ}")
+    sid = _hand_set([((var, var, "A", seg_id)),        # EQ：两文本相同长度
+                     ((human, "X", "Q", seg_id))],      # bad answer
+                    spec={"l_universe": [f"EXP-HV1-{_UNIQ}"], "s_universe": "all"})
+    rep = VU.verify_set(sid)
+    reasons = {m["reason"] for m in rep["mismatch"]}
+    assert "eq_length" in reasons, "EQ 必须计为 mismatch（建集/核验方向判定不同源）"
+    assert "bad_answer" in reasons, "answer 不是 A/B 必须点出，不许静默对调人机侧"
+
+
+def test_verify_not_linked_flagged_not_guessed():
+    seg_id, human, var = _seeded_pair_rows(f"EXP-HV2-{_UNIQ}")
+    sid = _hand_set([((human, "回连不上的变体文本", "A", seg_id))],
+                    spec={"l_universe": [f"EXP-HV2-{_UNIQ}"], "s_universe": "all"})
+    rep = VU.verify_set(sid)
+    assert rep["mismatch"][0]["reason"] == "variant_not_linked"
+
+
+def test_verify_rejects_empty_wrong_kind_and_bad_spec():
+    """空集/错 kind/spec 坏值/两侧 all——四种口径漂移一律拒收，不给假绿。"""
+    with pytest.raises(SystemExit, match="空集"):
+        VU.verify_set(_hand_set([], spec={"l_universe": ["X"], "s_universe": "all"}))
+    with pytest.raises(SystemExit, match="不是长度平衡集"):
+        VU.verify_set(_hand_set([], kind="corruption_detection"))
+    with pytest.raises(SystemExit, match="解析失败"):
+        VU.verify_set(_hand_set([], spec={"l_universe": {"漂移": 1},
+                                           "s_universe": "all"}))
+    with pytest.raises(SystemExit, match="均未限定"):
+        VU.verify_set(_hand_set([], spec={"l_universe": "all", "s_universe": "all"}))
+
+
+def test_verify_cli_exit_json_and_empty_universe(monkeypatch, tmp_path):
+    """CLI 契约：干净集 exit 0 + --json 落证据；mismatch exit 1；空串宇宙拒收。"""
+    seg_id, human, var = _seeded_pair_rows(f"EXP-HV3-{_UNIQ}")
+    ok_sid = _hand_set([((human, var, "A", seg_id))],
+                       spec={"l_universe": [f"EXP-HV3-{_UNIQ}"], "s_universe": "all"})
+    j = tmp_path / "v.json"
+    monkeypatch.setattr(sys, "argv", ["prog", "--set", ok_sid, "--json", str(j)])
+    VU.main()
+    assert j.exists() and json.loads(j.read_text(encoding="utf-8"))["n_mismatch"] == 0
+    # 宇宙外 → SystemExit（exit 1 判据）
+    monkeypatch.setattr(sys, "argv", ["prog", "--set", ok_sid,
+                                       "--l-experiments", "EXP-NOPE"])
+    with pytest.raises(SystemExit) as ei:
+        VU.main()
+    assert ei.value.code  # 非零退出码（不是 None=0 也不是字符串提示）
+    # 空串宇宙：与不传=不限定的默认语义必须分开
+    monkeypatch.setattr(sys, "argv", ["prog", "--set", ok_sid,
+                                       "--l-experiments", ""])
+    with pytest.raises(SystemExit, match="空宇宙"):
+        VU.main()
