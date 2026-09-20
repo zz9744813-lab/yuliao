@@ -102,7 +102,7 @@ class SceneRunner:
         if receipt:
             return {**receipt, "reused": True, "usage": self.store.usage(job_id)}
         job = self.store.job(job_id)
-        final_text = None
+        style_checked = None
         if job["status"] != "verified":
             context = json.loads(job["context"])
             draft, issues, errors = None, [], []
@@ -114,7 +114,6 @@ class SceneRunner:
                                          "instruction": "只修复问题；计划及允许变化保持不变。"})
                 reply = self._call(job_id, f"writer.{round_index}", "writer", WRITER_SYSTEM, writer_input, budget)
                 draft = parse_result(reply["text"], Draft)
-                final_text = draft.text
                 # Verifier sees the authoritative snapshot; Writer sees only compiled POV.
                 world = self.store.snapshot(plan.book_id, plan.branch_id)
                 if world.revision != plan.expected_revision:
@@ -160,14 +159,17 @@ class SceneRunner:
                 if budget.style_feedback:
                     # 只在本来就要修稿时追加语感指令：语感不构成 hard 结论，
                     # 不改变"何时算通过"的语义（避免把文风问题升级成死锁）。
-                    issues.extend(style_issues(draft.text, min_chars=plan.min_chars))
+                    # 每轮只测一次，指令与最终体检数据复用同一份结果。
+                    style_checked = style_probe(draft.text, min_chars=plan.min_chars,
+                                                max_chars=plan.max_chars)
+                    issues.extend(style_issues(draft.text, min_chars=plan.min_chars,
+                                               max_chars=plan.max_chars, checked=style_checked))
                 if not errors:
                     self.store.mark_verified(job_id, draft.text, review)
                     break
             else:
                 raise RuntimeFault("rewrite_budget_exhausted:" + ",".join(errors))
-        diagnostics = ({"style": style_probe(final_text, min_chars=plan.min_chars)}
-                       if budget.style_feedback and final_text else {})
+        diagnostics = {"style": style_checked} if style_checked else {}
         if stop_after_verified:
             return {"job_id": job_id, "status": "verified", "usage": self.store.usage(job_id),
                     **diagnostics}

@@ -1,11 +1,12 @@
 """语感契约与"干瘪体检"的契约测试。
 
 只锁行为边界：契约文本必须真的进了写手提示词、体检只产出 style 类意见、
-开关默认关闭时产线行为与返回值零变化、提示词里不许出现历史上那句"骨架中没有的信息不要添加"。
+开关默认关闭时产线行为与返回值零变化、每轮只检测一次、越界（含超上限）必给指令。
 这里**不**断言"哪段写得好" —— 干瘪是缺席特征，词表抓不到（见 app/style_contract.py 的失败留档）。
 """
 import pytest
 
+from app import style_contract
 from app.scene_runtime.contracts import (Budget, Change, Fact, KnowledgePackage, PlannedEvent,
                                         ScenePlan, World, canonical)
 from app.scene_runtime.pipeline import WRITER_SYSTEM, SceneRunner
@@ -35,22 +36,41 @@ def test_probe_separates_flat_from_detailed():
     assert vivid["sent_sd"] > flat["sent_sd"]
 
 
+def test_probe_reports_contract_version_and_未取整判定():
+    """展示值可四舍五入，判定必须用原始值：显示 12.0 但实际 11.96 仍算越界。"""
+    p = probe("他。她。它。")   # 无感官词、平均句长 2 字
+    assert p["contract_version"] == style_contract.WRITER_CONTRACT_VERSION
+    assert p["_raw"]["sensory_per_1k"] == 0.0
+    assert issues("他。她。它。") != []
+
+
 def test_issues_only_produce_style_kind_and_quote_from_text():
-    out = issues(FLAT, min_chars=600)
+    out = issues(FLAT, min_chars=600, max_chars=900)
     assert out, "干瘪且远低于字数下限的文本必须给出修稿指令"
     assert {i["kind"] for i in out} == {"style"}
     assert all(i["quote"] in FLAT for i in out)
 
 
-def test_issues_quiet_on_detailed_text_meeting_min_chars():
-    assert issues(VIVID, min_chars=100) == []
+def test_issues_fire_independently_per_dimension():
+    """每一维越界都能单独触发；不靠"某段文本恰好全过"来反证。"""
+    floor_text = VIVID + "光" * 200          # 抬高感官密度，避开感官维
+    assert any("上限" in i["instruction"] for i in issues(floor_text, max_chars=10)), "超上限必须给指令"
+    assert any("下限" in i["instruction"] for i in issues(floor_text, min_chars=99999)), "低于下限必须给指令"
+    assert any("感官密度" in i["instruction"] for i in issues("他推门。她点头。灯灭了。")), "无感官词必须给指令"
+    assert all(i["kind"] == "style" for i in issues("他推门。她点头。灯灭了。", min_chars=99999, max_chars=1))
+
+
+def test_over_max_is_reported_even_when_min_chars_met():
+    p = probe(VIVID, min_chars=100, max_chars=50)
+    assert p["over_max"] is True and p["max_chars"] == 50
 
 
 def test_writer_prompt_keeps_hard_constraints_and_carries_contract():
     assert "非持久细节" in WRITER_SYSTEM and "句长起伏" in WRITER_SYSTEM
+    assert style_contract.STYLE_CONTRACT in WRITER_SYSTEM, "契约必须原样内联，避免两处口径漂移"
     assert "唯一允许的持久状态变化" in WRITER_SYSTEM, "事实预算必须留在提示词里"
-    assert "不得新造持久设定" not in WRITER_SYSTEM.replace("这些键之外的持久状态一律不得变更", ""), \
-        "旧的笼统措辞已被更精确的事实预算取代"
+    assert "可自由组织动作、对话和句子" not in WRITER_SYSTEM, \
+        "旧的笼统自由条款已被更精确的授权 + 事实预算取代"
     assert "骨架中没有的信息不要添加" not in WRITER_SYSTEM
 
 
@@ -112,6 +132,21 @@ def test_style_diagnostics_absent_by_default_and_present_when_enabled(scene):
     assert on["style"]["chars"] == len(FLAT) and on["style"]["min_chars"] == 1
     assert on["style"]["sensory_per_1k"] < 12, "干瘪文本必然低于感官代理门槛（这正是体检的意义）"
     assert "flavor_score" in on["style"]
+
+
+def test_style_feedback_probes_once_per_scene(scene, monkeypatch):
+    """会审意见：不许同一段文本重复检测（每轮一次）。"""
+    store, plan, knowledge = scene
+    calls = []
+    real = style_contract.analyze_v2
+
+    def counting(text):
+        calls.append(text)
+        return real(text)
+
+    monkeypatch.setattr(style_contract, "analyze_v2", counting)
+    SceneRunner(store, EchoClient()).run(plan, knowledge, Budget(style_feedback=True))
+    assert len(calls) == 1, f"一个场景一轮只该检测一次，实际 {len(calls)}"
 
 
 def test_style_feedback_never_creates_hard_failure(scene):
