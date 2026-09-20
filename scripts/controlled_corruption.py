@@ -94,6 +94,9 @@ LEN_WINDOW_S = (1.08, 1.80)
 #   RHYTHM_FLATTEN 0/3 但两发 ratio=0.96 在标准窗外沿——放宽后可收；
 #   ABSTRACT_SUMMARY/EMOTION_LABEL/DIALOGUE_EXPOSITION 0/3 且
 #   ratio 1.00~1.41（模型不压缩，放宽大概率救不活，round-2 见分晓）。
+# LEN_WINDOW_L_WIDE：**保留**（无产线引用，非死常量）——它是 pilot round-2
+# 放宽档的历史规格记录（提案 §1.5 协议执行的证据），tests/test_len_spec.py
+# 的边界用例钉住它。删除会抹掉协议执行的可复核痕迹。
 LEN_WINDOW_L_WIDE = (0.60, 0.97)
 assert (LEN_WINDOW_L[1] < LEN_WINDOW_L_WIDE[1] < LEN_WINDOW_S[0]),     "窗链必须单调：标准 L 上界 < 放宽上界 < S 下界（0.98~1.02 重叠会失效）"
 COMPRESSION_TYPES = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
@@ -115,11 +118,14 @@ COMPRESSION_TYPES = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
 TYPE_LEN_SPEC: dict[str, tuple[float, float] | None] = {
     "SUBTEXT_ERASE": LEN_WINDOW_L,
     "LITERARY_OVERWRITE": LEN_WINDOW_L,
-    # 以下 4 类已判不可产出：窗保留（校验拒），调度跳过（UNPRODUCTIVE_TYPES）
-    "RHYTHM_FLATTEN": LEN_WINDOW_L,
-    "ABSTRACT_SUMMARY": LEN_WINDOW_L,
-    "EMOTION_LABEL": LEN_WINDOW_L,
-    "DIALOGUE_EXPOSITION": LEN_WINDOW_L,
+    # 以下 4 类已判「本代模型不可产出」：显式写 None（区别于漏填——
+    # 覆盖断言保证 6 类都有键）。调度侧由 UNPRODUCTIVE_TYPES 排除，
+    # 校验侧由 window_for 返回的 EXCLUDED_WINDOW 哨兵显式拒收——
+    # 三层各司其职，None 不再承担「排除」语义。
+    "RHYTHM_FLATTEN": None,
+    "ABSTRACT_SUMMARY": None,
+    "EMOTION_LABEL": None,
+    "DIALOGUE_EXPOSITION": None,
 }
 UNPRODUCTIVE_TYPES: frozenset[str] = frozenset({
     "RHYTHM_FLATTEN", "ABSTRACT_SUMMARY", "EMOTION_LABEL", "DIALOGUE_EXPOSITION",
@@ -139,12 +145,26 @@ def dispatchable(ctypes: list[str]) -> list[str]:
     return keep
 
 
-def window_for(ctype: str) -> tuple[float, float] | None:
+# 「排除」哨兵（会审整改：None=any 是「不约束」，不是「排除」——两个语义
+# 必须显式区分，不得静默当 any）。window_for 对不可产出类返回它；
+# window_accepts / judge_verify 都有显式分支接住。
+EXCLUDED_WINDOW = "excluded"
+
+
+def window_for(ctype: str):
+    """排除态优先于窗值：不可产出类返回 EXCLUDED_WINDOW（显式排除），
+    其余查表（窗 or None=any）。全仓无 TYPE_LEN_SPEC[t] 直接下标——
+    只有这里读（监督方核对结论，2026-09-20）。"""
+    if ctype in UNPRODUCTIVE_TYPES:
+        return EXCLUDED_WINDOW
     return TYPE_LEN_SPEC.get(ctype)
 
 
 def window_accepts(ratio: float, win) -> bool:
-    """闭区间判定：win=None 不约束（any）。"""
+    """闭区间判定：win=None 不约束（any）；EXCLUDED 一律不接受（显式分支，
+    不是 any 的静默直通）。"""
+    if win is EXCLUDED_WINDOW:
+        return False
     if win is None:
         return True
     return win[0] <= ratio <= win[1]
@@ -159,7 +179,9 @@ def len_directive_for(ctype: str) -> str:
 
 
 def reject_status(why: str) -> str:
-    """verify 拒收原因 → 落库状态：越窗走 rejected_length，其余 rejected_drift。"""
+    """verify 拒收原因 → 落库状态：越窗走 rejected_length，
+    排除态（excluded_type）走 rejected_drift（类型级排除不是长度问题），
+    其余 rejected_drift。"""
     if (why or "").startswith("len_window"):
         return "rejected_length"
     return "rejected_drift"
@@ -589,6 +611,10 @@ def judge_verify(v: dict | None, ratio: float,
         return False, drift, "ungrammatical"
     if drift > DRIFT_MAX:
         return False, drift, f"drift={drift:.2f}"
+    if window is EXCLUDED_WINDOW:
+        # 排除态显式分支（会审整改）：不可产出类的任何新样本一律拒收，
+        # 理由带 excluded_type 前缀——与长度越窗（len_window）分诊可区分。
+        return False, drift, "excluded_type"
     if window is not None:
         # bal-v2 方向窗（闭区间）：窗界在全局界内，设窗时窗检查即全覆盖。
         # len_window 前缀是状态分诊键——reject_status 靠它落 rejected_length。

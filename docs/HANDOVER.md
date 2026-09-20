@@ -218,6 +218,19 @@ L上界<S下界模块断言防重叠）+ 压缩型 prompt 60%~90% 指令 + judge
 类型混杂（L 侧=LITERARY_OVERWRITE+SUBTEXT_ERASE），N5 分层读数解读
 时必须带类型注记。
 
+**「本代模型不可产出」清单与复核条件**（c974385 定论，依据提案 §1.5
+预注册协议两轮上限）：
+· 不可产出 4 类：ABSTRACT_SUMMARY / RHYTHM_FLATTEN / EMOTION_LABEL /
+  DIALOGUE_EXPOSITION——round-1 0/3×4、round-2 放宽 +0.05 后 0/4×4、
+  kimi 换生成器同样失败（EXP-BAL2-L1/L2/DIAG 三轮证据，503=0）。
+  是**类型问题**（该变量天然不压缩或压缩即病句），不是单模型问题。
+· 排除的实现是三态：调度 UNPRODUCTIVE_TYPES 跳过 / 校验 EXCLUDED_WINDOW
+  哨兵显式拒收（excluded_type 理由）/ TYPE_LEN_SPEC 显式 None 键
+  （与漏填可区分）。None 不承担「排除」语义——any（不约束）与排除是两个哨兵。
+· **复核条件**（满足其一可重开这 4 类）：① 出现更强的生成模型
+  （可通过 20 对 pilot 复验）；② 修改类型规格本身（如放宽压缩下限）——
+  属规格变更，须按提案 §3 重新预注册。
+
 ## 0.6 接手者第一天照这个做
 
 ```bash

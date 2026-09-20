@@ -64,8 +64,7 @@ def test_window_accepts_none_window_is_any():
 
 # ── 2. 类型分派 ─────────────────────────────────────────────
 
-COMPRESSION = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
-               "LITERARY_OVERWRITE", "EMOTION_LABEL", "DIALOGUE_EXPOSITION")
+COMPRESSION = CC.COMPRESSION_TYPES   # 直接引用生产常量（会审整改：不本地复制）
 
 
 def test_compression_types_two_rounds_verdict():
@@ -76,10 +75,15 @@ def test_compression_types_two_rounds_verdict():
     ② 调度侧由 UNPRODUCTIVE_TYPES 排除（不烧预算），显式请求也跳过。"""
     productive = {"SUBTEXT_ERASE", "LITERARY_OVERWRITE"}
     for t in COMPRESSION:
-        # ① 校验窗：6 类全在窗（含不可产出类——防污染层）
-        assert CC.window_for(t) == CC.LEN_WINDOW_L, \
-            f"{t} 必须保留 L 窗（校验侧；删键=静默 any=污染）"
-    # ② 调度排除：4 类在 UNPRODUCTIVE，2 产型不在
+        if t in productive:
+            assert CC.window_for(t) == CC.LEN_WINDOW_L, f"{t} 产线标准 L 窗"
+        else:
+            # 排除态是显式哨兵，不是 None（any）——静默 any=污染路径
+            assert CC.window_for(t) is CC.EXCLUDED_WINDOW, \
+                f"{t} 应返回排除哨兵（EXCLUDED_WINDOW），不是 None/any"
+        # 6 类在 TYPE_LEN_SPEC 都有键（4 类显式 None=声明，与漏填可区分）
+        assert t in CC.TYPE_LEN_SPEC, f"{t} 缺键——漏填会静默降级 any"
+    # 调度排除：4 类在 UNPRODUCTIVE，2 产型不在
     assert CC.UNPRODUCTIVE_TYPES == frozenset(set(COMPRESSION) - productive)
     assert productive & CC.UNPRODUCTIVE_TYPES == set()
 
@@ -94,16 +98,19 @@ def test_unproductive_types_skipped_at_dispatch():
 
 
 def test_unproductive_window_still_rejects_typical_ratios():
-    """校验侧防污染层：不可产出类的典型样本（不压缩，ratio≈1.05）必须被
-    窗拒收——即便某种旁路让它们进来了，也进不了 ok 语料。"""
+    """校验侧防污染层：排除态的任何样本（含 ratio 落在 L 窗内的）一律
+    拒收，理由 excluded_type（显式分支）——即便某种旁路让它们进来，
+    也进不了 ok 语料。"""
     for t in CC.UNPRODUCTIVE_TYPES:
         win = CC.window_for(t)
-        assert win is not None, f"{t} 的窗不许删（防污染层）"
-        ok, _d, why = CC.judge_verify(
-            {"contradicts_source": False, "ungrammatical": False, "drift": 0.1},
-            1.05, window=win)
-        assert not ok and why.startswith("len_window"), \
-            f"{t} 的不压缩样本必须被校验拒收（len_window）"
+        assert win is CC.EXCLUDED_WINDOW, f"{t} 的排除哨兵丢了"
+        assert CC.window_accepts(0.75, win) is False, "排除态不接受任何 ratio"
+        for ratio in (0.75, 1.05):          # 窗内窗外都拒——排除不是长度问题
+            ok, _d, why = CC.judge_verify(
+                {"contradicts_source": False, "ungrammatical": False, "drift": 0.1},
+                ratio, window=win)
+            assert not ok and why.startswith("excluded_type"), \
+                f"{t} ratio={ratio} 必须被排除态拒收（excluded_type）"
 
 
 def test_inflation_and_control_stay_any():
