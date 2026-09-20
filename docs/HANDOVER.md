@@ -195,6 +195,17 @@ AI 味词表里的东西（`凤毛麟角`/`心中一紧`/四字格）——它�
 ` 的补丁在本机会吃掉转义
 （本日 3 次事故），含转义的编辑一律用 Edit 工具。
 
+### 0.7b bal-v2 长度方向重生成管线落地（2026-09-20，`7f87fc3`）
+
+按 `docs/proposal-length-balanced-regen-20260920.md`（三轮会审定稿）**规格测试先行**实现：
+TYPE_LEN_SPEC（6 压缩型强制 L 窗 [0.60,0.92] 闭区间，膨胀型/控制臂 any；
+L上界<S下界模块断言防重叠）+ 压缩型 prompt 60%~90% 指令 + judge_verify
+越窗 → rejected_length + classify_llm_failure/batch_llm_health（503=0 批次
+先决判据）+ final_report.gate_bal_reading（先最新 split 再集内最高，
+半成品集不顶替）。**全量 580 例全绿**（基线 553 + 27 项规格新测）。
+剩余项：bal-v2 L 侧重生成放量（pilot → ≥200 对）→ bal-v2 建集 →
+benchmark_run + falsify → 档一读数接任。
+
 ## 0.6 接手者第一天照这个做
 
 ```bash
