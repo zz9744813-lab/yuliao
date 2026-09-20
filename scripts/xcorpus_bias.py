@@ -168,11 +168,18 @@ def main() -> None:
         print(f"\ndry-run：预计 {len(CORPORA) * args.per_corpus * len(judges)} 次调用，未发起")
         return
 
+    # 批量防呆①（P0 死 id 事故）：dry-run 之后、真调用之前问一遍网关。
+    # 池外评委的表现是 failed=整批，而"没货"与"名字错了"在计数上完全同形。
+    pf.require_models(judges, source="xcorpus_bias")
+    _counter["first_error"] = ""          # 本轮失败原因只属于本轮
+
     print(f"\n共 {len(jobs)} 次调用…")
     with ThreadPoolExecutor(max_workers=args.conc) as pool:
         for _ in pool.map(lambda j: run_one(*j), jobs):
             pass
     print(f"完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
+    if _counter["failed"]:
+        print(f"       首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")
     _report()
 
 

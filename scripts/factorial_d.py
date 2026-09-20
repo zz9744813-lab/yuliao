@@ -3,12 +3,14 @@
 import json, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from app import config, db
 from app.context_ablation import neighbors
 from app.gateway import chat
 from app.ids import new_id
 from app.models import Candidate, Experiment, Segment
 from app.prompt_render import render
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 USER = """你在续写一部长篇小说。下面是最近两段前文。
 
@@ -26,6 +28,8 @@ SYS = "你是中文小说写作者，只输出正文。"
 MODELS = [config.DEFAULT_LLM_MODEL, "meta/muse-spark-1.3-contributor"]
 
 def main():
+  # 批量防呆①（P0 死 id 事故）：池外名字=整批 failed，幂等重跑只会再failed一遍
+  pf.require_models(MODELS, source="factorial_d")
   with db.session() as s:
     exp = s.get(Experiment, "EXP-0911-B82D")
     segs = {x.id: x for x in s.query(Segment).filter(

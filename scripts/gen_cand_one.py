@@ -24,6 +24,7 @@ from app.gateway import chat
 from app.models import Candidate, Experiment, Frame, Segment
 from app.prompt_render import render
 from app.reconstruct import build_reconstruct_user, RECON_PROMPT_VERSION
+import preflight_models as pf
 from phase15_gen import RECON_CTX_USER
 from factorial_d import USER as CTXONLY_USER
 
@@ -74,6 +75,9 @@ def main():
                          "消融、进不了盲评，只做盲评语料时可 --groups B0,C 省钱。")
     a = ap.parse_args()
     models = [m.strip() for m in a.models.split(",") if m.strip()]
+    # 批量防呆①（P0 死 id 事故）：并行切片进程最容易带着池外名字反复白跑，
+    # 它的幂等键查不到"失败"行，于是同一批帧被反复重发、计数却在涨。
+    pf.require_models(models, source="gen_cand_one")
     want = {x.strip() for x in a.groups.split(",") if x.strip()}
     groups = [g for g in GROUPS if g[0] in want]
     if not groups:

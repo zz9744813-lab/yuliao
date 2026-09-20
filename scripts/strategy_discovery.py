@@ -43,6 +43,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import heldout_eval as he  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from app import db  # noqa: E402
 from app.gateway import chat  # noqa: E402
 from app.models import ExpressionStrategy  # noqa: E402
@@ -161,6 +162,8 @@ def main() -> None:
     if args.dry_run or n < 20:
         print("dry-run 或样本不足：未发起")
         return
+    # 批量防呆①（P0 死 id 事故）：归纳只用 SUMMARIZE_MODEL，本地 embedding 不碰网关
+    pf.require_models([SUMMARIZE_MODEL], source="strategy_discovery")
 
     from fastembed import TextEmbedding
     emb = TextEmbedding(model_name=EMB_MODEL)

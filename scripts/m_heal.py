@@ -3,14 +3,18 @@
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import db, experiments
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+from app import config, db, experiments
 from app.frames_prompts import EXTRACT_V1, PROMPT_VERSION
 from app.models import Experiment, Frame, Segment
 from app.prompt_render import render
 from app.residual_sem import parse_llm_json
 from app.gateway import chat
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 EXP = "EXP-0911-B82D"
+# 批量防呆①（P0 死 id 事故）：这里连抽带下游 stage，名字错了会一路"补齐 0 个"
+pf.require_models([*config.EXTRACTOR_MODELS, "moonshotai/kimi-k3"], source="m_heal")
 with db.session() as s:
     exp = s.get(Experiment, EXP)
     segs = {x.id: x for x in s.query(Segment).filter(

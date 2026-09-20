@@ -43,6 +43,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from app import config, db  # noqa: E402
 from app.gateway import chat  # noqa: E402
 from app.models import BenchmarkItem, BenchmarkRun, BenchmarkSet  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 PV = "bench_task_v1"
 
@@ -122,7 +123,10 @@ def parse_pick(text: str) -> str | None:
 
 
 _lock = threading.Lock()
-_stat = {"ok": 0, "failed": 0}
+# first_error：本轮首条**调用异常原文**。failed 里混着两种完全不同的病——
+# "模型真答不出"（parse_pick 返回 None）和"整批 503"（异常被下面吞成 None）。
+# 只报计数分不开，正是第五批被误判成"池子耗尽"的机制。
+_stat = {"ok": 0, "failed": 0, "first_error": ""}
 
 
 def run_set(*, set_id: str, models: list[str], task: str = "preference",
@@ -143,6 +147,9 @@ def run_set(*, set_id: str, models: list[str], task: str = "preference",
           f"（task={task}）")
     if dry_run:
         return {"items": len(rows), "models": models}
+    # 批量防呆①（P0 死 id 事故）：池外模型=整批 failed，读数会像"评委不行"
+    pf.require_models(models, source="benchmark_run")
+    _stat["first_error"] = ""          # 本轮失败原因只属于本轮
 
     def one(job):
         r, m = job
@@ -154,8 +161,11 @@ def run_set(*, set_id: str, models: list[str], task: str = "preference",
                        purpose="benchmark", prompt_version=PV,
                        temperature=0.0, max_tokens=800)
             pick = parse_pick(res.text)
-        except Exception:                            # noqa: BLE001
+        except Exception as e:                        # noqa: BLE001
             pick = None
+            with _lock:
+                if not _stat["first_error"]:
+                    _stat["first_error"] = pf.redact(str(e))
         with _lock:
             _stat["ok" if pick else "failed"] += 1
         return {"id": r["id"], "pick": pick, "ans": r["ans"] if task == "detection"
@@ -198,6 +208,9 @@ def run_set(*, set_id: str, models: list[str], task: str = "preference",
         out[m] = {"n": n, "correct": k, "acc": (k / n if n else 0.0), "ci": [lo, hi],
                   "by_type": detail["by_type"]}
     print(f"完成（{dt / 60:.1f} 分钟）；ok={_stat['ok']} failed={_stat['failed']}")
+    if _stat["failed"]:
+        # 有异常就报原文；全没异常说明 failed 是"解析不出选项"（模型答题问题），两者分开写。
+        print(f"       首条错误原文：{_stat['first_error'] or '（无调用异常——failed 全是解析不出选项）'}")
     return out
 
 

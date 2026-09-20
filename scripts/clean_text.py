@@ -54,6 +54,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from app import db  # noqa: E402
 from app.gateway import chat  # noqa: E402
 from app.models import Segment  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 RULES_PV = "clean_rules_v1"
 LLM_PV = "clean_llm_v1"
@@ -314,6 +315,8 @@ def main() -> None:
                         if needs_llm(x.text_clean or x.text))
             print(f"dry-run：需 LLM 的段 {n}")
             return
+        # 批量防呆①（P0 死 id 事故）：拼音还原整批走 LLM_MODEL，池外=白跑一轮
+        pf.require_models([LLM_MODEL], source="clean_text")
         print(json.dumps(run_llm(conc=args.conc, limit=args.limit), ensure_ascii=False))
         report()
         return

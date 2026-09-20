@@ -2,6 +2,7 @@
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from app import config, db, experiments
 from app.context_ablation import neighbors
 from app.gateway import chat
@@ -9,6 +10,7 @@ from app.ids import new_id
 from app.models import Candidate, Experiment, Frame, Segment, Work
 from app.prompt_render import render
 from app.reconstruct import build_reconstruct_user, RECON_PROMPT_VERSION
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from scripts.phase15_gen import RECON_CTX_USER, RECON_CTX_SYSTEM
 from scripts.factorial_d import USER as CTXONLY_USER, SYS as CTXONLY_SYS
 
@@ -51,6 +53,9 @@ with db.session() as s:
         "judge_human_naturalness": False})
     eid = exp.id
 print("v2 实验:", eid, flush=True)
+
+# 批量防呆①（P0 死 id 事故）：抽取走 stage 的模型名、候选走 MODELS，两处都要在册
+pf.require_models([*config.EXTRACTOR_MODELS, *MODELS], source="v2_rebuild")
 
 with db.session() as s:
     exp = s.get(Experiment, eid)

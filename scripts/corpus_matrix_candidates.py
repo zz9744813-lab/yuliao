@@ -3,12 +3,14 @@
 import json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from app import config, db, experiments
 from app.context_ablation import neighbors
 from app.gateway import chat
 from app.models import Candidate, Experiment, Frame, Segment, Work
 from app.prompt_render import render
 from app.reconstruct import build_reconstruct_user, RECON_PROMPT_VERSION
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from scripts.phase15_gen import RECON_CTX_USER, RECON_CTX_SYSTEM
 from scripts.factorial_d import USER as CTXONLY_USER, SYS as CTXONLY_SYS
 
@@ -52,6 +54,8 @@ def b_ctxonly(s, seg, f):
                   prev1=(nb["prev1"].text if nb["prev1"] else "（无）"))
 
 def main():
+    # 批量防呆①（P0 死 id 事故）：池外模型的表现是整批 failed，与"这轮没货"同形
+    pf.require_models(MODELS, source="corpus_matrix_candidates")
     with db.session() as s:
         eids = [r[0] for r in s.query(Experiment.id).filter(
             Experiment.config.like('%"seg_version": 2%'),

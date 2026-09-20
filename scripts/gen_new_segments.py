@@ -36,6 +36,7 @@ from app.models import Candidate, Experiment, Frame, Segment, Work  # noqa: E402
 from app.near_dup import train_sampling_pool               # noqa: E402
 from app.reconstruct import RECON_PROMPT_VERSION, build_reconstruct_user  # noqa: E402
 from corpus_matrix_candidates import MODELS, b_ctx, gen_group  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 MIN_HUMAN_CHARS = 40        # 与既有盲评批一致（B82D 段落全部 ≥40 字）
 
@@ -80,6 +81,9 @@ def main() -> None:
         if args.dry_run:
             print("\ndry-run：未写库")
             return
+        # 批量防呆①（P0 死 id 事故）：这个脚本会新建成一条实验配置，
+        # 名字写进 cfg 后就再没人检查——池外抽取器=整批 failed 帧 + 空候选池。
+        pf.require_models([config.EXTRACTOR_MODELS[0], *MODELS], source="gen_new_segments")
 
         cfg = {
             "n_segments": len(segs),

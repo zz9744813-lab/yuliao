@@ -17,9 +17,12 @@
 8. 入口闸门统一（`preflight_block`/`require_models`）与"失败日报自带原因"：
    熔断行、完成行、`controlled_corruption` 的 DB 侧首条异常都必须能自己说出挂的原因
    ——2026-09-20 第五批扩产就是因为只报计数不报原因，把 100% 的 503 误判成了"池子耗尽"。
+9. 闸门覆盖面是**普查**出来的：scripts/ 下每个发 LLM 调用的脚本（含经 stage 间接发的）
+   都得带闸门，漏一个测试当场红，不靠人记得改过哪几个。
 """
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -443,3 +446,24 @@ def test_controlled_corruption_first_error_reads_persisted_exception():
     assert "\n" not in line and "503" in line
     assert "长度比" not in line, "把语义拒收理由当故障报出来，等于又一次误导归因"
     assert CC._first_error("EXP-GATE-NONE") == ""
+
+
+# ── 覆盖面普查（P0 续跑 2026-09-20）──────────────────────────────
+
+_SENDS = re.compile(r"(?<!\w)chat\(|\bstage_\w+\(")     # 自己发 或 经引擎 stage 发
+_GATED = re.compile(r"require_models|preflight_block")
+
+
+def test_every_llm_entrypoint_in_scripts_carries_a_preflight_gate():
+    """scripts/ 下凡是会发出 LLM 调用的脚本，都必须先过预检闸门。
+
+    为什么写成普查、而不是"把改过的脚本名一个个列出来"：(b) 的验收口径是
+    **每个 LLM 入口**，而覆盖面这种东西人工清点必漏——本轮就抓到 xcorpus_bias
+    上一轮自以为接了、其实没接。普查跑一次几十毫秒，漏一个当场红一条。
+    经 `experiments.stage_*` 间接触发的也算入口：第五批的 0 帧正是死在抽取 stage 里。
+    """
+    scripts = sorted((ROOT / "scripts").glob("*.py"))
+    sends = [p for p in scripts if _SENDS.search(p.read_text(encoding="utf-8"))]
+    bad = [p.name for p in sends if not _GATED.search(p.read_text(encoding="utf-8"))]
+    assert len(sends) >= 15, f"正则失效了？只认出 {len(sends)} 个发调用的脚本"
+    assert not bad, f"这些 LLM 入口没有预检闸门（池外名字=整批白跑）：{bad}"

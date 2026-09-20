@@ -2,11 +2,13 @@
 import json, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from app import db
 from app.context_ablation import neighbors
 from app.gateway import chat
 from app.models import Candidate, Experiment, Frame, Segment
 from app.prompt_render import render
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from scripts.phase15_gen import RECON_CTX_USER, RECON_CTX_SYSTEM, CTX_MODELS
 
 with db.session() as s:
@@ -15,6 +17,8 @@ with db.session() as s:
         Segment.id.in_(exp.config["segment_ids"])).all()}
     failed = s.query(Candidate).filter_by(experiment_id=exp.id,
                                           prompt_version="recon_ctx_v1", status="failed").all()
+    # 批量防呆①：重发用的就是这批候选自己记着的 model，池外名字=再failed一遍
+    pf.require_models(sorted({c.model for c in failed}), source="ctx_retry")
     n = 0
     for c in failed:
         frame = s.get(Frame, c.frame_id)

@@ -3,8 +3,12 @@ judges/candidates 等 Matrix 定稿后由专门脚本驱动。"""
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import db, experiments
+from app import config, db, experiments
 from app.models import Experiment, Work
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
+
+# 批量防呆①（P0 死 id 事故）：整轮只有抽帧一类调用，池外名字=四语料全灭
+pf.require_models(config.EXTRACTOR_MODELS, source="corpus_matrix_extract")
 
 CORPORA = [("琼明神女录（精校）", "corpus01"),
            ("将夜（猫腻）", "corpus02"),

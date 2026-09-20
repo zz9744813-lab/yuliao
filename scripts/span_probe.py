@@ -34,8 +34,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 import heldout_eval as he  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from app import db  # noqa: E402
 from app.gateway import chat  # noqa: E402
 from app.models import Candidate, JudgeRun, Segment  # noqa: E402
@@ -149,6 +151,8 @@ def _share(a: str, b: str, k: int = 6) -> bool:
 
 
 def run(models, conc) -> None:
+    # 批量防呆①（P0 死 id 事故）：池外模型的表现是 failed=整批，与"没货"同形
+    pf.require_models(models, source="span_probe")
     items = annotated_items()
     jobs = [(it, m) for m in models for it in items]
     print(f"待探针文本 = {len(items)} × {len(models)} 评委 = {len(jobs)} 次调用")

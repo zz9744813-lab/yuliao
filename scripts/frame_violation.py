@@ -47,6 +47,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import heldout_eval as he  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from app import db  # noqa: E402
 from app.gateway import chat  # noqa: E402
 from app.models import Candidate, Frame, JudgeRun, ReviewItem, Segment  # noqa: E402
@@ -229,6 +230,8 @@ def main() -> None:
         print("dry-run：未发起")
         return
     models = [m.strip() for m in args.models.split(",") if m.strip()]
+    # 批量防呆①（P0 死 id 事故）：池外模型的表现是 failed=整批，与"没货"同形
+    pf.require_models(models, source="frame_violation")
     jobs = [(it, m) for m in models for it in items]
     with ThreadPoolExecutor(max_workers=args.conc) as pool:
         for _ in pool.map(lambda j: one(*j), jobs):

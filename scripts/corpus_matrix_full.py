@@ -3,10 +3,15 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-from app import db, experiments
+from app import config, db, experiments
 from app.models import Experiment, Frame
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 EIDS = ["EXP-0914-C812", "EXP-0914-FF7B", "EXP-0914-EE18", "EXP-0914-6DD3"]
+
+# 批量防呆①（P0 死 id 事故）：抽取走的是 stage 里的模型名，池外=整批 failed，
+# 而 gap-fill 会把"名字错了"重刷成"再抽一次"，看不出来。
+pf.require_models(config.EXTRACTOR_MODELS, source="corpus_matrix_full:抽取")
 
 for eid in EIDS:
     print("==", eid, flush=True)
@@ -19,6 +24,7 @@ for eid in EIDS:
         print(f"  extract: ok={st.get('ok')} repaired={st.get('repaired')} failed={st.get('failed')}", flush=True)
 
 from corpus_matrix_candidates import MODELS  # noqa: E402
+pf.require_models(MODELS, source="corpus_matrix_full:候选")   # 批量防呆①
 import json  # noqa: E402
 from app.context_ablation import neighbors  # noqa: E402
 from app.gateway import chat  # noqa: E402
