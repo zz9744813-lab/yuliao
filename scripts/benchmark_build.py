@@ -310,7 +310,8 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
                                 "require_src_ok": True,
                                 "require_not_ungrammatical": True,
                                 "position_seed": seed,
-                                "ctx": "near1"},
+                                "ctx": "near1",
+                                "split": 2},
                           note="长度平衡判别题：S/L 各半，读数不被长度先验污染")
         s.add(st)
         s.flush()

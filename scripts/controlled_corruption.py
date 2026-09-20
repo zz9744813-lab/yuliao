@@ -1509,7 +1509,10 @@ def main() -> None:
         return
     if args.split_benchmark >= 0:
         n = args.split_benchmark or None
-        out = split_benchmark(n=n, seed=args.seed, dry_run=args.dry_run)
+        # --exp 透传（监督方实测缺口）：不限定会混入旧实验的无窗样本，
+        # 破坏 bal-v2 的强制长度方向性质；空=全库（旧行为，供对照）。
+        out = split_benchmark(n=n, seed=args.seed, dry_run=args.dry_run,
+                             exp=(args.exp or None) or None)
         print(json.dumps(out, ensure_ascii=False))
         return
     if args.recheck:
