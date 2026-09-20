@@ -23,7 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app import api as api_mod
 from app import db
 from app.main import app
-from app.models import Candidate, Experiment, Frame, ReviewItem, Segment, Work
+from app.models import (Candidate, Experiment, Frame, ReviewItem,
+                        ReviewPresentation, Segment, Work)
 
 client = TestClient(app)
 
@@ -118,35 +119,73 @@ def test_rejudge_overwrites_with_rejudged_flag():
     assert hv["n_verdicts"] == 2
 
 
-def test_rejudge_refused_when_mapping_lost():
-    """已判题 + 映射丢失（模拟服务重启）+ 投 A/B → 必须 409。"""
+def test_rejudge_refused_when_presentation_gone():
+    """已判题 + 呈现不存在（A01 落库前的历史题）+ 投 A/B → 必须 409。
+
+    A01 后映射持久化在 review_presentations，进程重启不再是丢失场景；
+    本测试把呈现行删掉，模拟「历史题从没被新代码端过」。"""
     _reset()
     _seed("EXP-RJ3", "rj3")
     item = client.get("/experiments/EXP-RJ3/review/next?batch=rj3").json()
     assert _judge(item, "A").status_code == 200
-    api_mod._BLIND_MAP.clear()          # 模拟进程重启：映射全丢
+    with db.session() as s:
+        s.query(ReviewPresentation).filter_by(
+            review_id=item["review_id"]).delete()
+        s.commit()
+    api_mod._BLIND_MAP.clear()          # 模拟进程重启：进程内映射全丢
     r = _judge(item, "B")
-    assert r.status_code == 409, f"映射丢失的改判应拒绝，实得 {r.status_code}: {r.text[:200]}"
+    assert r.status_code == 409, f"无呈现的历史题改判应拒绝，实得 {r.status_code}: {r.text[:200]}"
     # 且原判定没被污染
     with db.session() as s:
         hv = s.get(ReviewItem, item["review_id"]).human_verdict
     assert hv["n_verdicts"] == 1 and hv["rejudged"] is False
 
 
-def test_pending_mapping_lost_still_records_raw():
-    """待判题 + 映射丢失：照常落库，但如实标注 mapping_lost（旧行为不能回归）。"""
+def test_rejudge_after_restart_uses_persisted_presentation():
+    """A01：重启（进程内映射清空）后改判——按持久化呈现解读，不再 409。"""
+    _reset()
+    _seed("EXP-RJ3B", "rj3b")
+    item = client.get("/experiments/EXP-RJ3B/review/next?batch=rj3b").json()
+    hs = _human_side(item)
+    human_vote = "A" if hs == "A" else "B"
+    assert _judge(item, human_vote).status_code == 200
+    api_mod._BLIND_MAP.clear()
+    r = _judge(item, human_vote)        # 改判仍投人类侧
+    assert r.status_code == 200, r.text[:200]
+    assert r.json()["resolved"] == "human", "持久化呈现兜底必须翻对 human/candidate"
+    with db.session() as s:
+        hv = s.get(ReviewItem, item["review_id"]).human_verdict
+    assert hv["rejudged"] is True and hv["presentation_id"]
+
+
+def test_pending_restart_falls_back_to_db_presentation():
+    """A01：待判题+重启——回退最近持久化呈现照常翻译，不再 mapping_lost。"""
     _reset()
     _seed("EXP-RJ4", "rj4")
     item = client.get("/experiments/EXP-RJ4/review/next?batch=rj4").json()
     api_mod._BLIND_MAP.clear()
     r = _judge(item, "A", [{"side": "A", "start": 0, "end": 2, "text": "xx", "kind": "用词"}])
     assert r.status_code == 200
-    assert r.json()["mapping_note"] and "mapping_lost" in r.json()["mapping_note"]
     with db.session() as s:
         hv = s.get(ReviewItem, item["review_id"]).human_verdict
-    assert hv["human_was_a"] is None
-    assert hv["annotations"][0]["target"] is None
-    assert hv["annotations"][0]["verified"] is None   # 无法校验，不是 False
+    assert hv["human_was_a"] is not None, "呈现持久化后重启不再丢映射"
+    assert hv["winner_resolved"] == ("human" if hv["human_was_a"] else "candidate")
+    assert hv["presentation_id"], "回退解读也要留呈现审计指针"
+    # 批注按持久化呈现翻译 target（不再是 None）
+    assert hv["annotations"][0]["target"] in ("human", "candidate")
+
+
+def test_pending_never_served_records_raw():
+    """从未被新代码端过的历史待判题（无呈现行）直投：如实记原始 A/B。"""
+    _reset()
+    rid = _seed("EXP-RJ4B", "rj4b")[0]   # 不走 next/serve——不产生呈现行
+    r = client.post(f"/review/{rid}/verdict",
+                    json={"winner": "A", "reasons": [], "annotations": []})
+    assert r.status_code == 200
+    assert r.json()["mapping_note"] and "mapping_lost" in r.json()["mapping_note"]
+    with db.session() as s:
+        hv = s.get(ReviewItem, rid).human_verdict
+    assert hv["human_was_a"] is None and hv["winner_resolved"] == "A"
 
 
 def test_annotation_offset_verified():

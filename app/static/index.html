@@ -918,6 +918,7 @@ async function loadNext(){
       : `/experiments/${exp}/review/next?batch=${BATCH}&ctx=${CTX_SCOPE}`);
     curReview = item.review_id;
     curRaw = {A: item.text_a || '', B: item.text_b || ''};
+    curPid = item.presentation_id || '';
     diffStale = true;
     lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
     marks = {A: [], B: []};
@@ -953,7 +954,8 @@ function updateHistory(id, w, tags){
   const h = sessionHistory.find(x=>x.id===id);
   if(h){ h.winner = w; h.marks = deepCopyMarks(marks); h.tags = tags || h.tags; }
   else pushHistory({id, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
-                    ctx:lastCtx, tags:tags||[], marks:deepCopyMarks(marks), winner:w});
+                    ctx:lastCtx, tags:tags||[], marks:deepCopyMarks(marks), winner:w,
+                    pid:curPid});
 }
 
 let submitting = false;   // 交卷进行中：防连点/连按造成重复提交（第二次会被记成 rejudged）
@@ -978,7 +980,8 @@ async function sendVerdict(w){
       }
     }
     const resp = await api('/review/'+curReview+'/verdict',
-              {body:{winner:w, reasons:[], annotations}});
+              {body:{winner:w, reasons:[], annotations,
+                     presentation_id:curPid}});
     unlockChips(resp.tags||[]);
     const note = annotations.length ? ` · ${annotations.length} 处批注` : '';
     if(inRj){
@@ -986,11 +989,13 @@ async function sendVerdict(w){
       $('#rv-state').textContent = `改判完成 ✓（${WIN_LABEL[w]}${note}）`;
     } else {
       pushHistory({id:curReview, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
-                   ctx:lastCtx, tags:resp.tags||[], marks:deepCopyMarks(marks), winner:w});
+                   ctx:lastCtx, tags:resp.tags||[], marks:deepCopyMarks(marks), winner:w,
+                   pid:curPid});
       batchDone = Math.min(batchDone+1, batchTotal); renderProgress();
       $('#rv-state').textContent = `已记录：${WIN_LABEL[w]}${note}`;
     }
     curReview = null;
+    curPid = '';
     setTimeout(loadNext, 820);
   }catch(e){
     submitting = false;
@@ -1038,10 +1043,12 @@ function rejudgeLast(){
 }
 
 function enterRejudge(entry){
-  // 本会话快照里 A/B 位与原始一致，映射仍在服务端内存里，直接复用
+  // 本会话快照里 A/B 位与原始一致；pid 随快照走——提交绑定呈现，
+  // 服务端按当时排列解读（A01：不再依赖进程内最新映射）
   rejudge = {id: entry.id, prev: entry.winner};
   curReview = entry.id;
   curRaw = {A: entry.a, B: entry.b};
+  curPid = entry.pid || '';
   diffStale = true;
   marks = deepCopyMarks(entry.marks || {A:[], B:[]});
   markSeq = 0;
@@ -1073,6 +1080,7 @@ async function rejudgeFromDone(id){
     const item = await api(`/experiments/${curExp}/review/${id}/serve`);
     curReview = item.review_id;
     curRaw = {A: item.text_a || '', B: item.text_b || ''};
+    curPid = item.presentation_id || '';
     diffStale = true;
     lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
     marks = {A: [], B: []};
@@ -1100,6 +1108,8 @@ async function rejudgeFromDone(id){
 const MARK_KINDS = ['用词','解释过度','情绪直给','节奏','逻辑','意象','其他'];
 let marks = {A: [], B: []};
 let curRaw = {A: '', B: ''};
+let curPid = '';             // A01：本次端题的 presentation_id——提交必须绑定它，
+                             // 服务端按呈现当时的 A/B 排列解读，重出题不会改语义
 let markSeq = 0;
 let pendingSel = null;
 

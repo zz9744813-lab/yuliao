@@ -219,6 +219,28 @@ class ReviewItem(Base):
     reviewed_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
+class ReviewPresentation(Base):
+    """一次盲评「端题呈现」的不可变快照（审查 A01，2026-09-20）。
+
+    为什么需要：旧实现只按 review_id 存一份**进程内**映射，同一题重出题会覆盖
+    旧行——旧页面提交的 A/B 按新映射解读，用户偏好标签被静默污染（实测复现：
+    第一页 A=原文、第二页 A=候选，第一页提交 A 被记成 candidate）。每次端题
+    落一行：排列（human_first）、上下文口径、两侧文本指纹全部冻结；提交绑定
+    presentation_id 按呈现当时的排列解读。DB 持久化 = 跨重启、多 worker 共识；
+    旧客户端不带 id 时按该题最近一次持久化呈现回退。
+    """
+    __tablename__ = "review_presentations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("PR"))
+    review_id: Mapped[str] = mapped_column(String(32), index=True)
+    human_first: Mapped[bool] = mapped_column(Boolean)   # True=端出时 A 侧是人类原文
+    ctx_mode: Mapped[str] = mapped_column(String(40), default="")
+    text_a_sha: Mapped[str] = mapped_column(String(16))  # 呈现冻结的两侧文本指纹
+    text_b_sha: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
 class LlmCall(Base):
     __tablename__ = "llm_calls"
 

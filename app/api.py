@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import threading
@@ -31,7 +32,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import access, config, console, corpus, db, engine, experiments, observability
-from .models import Candidate, Experiment, Job, ReviewItem, Segment, Work, LlmCall
+from .models import (Candidate, Experiment, Job, ReviewItem, ReviewPresentation,
+                     Segment, Work, LlmCall)
 
 app = FastAPI(title="Language Genome — SemanticFrame Calibration Lab", version="0.2.0")
 
@@ -293,6 +295,11 @@ def _blind_put(review_id: str, entry: dict) -> None:
             _BLIND_MAP.pop(next(iter(_BLIND_MAP)))
 
 
+def _sha16(t: str) -> str:
+    """呈现两侧文本的短指纹（A01：冻结「当时端出的是什么」，审计追溯用）。"""
+    return hashlib.sha1((t or "").encode("utf-8")).hexdigest()[:16]
+
+
 def _blind_get(review_id: str) -> dict | None:
     with _BLIND_LOCK:
         return _BLIND_MAP.get(review_id)
@@ -419,10 +426,23 @@ def _serve_payload(s, r, ctx_scope: str = "near") -> dict:
     else:
         context, mode = near, f"near1/{ctx_mode}"
     human_first = random.random() < 0.5
-    _blind_put(r.id, {"human_first": human_first, "ctx_mode": mode})
     htext = _display_text(human)
     a, b = (htext, cand.text) if human_first else (cand.text, htext)
+    # A01（审查 2026-09-20）：每次端题落一行**不可变呈现**——旧实现按 review_id
+    # 只存一份进程内映射，同题重出题会覆盖旧行，旧页面提交的 A/B 被新映射
+    # 静默误译（实测：第一页 A=原文、第二页 A=候选，第一页投 A 记成 candidate，
+    # 污染最贵的用户偏好标签）。提交必须绑定 presentation_id 按呈现当时的排列
+    # 解读；DB 持久化 = 跨重启、多 worker 共识。呈现先落库再端出——
+    # 页面端出去的瞬间就可能被提交。
+    pr = ReviewPresentation(review_id=r.id, human_first=human_first,
+                            ctx_mode=mode,
+                            text_a_sha=_sha16(a), text_b_sha=_sha16(b))
+    s.add(pr)
+    s.commit()
+    _blind_put(r.id, {"human_first": human_first, "ctx_mode": mode,
+                      "presentation_id": pr.id})
     return {"review_id": r.id,
+            "presentation_id": pr.id,
             "context": context, "context_full": full, "ctx_mode": mode,
             "n_ctx": len(ctx_texts), "ctx_scope": ctx_scope,
             "text_a": a, "text_b": b,
@@ -556,6 +576,8 @@ class Verdict(BaseModel):
     winner: str  # A|B|tie|both_bad|cant_judge
     reasons: list[str] = []
     annotations: list[Annotation] = []
+    # A01：本次提交对应哪一次端题呈现（旧客户端不传 → 回退最近一次持久化呈现）
+    presentation_id: str = ""
 
 
 @app.post("/review/{review_id}/verdict")
@@ -563,18 +585,42 @@ def verdict(review_id: str, body: Verdict):
     from datetime import datetime
     if body.winner not in ("A", "B", "tie", "both_bad", "cant_judge"):
         raise HTTPException(400, "winner 必须是 A|B|tie|both_bad|cant_judge")
-    served = _blind_get(review_id)
-    human_first = served.get("human_first") if served else None
     with db.session() as s:
         r = s.get(ReviewItem, review_id)
         if not r:
             raise HTTPException(404, "not found")
+        # A01：A/B 的含义按「提交绑定的那次呈现」解读，不按全局最新映射——
+        # 重出题不再改变旧页面提交的语义。
+        served = None
+        presentation_id = (body.presentation_id or "").strip()
+        if presentation_id:
+            pr = s.get(ReviewPresentation, presentation_id)
+            if pr is None:
+                raise HTTPException(404, f"呈现 {presentation_id} 不存在")
+            if pr.review_id != review_id:
+                raise HTTPException(400, "presentation_id 与该题不匹配——"
+                                     "别拿别题的呈现提交")
+            served = {"human_first": pr.human_first, "ctx_mode": pr.ctx_mode,
+                      "presentation_id": pr.id}
+        else:
+            served = _blind_get(review_id)
+        human_first = served.get("human_first") if served else None
+        if human_first is None and not presentation_id:
+            # 进程内映射没了（重启/多 worker）：回退到该题最近一次持久化呈现。
+            pr = (s.query(ReviewPresentation).filter_by(review_id=review_id)
+                  .order_by(ReviewPresentation.created_at.desc(),
+                            ReviewPresentation.id.desc()).first())
+            if pr is not None:
+                human_first = pr.human_first
+                served = {"human_first": pr.human_first, "ctx_mode": pr.ctx_mode,
+                          "presentation_id": pr.id,
+                          "fallback": "latest_db_presentation"}
         prev = r.human_verdict if r.status == "done" else None
         # 改判纪律（2026-09-16）：已判题允许覆盖（改判），但只有映射还活着才能把
-        # A/B 翻回 human/candidate。映射丢了（服务重启）又要投 A/B 时宁可 409 拒绝，
-        # 也不让"原始 A/B"覆盖语义值——那会产生不知道按哪套解读的脏判定。
+        # A/B 翻回 human/candidate。映射丢了（A01 落库前的历史题）又要投 A/B 时
+        # 宁可 409 拒绝，也不让"原始 A/B"覆盖语义值——那会产生不知道按哪套解读的脏判定。
         if prev is not None and human_first is None and body.winner in ("A", "B"):
-            raise HTTPException(409, "该题已判过且本进程没有它的 A/B 映射（服务重启过）；"
+            raise HTTPException(409, "该题已判过且找不到它的 A/B 呈现（A01 落库前的历史）；"
                                      "请从「已判回顾」点改判重新端题")
         resolved = body.winner
         mapping_note = None
@@ -616,6 +662,8 @@ def verdict(review_id: str, body: Verdict):
             "winner_resolved": resolved,
             "mapping_note": mapping_note,
             "human_was_a": human_first,
+            # A01：本次判定按哪次呈现解读（审计追溯：排列/文本指纹见 review_presentations）
+            "presentation_id": (served or {}).get("presentation_id"),
             "ctx_mode": served.get("ctx_mode") if served else None,
             "reasons": body.reasons,
             "annotations": anns,
