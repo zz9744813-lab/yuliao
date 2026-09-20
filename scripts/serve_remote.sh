@@ -151,12 +151,17 @@ echo " 局域网 http://$LANIP:$PORT/"
 if [ -n "$URL" ]; then echo " 外网   $URL/"; else echo " 外网   未取到（看 $LOG）"; fi
 echo ""
 if [ -n "$TOKEN" ]; then
-  echo " 令牌   $TOKEN"
-  if [ -n "$URL" ]; then
-    echo ""
-    echo " 手机直接开这个（点一次换 cookie，之后免输）："
-    echo "   $URL/?t=$TOKEN"
-  fi
+  # 军师 P0 退回：令牌不许明文进终端/日志（会话记录、截图都会带走它）。
+  # 带令牌链接只写入 0600 文件，终端只提示位置。
+  LINK_FILE="$PROJ/data/review_token_link.txt"
+  umask 077
+  {
+    echo "# 手机直接开这个（点一次换 cookie，之后免输）；生成时间 $(date '+%F %T')"
+    if [ -n "$URL" ]; then echo "$URL/?t=$TOKEN"; else echo "(本次未取到外网 URL，局域网) http://$LANIP:$PORT/?t=$TOKEN"; fi
+  } > "$LINK_FILE"
+  chmod 600 "$LINK_FILE"
+  echo " 令牌   已写入 $TOKEN_FILE（不回显）"
+  echo " 带令牌链接 → $LINK_FILE （chmod 600，自行查看，勿转发）"
 else
   echo " 令牌文件缺失：$TOKEN_FILE"
 fi
