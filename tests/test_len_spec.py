@@ -68,15 +68,42 @@ COMPRESSION = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
                "LITERARY_OVERWRITE", "EMOTION_LABEL", "DIALOGUE_EXPOSITION")
 
 
-def test_six_compression_types_get_l_window():
-    """pilot round-1 证据分派（EXP-BAL2-L1，18 条实测）：
-    2 产型（67%）保持标准窗；4 弱型走放宽窗（提案 §1.5 的 +0.05 协议），
-    round-2 仍 <30% 的类型将移出窗并记「本代模型不可产出」。"""
-    std = {"SUBTEXT_ERASE", "LITERARY_OVERWRITE"}
+def test_compression_types_two_rounds_verdict():
+    """pilot 两轮 + kimi 诊断的定论（EXP-BAL2-L1/L2/DIAG，提案 §1.5 协议）。
+    三态语义（会审 qwen [严重] 修复）：
+    ① 6 类全部保留 L 窗——校验侧不放松，不可产出类的 1.0~1.46 样本必须被拒
+      （删键 = None = any = 坏样本以压缩标签混过全局卡 = 数据污染）；
+    ② 调度侧由 UNPRODUCTIVE_TYPES 排除（不烧预算），显式请求也跳过。"""
+    productive = {"SUBTEXT_ERASE", "LITERARY_OVERWRITE"}
     for t in COMPRESSION:
-        expected = CC.LEN_WINDOW_L if t in std else CC.LEN_WINDOW_L_WIDE
-        assert CC.window_for(t) == expected, \
-            f"{t} 应在 {'标准' if t in std else '放宽'} L 窗"
+        # ① 校验窗：6 类全在窗（含不可产出类——防污染层）
+        assert CC.window_for(t) == CC.LEN_WINDOW_L, \
+            f"{t} 必须保留 L 窗（校验侧；删键=静默 any=污染）"
+    # ② 调度排除：4 类在 UNPRODUCTIVE，2 产型不在
+    assert CC.UNPRODUCTIVE_TYPES == frozenset(set(COMPRESSION) - productive)
+    assert productive & CC.UNPRODUCTIVE_TYPES == set()
+
+
+def test_unproductive_types_skipped_at_dispatch():
+    """调度侧排除：不可产出类不进生成队列（显式请求也跳过）。"""
+    keep = CC.dispatchable(list(COMPRESSION))
+    assert sorted(keep) == ["LITERARY_OVERWRITE", "SUBTEXT_ERASE"], \
+        "6 压缩型里只有 2 产型可分派"
+    assert CC.dispatchable(["RHYTHM_FLATTEN"]) == [], "显式请求不可产出类 → 跳过"
+    assert CC.dispatchable(["EXPLICITIZE"]) == ["EXPLICITIZE"], "膨胀型不受影响"
+
+
+def test_unproductive_window_still_rejects_typical_ratios():
+    """校验侧防污染层：不可产出类的典型样本（不压缩，ratio≈1.05）必须被
+    窗拒收——即便某种旁路让它们进来了，也进不了 ok 语料。"""
+    for t in CC.UNPRODUCTIVE_TYPES:
+        win = CC.window_for(t)
+        assert win is not None, f"{t} 的窗不许删（防污染层）"
+        ok, _d, why = CC.judge_verify(
+            {"contradicts_source": False, "ungrammatical": False, "drift": 0.1},
+            1.05, window=win)
+        assert not ok and why.startswith("len_window"), \
+            f"{t} 的不压缩样本必须被校验拒收（len_window）"
 
 
 def test_inflation_and_control_stay_any():

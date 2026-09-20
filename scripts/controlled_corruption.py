@@ -100,15 +100,43 @@ COMPRESSION_TYPES = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
                      "LITERARY_OVERWRITE", "EMOTION_LABEL", "DIALOGUE_EXPOSITION")
 # 膨胀型与控制臂保持 any：膨胀型天然产 S（S 侧既有来源），控制臂是中性改写
 # 不许进方向窗（§7.5 纪律 2 的镜像）。S 窗已定义、边界用例已测，供显式指派用。
-# per-type 分派按 pilot round-1 证据（见上）：2 产型标准窗、4 弱型放宽窗。
+# per-type 分派按 pilot 两轮 + kimi 诊断的定论（提案 §1.5 协议上限两轮）：
+# · SUBTEXT_ERASE / LITERARY_OVERWRITE：deepseek 下 2/3=67%，产线保留标准窗；
+# · 其余 4 类两轮全灭（round-1 0/3×4；round-2 放宽 +0.05 后 0/4×4，ratio
+#   1.00~1.46；换 kimi 当生成器同样越窗 1.05~1.26 或直接生成失败，
+#   EXP-BAL2-DIAG）→ **类型问题，不是单模型问题**，记「本代模型不可产出」。
+#
+# 语义三分（会审 qwen [严重] 修复——None 是「无窗=any」，不是「排除」）：
+#   · window 窗口（TYPE_LEN_SPEC）：校验侧的长度闸。**6 类全部保留 L 窗**
+#     ——不可产出类的 ratio 1.0~1.46 样本必须被校验拒收，删键会让它们
+#     以压缩类型标签混过全局卡（0.55~1.8）——数据污染且入库不可逆；
+#   · UNPRODUCTIVE_TYPES：调度侧的排除。产线分派跳过这 4 类（不烧预算），
+#     显式请求也跳过并打印——「不再生成」与「校验仍拒」是两个不同的层。
 TYPE_LEN_SPEC: dict[str, tuple[float, float] | None] = {
     "SUBTEXT_ERASE": LEN_WINDOW_L,
     "LITERARY_OVERWRITE": LEN_WINDOW_L,
-    "RHYTHM_FLATTEN": LEN_WINDOW_L_WIDE,
-    "ABSTRACT_SUMMARY": LEN_WINDOW_L_WIDE,
-    "EMOTION_LABEL": LEN_WINDOW_L_WIDE,
-    "DIALOGUE_EXPOSITION": LEN_WINDOW_L_WIDE,
+    # 以下 4 类已判不可产出：窗保留（校验拒），调度跳过（UNPRODUCTIVE_TYPES）
+    "RHYTHM_FLATTEN": LEN_WINDOW_L,
+    "ABSTRACT_SUMMARY": LEN_WINDOW_L,
+    "EMOTION_LABEL": LEN_WINDOW_L,
+    "DIALOGUE_EXPOSITION": LEN_WINDOW_L,
 }
+UNPRODUCTIVE_TYPES: frozenset[str] = frozenset({
+    "RHYTHM_FLATTEN", "ABSTRACT_SUMMARY", "EMOTION_LABEL", "DIALOGUE_EXPOSITION",
+})
+# 压缩型的 spec 必须全覆盖：新增压缩型漏填会静默降级 any（同一条污染路径），
+# 本断言让它当场炸而不是静默放行。
+assert all(t in TYPE_LEN_SPEC for t in COMPRESSION_TYPES),     "COMPRESSION_TYPES 必须全部有窗——漏填=静默 any=污染"
+
+
+def dispatchable(ctypes: list[str]) -> list[str]:
+    """调度侧排除：不可产出类跳过（显式请求也跳过），打印被跳过清单。"""
+    keep = [t for t in ctypes if t not in UNPRODUCTIVE_TYPES]
+    skipped = [t for t in ctypes if t in UNPRODUCTIVE_TYPES]
+    if skipped:
+        print(f"[不可产出] 跳过 {len(skipped)} 类（pilot 两轮+kimi 诊断全灭，"
+              f"见 UNPRODUCTIVE_TYPES 注释）：{','.join(sorted(skipped))}")
+    return keep
 
 
 def window_for(ctype: str) -> tuple[float, float] | None:
@@ -1403,7 +1431,7 @@ def main() -> None:
 
     db.init_db()
     if args.fresh_benchmark > 0:
-        ctypes2 = [x.strip() for x in args.types.split(",") if x.strip()] or list(ALL_TYPES)
+        ctypes2 = dispatchable([x.strip() for x in args.types.split(",") if x.strip()] or list(ALL_TYPES))
         exp_id = args.exp or f"EXP-{time.strftime('%m%d')}-BENCH"
         with db.session() as s:
             # 断点续跑必须**复用本实验已有的基准段**，不能重新挑：
@@ -1484,7 +1512,8 @@ def main() -> None:
         print(json.dumps(out, ensure_ascii=False, indent=1))
         return
 
-    ctypes = [x.strip() for x in args.types.split(",") if x.strip()] or list(ALL_TYPES)
+    ctypes = dispatchable([x.strip() for x in args.types.split(",") if x.strip()]
+                          or list(ALL_TYPES))
     bad = [c for c in ctypes if c not in ALL_TYPES]
     if bad:
         raise SystemExit(f"未知类型 {bad}；可选 {list(ALL_TYPES)}")
