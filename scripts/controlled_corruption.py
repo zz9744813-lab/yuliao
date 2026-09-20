@@ -587,13 +587,16 @@ def run_one(s_pair: tuple, ctypes: list[str], *, exp_id: str, gen_model: str,
             # failed（empty_text 之类）允许重试，否则一次空返回就永久锁死这一格。
             # prompt_version 进 key：换了生成口径（v1→v2）时**允许重生成**同一格，
             # 否则修好的 prompt 永远覆盖不到旧格，数据集里会永久留着已知有缺陷的样本。
-            # generator_model__in：生成模型改名不该让"这格已做过"失效
-            # （否则断点续跑会把同一 (段,类型) 再劣化一遍，数据集里出现双份）
+            # generator_model 双形兼容：生成模型改名不该让"这格已做过"失效
+            # （否则断点续跑会把同一 (段,类型) 再劣化一遍，数据集里出现双份）。
+            # filter_by 只支持等值——in_ 必须走 filter()（filter_by(X__in=...)
+            # 抛 InvalidRequestError，实测，pilot 首跑即撞）
             dup = (s.query(ControlledCorruption)
                    .filter_by(segment_id=seg.id, corruption_type=ctype,
-                              generator_model__in=config.model_any(gen_model),
                               prompt_version=GEN_PV)
-                   .filter(ControlledCorruption.status != "failed").first())
+                   .filter(ControlledCorruption.generator_model
+                            .in_(config.model_any(gen_model)),
+                            ControlledCorruption.status != "failed").first())
         if dup is not None:
             with _lock:
                 _stat["skip"] += 1

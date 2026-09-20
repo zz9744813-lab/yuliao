@@ -78,9 +78,9 @@ def _sample_pairs(s, exp_id: str, n: int, seed: int) -> list[dict]:
 def _already(s, exp_id: str, model: str) -> set[str]:
     rows = (s.query(JudgeRun)
             .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND,
-                       model__in=config.model_any(model),
                        prompt_version=PREFERENCE_PROMPT_VERSION)
-            .filter(JudgeRun.status == "ok").all())
+            .filter(JudgeRun.model.in_(config.model_any(model)),
+                    JudgeRun.status == "ok").all())
     return {r.subject_id for r in rows}
 
 
@@ -124,9 +124,9 @@ def _report() -> None:
             for m in ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL):
                 rows = (s.query(JudgeRun)
                         .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND,
-                                   model__in=config.model_any(m),
                                    prompt_version=PREFERENCE_PROMPT_VERSION)
-                        .filter(JudgeRun.status == "ok").all())
+                        .filter(JudgeRun.model.in_(config.model_any(m)),
+                                JudgeRun.status == "ok").all())
                 pc = ph = other = 0
                 for r in rows:
                     w = (r.verdict or {}).get("winner_resolved")

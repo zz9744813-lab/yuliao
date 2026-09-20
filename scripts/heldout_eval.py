@@ -129,12 +129,13 @@ def resolve_exp(batch: str, db_path: Path | str | None = None) -> str:
 
 
 def _done(s, cid: str, model: str, pv: str, exp: str | None = None) -> bool:
-    # model__in（不是 model=）：历史行存的是已下线的旧 id，按新名精确查会把
-    # "已判过"看成"没判过"→ 重复烧额度并多写一行，κ 就在重复样本上算。
+    # model 双形兼容（不是 model=）：历史行存的是已下线的旧 id，按新名精确查
+    # 会把"已判过"看成"没判过"→ 重复烧额度并多写一行。
+    # filter_by 只支持等值——in_ 必须走 filter()（filter_by(X__in=...) 抛错）。
     return bool(s.query(JudgeRun).filter_by(
         experiment_id=exp or EXP, subject_type="candidate", subject_id=cid,
-        judge_kind="preference", model__in=config.model_any(model), prompt_version=pv,
-        status="ok").first())
+        judge_kind="preference", prompt_version=pv, status="ok")
+        .filter(JudgeRun.model.in_(config.model_any(model))).first())
 
 REVERSE_SUFFIX = "_rev"
 
