@@ -1,0 +1,77 @@
+{
+  "brief": {
+    "title": "灯下渡口",
+    "purpose": "原创工程验收小故事；非用户正式作品，检验钱物、承诺、伤势和上下文延续",
+    "genre": "写实古风短篇",
+    "audience": "普通成年读者",
+    "length": "三个场景，每场 300–900 字",
+    "alternatives_considered": ["渡口借钥匙与修灯", "客栈失物追查", "山路送信"],
+    "selection_reason": "渡口故事能在两人和固定场所内核验资源转移、延迟承诺与持续伤势",
+    "reference_policy": "正文全部新创作，仅消费抽象技巧，不引用任何参考小说原文"
+  },
+  "world": {
+    "book_id": "ferry-pilot", "branch_id": "main", "revision": 0,
+    "characters": {"lin": "林穗，修灯人", "shen": "沈砚，渡守"},
+    "rules": [
+      "三场都发生在同一夜、天亮之前的旧渡口；写实世界，无超自然能力。",
+      "只有林穗和沈砚出场。仓门和岸灯彼此可见。",
+      "林穗能更换岸灯悬绳，沈砚想保住仓门钥匙；他们此前互不熟悉。",
+      "仓里有一段备用绳，岸灯内有一份可用灯油。可用原有小刀、火种和钥匙完成操作，不新增消耗品。",
+      "oil.count 记录尚未启用的整份灯油；点灯后该份已经使用，计为零，不表示灯油瞬时烧干。岸灯能在后续场景继续燃烧。",
+      "只允许计划列出的持续状态变化。可自由补充不改变状态的动作、对话和感官细节，不新增过去经历、亲属、交易或人物。",
+      "钱只按计划转移，已付费用不退还。受伤后不会自动痊愈；借出的钥匙须在第三场归还。"
+    ],
+    "facts": {
+      "lin.coins": {"value": 3, "visible_to": ["lin", "shen"]},
+      "shen.coins": {"value": 0, "visible_to": ["lin", "shen"]},
+      "key.holder": {"value": "沈砚", "visible_to": ["lin", "shen"]},
+      "promise.status": {"value": "尚未许诺", "visible_to": ["lin", "shen"]},
+      "rope.status": {"value": "磨损", "visible_to": ["lin", "shen"]},
+      "spare_rope.count": {"value": 1, "visible_to": ["lin", "shen"]},
+      "oil.count": {"value": 1, "visible_to": ["lin", "shen"]},
+      "lamp.lit": {"value": false, "visible_to": ["lin", "shen"]},
+      "lin.cut": {"value": false, "visible_to": ["lin", "shen"]},
+      "shen.hidden_memory": {"value": "沈砚曾替上一任渡守守过一个冬夜，此事从未对林穗提过", "visible_to": ["shen"], "reader_visible": false, "mutable": false}
+    }
+  },
+  "knowledge": {
+    "schema_version": "scene-knowledge/1", "package_id": "maoshen-m06-pilot1", "book_id": "ferry-pilot",
+    "source_kind": "curated_hypothesis", "data_split": "runtime_reference",
+    "techniques": [{
+      "id": "M06", "operation": "动作或台词已经充分说明的信息，不再用同义心理结论重复解释。",
+      "conditions": ["重复解释没有增加信息、视角或人物声音"],
+      "exceptions": ["必要心理过程、人物自欺和新的信息保留；不一律删除心理描写。"],
+      "source_refs": ["猫神写作_全部文案.md：《3招精简小说文笔》原始快照 L959，2026-09-16"],
+      "evidence_status": "hypothesis"
+    }]
+  },
+  "budget": {"max_calls": 6, "max_rewrites": 2, "max_input_chars": 24000, "max_output_tokens": 3000, "max_elapsed_seconds": 600},
+  "scenes": [
+    {
+      "book_id": "ferry-pilot", "scene_id": "scene-001", "idempotency_key": "scene-001-v1", "expected_revision": 0,
+      "pov": "lin", "goal": "林穗要赶在天亮前修好岸灯，先说服沈砚借仓门钥匙；双方有不同顾虑，以钱与承诺达成短暂信任。本场只借钥匙，不开仓、不修灯。",
+      "style": "第三人称限于林穗；清楚自然，有人物对话，不用总结性哲理。300–900 字。",
+      "min_chars": 300, "max_chars": 900,
+      "events": [{"event_id": "borrow-key", "description": "林穗付一枚钱作为借用费用，沈砚收下并将钥匙交给她，她承诺天亮前归还。",
+        "changes": [{"fact": "lin.coins", "before": 3, "after": 2}, {"fact": "shen.coins", "before": 0, "after": 1},
+                    {"fact": "key.holder", "before": "沈砚", "after": "林穗"}, {"fact": "promise.status", "before": "尚未许诺", "after": "天亮前还钥匙"}]}]
+    },
+    {
+      "book_id": "ferry-pilot", "scene_id": "scene-002", "idempotency_key": "scene-002-v1", "expected_revision": 1,
+      "pov": "lin", "goal": "承接借来的钥匙，林穗取出唯一备用绳换掉旧绳，手被磨破，以实际代价完成修灯。钥匙仍由她保管，不归还钱。沈砚在附近看守。",
+      "style": "第三人称限于林穗；紧凑但清楚交代取绳、换绳、划伤、点灯的因果，不重复第一场谈判。300–900 字。",
+      "min_chars": 300, "max_chars": 900,
+      "events": [{"event_id": "repair-lamp", "description": "取用唯一备用绳更换岸灯悬绳，林穗手掌划伤，点燃灯中那一份油，岸灯亮起。",
+        "changes": [{"fact": "spare_rope.count", "before": 1, "after": 0}, {"fact": "rope.status", "before": "磨损", "after": "已换新绳"},
+                    {"fact": "lin.cut", "before": false, "after": true}, {"fact": "oil.count", "before": 1, "after": 0}, {"fact": "lamp.lit", "before": false, "after": true}]}]
+    },
+    {
+      "book_id": "ferry-pilot", "scene_id": "scene-003", "idempotency_key": "scene-003-v1", "expected_revision": 2,
+      "pov": "lin", "goal": "天亮前林穗把钥匙交还沈砚，兑现最初的承诺。灯仍亮、手伤仍在、只剩两枚钱；通过双方对话和反应收束余波，不新开悬念。",
+      "style": "第三人称限于林穗；允许安静和朴素直说，以具体动作收尾，不宣告人物从此改变一生。300–900 字。",
+      "min_chars": 300, "max_chars": 900,
+      "events": [{"event_id": "return-key", "description": "林穗将钥匙交还沈砚，沈砚收到钥匙，借钥匙的承诺已经兑现。",
+        "changes": [{"fact": "key.holder", "before": "林穗", "after": "沈砚"}, {"fact": "promise.status", "before": "天亮前还钥匙", "after": "已兑现"}]}]
+    }
+  ]
+}
