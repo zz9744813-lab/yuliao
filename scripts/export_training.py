@@ -104,6 +104,16 @@ def _extras_boundary(s, work_id: str, seg_version: int | None) -> int | None:
 _BENCH_HASHES: set | None = None
 
 
+def reset_bench_cache() -> None:
+    """显式作废基准哈希缓存（验收器 verify_training_export 用）。
+
+    之前验收器直接戳 _BENCH_HASHES 私有名——模块重构改名后赋值会静默
+    变成「造了个无用属性」，缓存没重置 → 基准哈希陈旧 → 重合漏检，
+    恰是最危险的静默失效（会审 09-21）。走本函数，改名即 ImportError。"""
+    global _BENCH_HASHES
+    _BENCH_HASHES = None
+
+
 def _bench_hashes() -> set:
     """内容级隔离（军师 P1-5）：全部基准条目冻结文本（a/b/≥50字context）的规范化哈希。
 
