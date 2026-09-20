@@ -189,7 +189,7 @@ def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
             fr = (s.query(Frame)
                   .filter(Frame.experiment_id == exp_id, Frame.granularity == "L",
                           Frame.status == "failed").first())
-        hint = (fr.raw_output or "")[:200] if fr else "（库里没有 failed 帧行可引）"
+        hint = pf.redact(fr.raw_output, 200) if fr else "（库里没有 failed 帧行可引）"
         print(f"[抽帧全灭] 0/{len(ids)}；首条原文：{hint or '（帧行没留 raw_output）'}"
               f"；明细看 llm_calls（experiment_id={exp_id}）的 error 字段")
         out.update(aborted=True, reason=f"L 帧全灭 0/{len(ids)}，首条原文：{hint}")

@@ -26,6 +26,8 @@ import scale_corpus as SC  # noqa: E402
 import ai_ranking_build as AR  # noqa: E402
 import controlled_corruption as CC  # noqa: E402
 from app import db, near_dup  # noqa: E402
+import uuid as _uuid
+_UNIQ = _uuid.uuid4().hex[:8]  # run-unique：会话共享库内防重入污染
 from app.models import (Candidate, ControlledCorruption, Experiment, Frame, Segment,  # noqa: E402
                        Work, exclude_corpus_v2_segments, is_corpus_v2_work)
 from app.typo_map import V2_TITLE_SUFFIX  # noqa: E402
@@ -224,3 +226,42 @@ def test_ai_ranking_pool_excludes_v2():
     assert s1 in pool, "v1 段应正常入排序池（否则这条断言没有牙）"
     assert s2 not in pool, ("ai_ranking_build._pool 收了 v2 镜像段——同一内容双份排序证据，"
                             "gold 弱标签被重复计数")
+
+
+# ── P0 会审补课：scale_corpus 复用分支的存量死 id 预检 ──────
+
+def test_scale_reuse_dead_extractor_preflight_blocks(tmp_path, monkeypatch):
+    """复用实验的 e.config['extractors'] 里存着死 id → 预检必须拦在开跑前。
+    （1536c36 会审意见：只查默认模型时，该路径的防呆形同虚设——正是
+    「源校勘通过 0/300 → 0 帧」那条事故路径的残留入口。）"""
+    import scripts.scale_corpus as SC
+    import scripts.preflight_models as PF
+
+    db.init_db()
+    exp_id = f"EXP-SCALE-DEAD-{_UNIQ}"
+    with db.session() as s:
+        s.add(Experiment(id=exp_id, name="t", status="created",
+                         config={"segment_ids": [], "extractors": ["deepseek/deepseek-v4.1-flash"]}))
+        s.commit()
+
+    def fake_block(models, source=""):
+        # 预检对死 id 的真实表现：返回非空阻断描述
+        return f"[{source}] 不可用：网关模型池里没有 `deepseek/deepseek-v4.1-flash`"
+
+    monkeypatch.setattr(SC.pf, "preflight_block", fake_block)
+    # pick 返回空（无需真池子）；开跑前第二个闸门应先拦住
+    out = SC.run(0, 20260920, conc=2, exp_id=exp_id)
+    assert out.get("aborted") is True, "复用实验的存量死 id 必须被预检拦下"
+
+
+def test_scale_preflight_reason_carried_in_result(monkeypatch):
+    """预检失败 → reason 字段必须带阻断原文（失败日报带上首条错误）。"""
+    import scripts.scale_corpus as SC
+
+    def fake_block(models, source=""):
+        return f"[{source}] 模型不在池"
+
+    monkeypatch.setattr(SC.pf, "preflight_block", fake_block)
+    out = SC.run(10, 20260920, conc=2, exp_id=f"EXP-SCALE-R-{_UNIQ}")
+    assert out.get("aborted") is True and "模型不在池" in str(out.get("reason")), \
+        "aborted 结果必须携带预检失败原文"
