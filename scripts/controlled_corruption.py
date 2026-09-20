@@ -82,6 +82,47 @@ DEFAULT_VERIFY = "z-ai/glm-5.3"
 RATIO_HI, RATIO_LO = 1.8, 0.55
 DRIFT_MAX = 0.35          # 语义漂移阈值（校验器 0~1）
 
+# ── bal-v2 长度方向规格（docs/proposal-length-balanced-regen-20260920.md）──
+# L = variant 更短（human 更长——长度混淆的正交层，全库只有 ~19 对，必须重生成）；
+# S = variant 更长；None = any（沿用全局 0.55~1.8 卡）。接受窗为**闭区间**
+# （端点接受、±0.01 外拒收）——规格先于实现，tests/test_len_spec.py 按此写死。
+LEN_WINDOW_L = (0.60, 0.92)
+LEN_WINDOW_S = (1.08, 1.80)
+assert LEN_WINDOW_L[1] < LEN_WINDOW_S[0],     "L 窗上界必须 < S 窗下界（放宽出现 0.98~1.02 重叠时方向规格失效）"
+COMPRESSION_TYPES = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
+                     "LITERARY_OVERWRITE", "EMOTION_LABEL", "DIALOGUE_EXPOSITION")
+# 膨胀型与控制臂保持 any：膨胀型天然产 S（S 侧既有来源），控制臂是中性改写
+# 不许进方向窗（§7.5 纪律 2 的镜像）。S 窗已定义、边界用例已测，供显式指派用。
+TYPE_LEN_SPEC: dict[str, tuple[float, float] | None] = {
+    t: LEN_WINDOW_L for t in COMPRESSION_TYPES
+}
+
+
+def window_for(ctype: str) -> tuple[float, float] | None:
+    return TYPE_LEN_SPEC.get(ctype)
+
+
+def window_accepts(ratio: float, win) -> bool:
+    """闭区间判定：win=None 不约束（any）。"""
+    if win is None:
+        return True
+    return win[0] <= ratio <= win[1]
+
+
+def len_directive_for(ctype: str) -> str:
+    """压缩型的生成 prompt 附加行（膨胀型/控制臂返回空——不加长度指令）。"""
+    if window_for(ctype) == LEN_WINDOW_L:
+        return ("\n- 改写后的总字数必须压缩到原文的 60%~90%（这是本变量的"
+                "组成部分，越界视为没做这个变量）")
+    return ""
+
+
+def reject_status(why: str) -> str:
+    """verify 拒收原因 → 落库状态：越窗走 rejected_length，其余 rejected_drift。"""
+    if (why or "").startswith("len_window"):
+        return "rejected_length"
+    return "rejected_drift"
+
 # ── 劣化类型表（§4.6 的 17 类 + NARRATOR_JUDGMENT，共 18）────────────────
 # variable  = 本变体**唯一**允许改变的变量
 # directive = 给生成器的具体做法
@@ -436,7 +477,8 @@ def generate_variant(*, human: str, ctx: str, ctype: str, model: str,
                      temperature: float = 0.8) -> dict | None:
     t = ALL_TYPES[ctype]
     user = render(GEN_PROMPT, human=human, ctx=ctx or "（无）",
-                  variable=t["variable"], directive=t["directive"])
+                  variable=t["variable"],
+                  directive=t["directive"] + len_directive_for(ctype))
     # max_tokens 给足（同 verify_variant）：推理系模型会把预算烧在思考上再返回空 content，
     # 网关加倍重试到顶仍是空 → 记 failed。实测 1200 起手时约 15% 生成以 empty_text 收场。
     r = chat(model=model, system=GEN_SYSTEM, user=user,
@@ -474,7 +516,8 @@ def mechanical_defect(human: str, variant: str) -> str:
     return ""
 
 
-def judge_verify(v: dict | None, ratio: float) -> tuple[bool, float, str]:
+def judge_verify(v: dict | None, ratio: float,
+                window: tuple[float, float] | None = None) -> tuple[bool, float, str]:
     """把校验器输出折成 (drift_ok, drift_score, 拒绝原因)。
 
     拒收条件（§7：**只**改一个变量，不是什么都不许改）：
@@ -505,7 +548,12 @@ def judge_verify(v: dict | None, ratio: float) -> tuple[bool, float, str]:
         return False, drift, "ungrammatical"
     if drift > DRIFT_MAX:
         return False, drift, f"drift={drift:.2f}"
-    if ratio > RATIO_HI or ratio < RATIO_LO:
+    if window is not None:
+        # bal-v2 方向窗（闭区间）：窗界在全局界内，设窗时窗检查即全覆盖。
+        # len_window 前缀是状态分诊键——reject_status 靠它落 rejected_length。
+        if not window_accepts(ratio, window):
+            return False, drift, f"len_window={ratio:.2f}"
+    elif ratio > RATIO_HI or ratio < RATIO_LO:
         return False, drift, f"len_ratio={ratio:.2f}"
     return True, drift, ""
 
@@ -580,7 +628,7 @@ def run_one(s_pair: tuple, ctypes: list[str], *, exp_id: str, gen_model: str,
             rec["error"] = f"verify: {e}"
         with _lock:
             _stat["verified"] += 1
-        ok, drift, why = judge_verify(v, ratio)
+        ok, drift, why = judge_verify(v, ratio, window=window_for(ctype))
         if ok:
             mech = mechanical_defect(seg.text, text)     # 确定性兜底（「地」汤）
             if mech:
@@ -591,7 +639,8 @@ def run_one(s_pair: tuple, ctypes: list[str], *, exp_id: str, gen_model: str,
         rec.update(text=text, gen_note=(g or {}).get("changed", ""),
                    drift=v or {}, drift_score=drift, drift_ok=ok,
                    fact_consistent=bool((v or {}).get("fact_consistent")),
-                   len_ratio=ratio, status="ok" if ok else "rejected_drift",
+                   len_ratio=ratio,
+                   status="ok" if ok else reject_status(why),
                    reject_reason=why)
         _save(rec, human_len=len(seg.text))
         out.append(rec)

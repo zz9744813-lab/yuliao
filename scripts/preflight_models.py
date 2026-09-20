@@ -158,6 +158,48 @@ def redact(text, limit: int = 300) -> str:
     return t[:limit] + ("…" if len(t) > limit else "")
 
 
+def classify_llm_failure(error: str | None) -> str:
+    """非 ok 调用的错误分类（bal-v2 批次验收的判据来源，规格见
+    docs/proposal-length-balanced-regen-20260920.md §3 前置探针行）。
+
+    返回 "503" / "failed_parse" / "other"：
+    · 503 族——错误含 503 / model_not_found / no available channel /
+      无可用渠道（09-19 死 id 事故的原文形状）；
+    · failed_parse 族——错误为空（无从诊断按解析失败计）或含 parse；
+    · 其余 other。
+    批次验收先决判据：**503 计数=0，非 ok 只许 failed_parse**——
+    任何 503/other 都意味着批次口径被污染（见 batch_llm_health）。
+    """
+    t = str(error or "").strip()
+    low = t.lower()
+    if ("503" in t or "model_not_found" in low
+            or "no available channel" in low or "无可用渠道" in t):
+        return "503"
+    if not t or "parse" in low:
+        return "failed_parse"
+    return "other"
+
+
+def batch_llm_health(rows) -> tuple[bool, str]:
+    """批次验收判据：全 ok 或非 ok 只 failed_parse → (True, 汇总)；
+    出现任何 503 / other → (False, 首条污染原文[已过 redact]）。
+
+    rows：带 .status 与 .error 的对象序列（LlmCall 同形）。
+    failed_parse 的认定走双通道：error 文本含 parse 族，或 status 本身
+    记为 failed_parse（有的管线把家族写进 status——两种都算解析失败）。
+    """
+    n_failed_parse = 0
+    for r in rows:
+        if r.status == "ok":
+            continue
+        if (classify_llm_failure(r.error) == "failed_parse"
+                or "parse" in str(r.status or "").lower()):
+            n_failed_parse += 1
+            continue
+        return False, f"非 ok 非 failed_parse：{classify_llm_failure(r.error)}: {redact(r.error, 160)}"
+    return True, f"ok（failed_parse {n_failed_parse} 条）"
+
+
 def preflight_block(models, *, source: str = "") -> str | None:
     """批量脚本开跑前的统一闸门：None=可跑，否则返回拒绝理由（含最接近候选）。
 

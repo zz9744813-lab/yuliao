@@ -105,6 +105,31 @@ def cluster_bootstrap_ci(pairs_by_seg: dict[str, list], iters: int = 2000,
     return vals[int(0.025 * len(vals))], vals[int(0.975 * len(vals)) - 1]
 
 
+def gate_bal_reading(con) -> sqlite3.Row | None:
+    """档一读数的双集契约（会审定稿）：**先最新 split，再集内最高**。
+
+    1. 按 created_at desc, id desc 迭代 length_balanced 集（同秒建集
+       按 id 确定性 tiebreak）；
+    2. 跳过**没有任何跑分**的集——半成品不得静默顶替旧集成为档一口径；
+    3. 在第一个有跑分的集内取 accuracy 最高的一条（含 set_name 可回溯）。
+    跨集挑最高分 = 樱桃采摘，被禁止（会审 qwen 指出）。
+    """
+    sets = con.execute(
+        """select id, name from benchmark_sets
+           where kind = 'length_balanced'
+           order by created_at desc, id desc""").fetchall()
+    for st in sets:
+        row = con.execute(
+            """select r.model, r.n, r.n_correct, r.accuracy, ? as set_name
+               from benchmark_runs r
+               where r.set_id = ? and r.accuracy is not null
+               order by r.accuracy desc limit 1""",
+            (st["name"], st["id"])).fetchone()
+        if row:
+            return row
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None, help="把报告写到文件")
@@ -155,23 +180,10 @@ def main() -> None:
     L.append("实测「只选较短」基线 0.944/0.872 压过全部模型。")
     L.append("")
     try:
-        # main() 早期已 con.close()——这里自开短连接读 bal 读数
+        # main() 早期已 con.close()——自开短连接；契约实现见 gate_bal_reading
         with sqlite3.connect(DB) as bcon:
             bcon.row_factory = sqlite3.Row
-            # 双集契约（bal-v1/v2 同 kind）：先取**最新创建**的 split，再在
-            # 该集内取最高分——跨集挑最高分是樱桃采摘（会审 qwen 指出）
-            latest = bcon.execute(
-                """select id, name from benchmark_sets
-                   where kind = 'length_balanced'
-                   order by created_at desc, id desc limit 1""").fetchone()  # 同秒建集按 id 确定性 tiebreak
-            bal = None
-            if latest:
-                bal = bcon.execute(
-                    """select r.model, r.n, r.n_correct, r.accuracy, ? as set_name
-                       from benchmark_runs r
-                       where r.set_id = ? and r.accuracy is not null
-                       order by r.accuracy desc limit 1""",
-                    (latest["name"], latest["id"])).fetchone()
+            bal = gate_bal_reading(bcon)
     except Exception as e:                     # 纪律④：查询失败不许静默
         print(f"[gate 分档] bal 读数查询失败：{type(e).__name__}: {e}", file=sys.stderr)
         bal = None
