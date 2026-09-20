@@ -138,7 +138,50 @@ def main() -> None:
     L.append("")
     L.append("**LLM 评委无法复现集霸对「哪种写法更好」的判断**：跨三个独立批次，")
     L.append("κ 稳定在 +0.09～+0.21，agreement 不超过「恒定答 human」基线，")
-    L.append("全部配置低于位置基线。Gate（agreement ≥ 0.70）远未达到。")
+    L.append("全部配置低于位置基线。旧单线 Gate（agreement ≥ 0.70）作废，")
+    L.append("改分档口径（见下「Gate 口径（分档）」）。")
+    L.append("")
+    # ── Gate 口径（分档，2026-09-20 军师改）─────────────────
+    # 旧单线 Gate 把两条正交的轴混成一条线：①认得出（方向识别——哪边是
+    # 人类原文/AI 生成，自带构造性答案键）；②复现口味（评委偏好对齐集霸，
+    # 无答案键、只有他本人）。分档后各自设线/各自报数。
+    L.append("## Gate 口径（分档，2026-09-20）")
+    L.append("")
+    L.append("### 档一：方向识别——达标线 **≥ 0.80**")
+    L.append("")
+    L.append("判别「哪边是人类原文 / AI 生成」。**只认长度平衡基准**（bal-v1：")
+    L.append("S/L 各半，长度基线按构造 = 0.5）；长度混淆集的读数（nat-v1 / ")
+    L.append("cc-v1 / hvai-v1 的 0.86~0.94）**不得作为达标依据**——军师 P1-3")
+    L.append("实测「只选较短」基线 0.944/0.872 压过全部模型。")
+    L.append("")
+    try:
+        # main() 早期已 con.close()——这里自开短连接读 bal 读数
+        with sqlite3.connect(DB) as bcon:
+            bcon.row_factory = sqlite3.Row
+            bal = bcon.execute(
+                """select r.model, r.n, r.n_correct, r.accuracy from benchmark_runs r
+                   join benchmark_sets s on s.id = r.set_id
+                   where s.kind = 'length_balanced' and r.accuracy is not null
+                   order by r.accuracy desc limit 1""").fetchone()
+    except Exception as e:                     # 纪律④：查询失败不许静默
+        print(f"[gate 分档] bal 读数查询失败：{type(e).__name__}: {e}", file=sys.stderr)
+        bal = None
+    if bal:
+        L.append(f"- 当前最好诚实读数：**{bal['model']} = {bal['accuracy']:.3f}**"
+                 f"（{bal['n_correct']}/{bal['n']}，bal-v1）")
+        L.append(f"  → **未达标**（距 0.80 差 {0.80 - bal['accuracy']:.3f}；这段差距就是后续工作目标）。")
+    else:
+        L.append("- （库里还没有长度平衡基准的跑分：先跑 bal-v1。）")
+    L.append("")
+    L.append("### 档二：复现人类口味——**无固定达标线，按实测报 κ 区间**")
+    L.append("")
+    L.append("评委偏好对齐集霸。**否定性结论（不是「接近达成」）**：现有全部")
+    L.append("评委配置 κ 落在 **+0.09～+0.21**，最好一格 kimi v4 κ = +0.112")
+    L.append("（按段落聚类 95% CI [+0.010, +0.214]，区间贴近 0），全部低于")
+    L.append("「恒定答 human」基线 agreement 0.735；T7 两轮探针在 corr24 排除制")
+    L.append("子集（n=5~6）上所有变换（raw/flip/map/集成）置换 p = 0.10~0.40")
+    L.append("均不显著。**该轴在现有数据面上不可达**——除非出现新的 gold ")
+    L.append("standard（goldpick 指认进行中），不应再在此轴上投入调用。")
     L.append("")
     L.append("## 1. 样本")
     L.append("")
@@ -285,7 +328,8 @@ def main() -> None:
     L.append("- **仪器已定型并冻结**：切分器 v2（合格率 91%）、场景上下文、盲评队列与匿名化、")
     L.append("  评委口径版本化、留出集评测、四样必报基线、以及一批**自检工具**")
     L.append("  （锚点自检 / 覆盖回读断言 / 水印与番外过滤 / 段级聚类提醒）。")
-    L.append("- **确定性计数特征的路线仍开着但很弱**：折外诚实 agreement 0.673（Gate 0.70），")
+    L.append("- **确定性计数特征的路线仍开着但很弱**：折外诚实 agreement 0.673"
+             "（属分档后的「复现口味」轴——该轴为否定性结论，无固定线），")
     L.append("  AUC 0.62–0.67，且维度越多越差（样本量撑不住）。")
     L.append("- **最重要的负结果**：在「整段哪边写得更好」这个粒度上，")
     L.append("  LLM 评委与确定性特征**都不足以复现作者本人的偏好**。")
