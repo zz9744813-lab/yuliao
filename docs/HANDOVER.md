@@ -203,8 +203,20 @@ L上界<S下界模块断言防重叠）+ 压缩型 prompt 60%~90% 指令 + judge
 越窗 → rejected_length + classify_llm_failure/batch_llm_health（503=0 批次
 先决判据）+ final_report.gate_bal_reading（先最新 split 再集内最高，
 半成品集不顶替）。**全量 580 例全绿**（基线 553 + 27 项规格新测）。
-剩余项：bal-v2 L 侧重生成放量（pilot → ≥200 对）→ bal-v2 建集 →
-benchmark_run + falsify → 档一读数接任。
+剩余项：bal-v2 L 侧重生成放量 → bal-v2 建集 → benchmark_run + falsify → 档一读数接任。
+
+**2026-09-20 下午更新（产线定论，`c974385`）**：pilot 三轮跑完——
+· 2 产型（SUBTEXT_ERASE/LITERARY_OVERWRITE，deepseek 67%）入产线；
+  EXP-BAL2-PROD（150 段×2 类=300 变体）在跑，503=0；
+· 4 类（ABSTRACT_SUMMARY/RHYTHM_FLATTEN/EMOTION_LABEL/DIALOGUE_EXPOSITION）
+  两轮全灭 + kimi 诊断也不压（要么 ratio 1.05~1.46 越窗要么生成失败）
+  → **类型问题非模型问题**，记「本代模型不可产出」；
+· 三态语义：校验窗全保留（6 类 L 窗——不可产出类的不压缩样本被
+  len_window 拒，删键=any=污染）；调度侧 UNPRODUCTIVE_TYPES 排除
+  （显式请求也跳过）；历史样本全为 rejected_* 状态、零 ok 入库。
+产线限制（诚实声明）：bal-v2 的 L 侧只有 2 个类型构成——S/L 对照存在
+类型混杂（L 侧=LITERARY_OVERWRITE+SUBTEXT_ERASE），N5 分层读数解读
+时必须带类型注记。
 
 ## 0.6 接手者第一天照这个做
 
