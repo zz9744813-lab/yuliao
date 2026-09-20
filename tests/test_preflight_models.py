@@ -491,3 +491,12 @@ def test_model_any_queries_cover_both_ids():
     ids = config.model_any("deepseek-v4.1-flash")
     assert isinstance(ids, tuple) and len(set(ids)) == len(ids)
     assert "deepseek-v4.1-flash" in ids and "deepseek/deepseek-v4.1-flash" in ids
+
+
+def test_model_any_none_and_empty_contract():
+    """契约：None/空串不抛异常；恒返回非空 tuple[str]（SQL in () 防退化）。"""
+    assert config.model_any(None) == ("",)
+    assert config.model_any("") == ("",)
+    assert config.canonical_model(None) == ""      # None 容错：不抛、归空串
+    ids = config.model_any("deepseek-v4.1-flash")
+    assert isinstance(ids, tuple) and all(isinstance(x, str) for x in ids) and ids

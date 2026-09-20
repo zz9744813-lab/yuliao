@@ -81,6 +81,9 @@ def load() -> tuple[list[str], np.ndarray, np.ndarray, dict[str, np.ndarray]]:
             # model_any：历史判定写于改名前（model 列存旧 id），只查新名会
             # 静默清空 → 「所有列齐全才纳入」的口径会无声丢光样本（会审实测指出）
             any_ids = config.model_any(model)
+            if not any_ids:
+                vals[key] = None
+                continue
             q = con.execute(
                 f"""select verdict, abstain from judge_runs
                     where subject_id=? and judge_kind='preference'

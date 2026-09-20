@@ -358,8 +358,11 @@ def _two_order_verdict(cid: str, model: str, base_pv: str, con) -> str | None:
 
 
 def _read_verdict(cid: str, model: str, pv: str, con) -> str | None:
-    # model_any：历史判定写于改名前（model 列存旧 id），只查新名会静默清空
+    # model_any：历史判定写于改名前（model 列存旧 id），只查新名会静默清空。
+    # 空集早退：model in () 是 SQL 语法错误（会审指出）
     any_ids = config.model_any(model)
+    if not any_ids:
+        return None
     r = con.execute(
         f"""select verdict, abstain from judge_runs where subject_id=? and judge_kind='preference'
             and model in ({",".join("?" * len(any_ids))})

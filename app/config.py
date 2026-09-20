@@ -55,11 +55,19 @@ def canonical_model(mid: str) -> str:
 
 
 def model_any(mid: str) -> tuple[str, ...]:
-    """查询侧兼容元组：给 `.in_()` 用——canonical 名 + 它的所有历史别名。"""
+    """查询侧兼容元组：给 `.in_()` 用——canonical 名 + 它的所有历史别名。
+
+    契约（调用方据此写 SQL/ORM）：恒返回**非空** tuple[str]，元素均为 str。
+    空入参返回 `("",)` 而非 ()——`model in ()` 在 SQL 里是语法错误，
+    `model in ("")` 是安全的不命中；None/空 model 不抛异常。
+    """
     mid = (mid or "").strip()
+    if not mid:
+        return ("",)
     ids = {mid, canonical_model(mid)}
     ids |= {k for k, v in DEAD_MODEL_ALIASES.items() if v == canonical_model(mid)}
-    return tuple(sorted(ids))
+    out = tuple(sorted(str(x) for x in ids if x))
+    return out or ("",)
 
 
 DEFAULT_RECON_MODELS = [
