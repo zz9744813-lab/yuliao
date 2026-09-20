@@ -88,13 +88,26 @@ DRIFT_MAX = 0.35          # 语义漂移阈值（校验器 0~1）
 # （端点接受、±0.01 外拒收）——规格先于实现，tests/test_len_spec.py 按此写死。
 LEN_WINDOW_L = (0.60, 0.92)
 LEN_WINDOW_S = (1.08, 1.80)
-assert LEN_WINDOW_L[1] < LEN_WINDOW_S[0],     "L 窗上界必须 < S 窗下界（放宽出现 0.98~1.02 重叠时方向规格失效）"
+# pilot 放宽档（提案 §1.5 预注册协议：round-1 接受率 <30% 的类型放宽
+# ±0.05 再 pilot 一轮）。pilot round-1 实测（EXP-BAL2-L1，18 条）：
+#   SUBTEXT_ERASE 2/3、LITERARY_OVERWRITE 2/3（67%，保持标准窗）；
+#   RHYTHM_FLATTEN 0/3 但两发 ratio=0.96 在标准窗外沿——放宽后可收；
+#   ABSTRACT_SUMMARY/EMOTION_LABEL/DIALOGUE_EXPOSITION 0/3 且
+#   ratio 1.00~1.41（模型不压缩，放宽大概率救不活，round-2 见分晓）。
+LEN_WINDOW_L_WIDE = (0.60, 0.97)
+assert (LEN_WINDOW_L[1] < LEN_WINDOW_L_WIDE[1] < LEN_WINDOW_S[0]),     "窗链必须单调：标准 L 上界 < 放宽上界 < S 下界（0.98~1.02 重叠会失效）"
 COMPRESSION_TYPES = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
                      "LITERARY_OVERWRITE", "EMOTION_LABEL", "DIALOGUE_EXPOSITION")
 # 膨胀型与控制臂保持 any：膨胀型天然产 S（S 侧既有来源），控制臂是中性改写
 # 不许进方向窗（§7.5 纪律 2 的镜像）。S 窗已定义、边界用例已测，供显式指派用。
+# per-type 分派按 pilot round-1 证据（见上）：2 产型标准窗、4 弱型放宽窗。
 TYPE_LEN_SPEC: dict[str, tuple[float, float] | None] = {
-    t: LEN_WINDOW_L for t in COMPRESSION_TYPES
+    "SUBTEXT_ERASE": LEN_WINDOW_L,
+    "LITERARY_OVERWRITE": LEN_WINDOW_L,
+    "RHYTHM_FLATTEN": LEN_WINDOW_L_WIDE,
+    "ABSTRACT_SUMMARY": LEN_WINDOW_L_WIDE,
+    "EMOTION_LABEL": LEN_WINDOW_L_WIDE,
+    "DIALOGUE_EXPOSITION": LEN_WINDOW_L_WIDE,
 }
 
 

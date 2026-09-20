@@ -32,23 +32,29 @@ import final_report as FR         # noqa: E402
 def test_window_values_pinned():
     assert CC.LEN_WINDOW_L == (0.60, 0.92), "L 窗（variant 更短）= 闭区间 [0.60, 0.92]"
     assert CC.LEN_WINDOW_S == (1.08, 1.80), "S 窗（variant 更长）= 闭区间 [1.08, 1.80]"
+    assert CC.LEN_WINDOW_L_WIDE == (0.60, 0.97), \
+        "pilot 放宽档 = [0.60, 0.97]（提案 §1.5 预注册协议的 ±0.05）"
 
 
 def test_l_upper_strictly_below_s_lower():
-    """硬约束：L 上界 < S 下界。放宽窗口出现 0.98~1.02 重叠时这里必须红。"""
-    assert CC.LEN_WINDOW_L[1] < CC.LEN_WINDOW_S[0]
+    """硬约束：窗链单调（标准 L 上界 < 放宽上界 < S 下界）。
+    放宽出现 0.98~1.02 重叠时这里必须红。"""
+    assert CC.LEN_WINDOW_L[1] < CC.LEN_WINDOW_L_WIDE[1] < CC.LEN_WINDOW_S[0]
 
 
-@pytest.mark.parametrize("ratio,expected", [
-    # L 窗 8 边界用例的 L 半（闭区间：端点接受、±0.01 外拒收）
-    (0.60, True), (0.59, False),
-    (0.92, True), (0.93, False),
-    # S 窗的另一半
-    (1.08, True), (1.07, False),
-    (1.80, True), (1.81, False),
+@pytest.mark.parametrize("win_kind,ratio,expected", [
+    # 标准 L 窗闭区间：端点接受、±0.01 外拒收
+    ("L", 0.60, True), ("L", 0.59, False),
+    ("L", 0.92, True), ("L", 0.93, False),
+    # 放宽档闭区间：0.93 在标准窗外、放宽窗内（RHYTHM_FLATTEN 的 0.96 落点）
+    ("WIDE", 0.93, True), ("WIDE", 0.97, True), ("WIDE", 0.98, False),
+    # S 窗闭区间
+    ("S", 1.08, True), ("S", 1.07, False),
+    ("S", 1.80, True), ("S", 1.81, False),
 ])
-def test_window_boundary_eight_cases(ratio, expected):
-    win = CC.LEN_WINDOW_L if ratio < 1.0 else CC.LEN_WINDOW_S
+def test_window_boundary_eight_cases(win_kind, ratio, expected):
+    win = {"L": CC.LEN_WINDOW_L, "WIDE": CC.LEN_WINDOW_L_WIDE,
+           "S": CC.LEN_WINDOW_S}[win_kind]
     assert CC.window_accepts(ratio, win) is expected
 
 
@@ -63,8 +69,14 @@ COMPRESSION = ("SUBTEXT_ERASE", "ABSTRACT_SUMMARY", "RHYTHM_FLATTEN",
 
 
 def test_six_compression_types_get_l_window():
+    """pilot round-1 证据分派（EXP-BAL2-L1，18 条实测）：
+    2 产型（67%）保持标准窗；4 弱型走放宽窗（提案 §1.5 的 +0.05 协议），
+    round-2 仍 <30% 的类型将移出窗并记「本代模型不可产出」。"""
+    std = {"SUBTEXT_ERASE", "LITERARY_OVERWRITE"}
     for t in COMPRESSION:
-        assert CC.window_for(t) == CC.LEN_WINDOW_L, f"{t} 必须强制 L 窗"
+        expected = CC.LEN_WINDOW_L if t in std else CC.LEN_WINDOW_L_WIDE
+        assert CC.window_for(t) == expected, \
+            f"{t} 应在 {'标准' if t in std else '放宽'} L 窗"
 
 
 def test_inflation_and_control_stay_any():
