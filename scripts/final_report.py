@@ -158,11 +158,20 @@ def main() -> None:
         # main() 早期已 con.close()——这里自开短连接读 bal 读数
         with sqlite3.connect(DB) as bcon:
             bcon.row_factory = sqlite3.Row
-            bal = bcon.execute(
-                """select r.model, r.n, r.n_correct, r.accuracy from benchmark_runs r
-                   join benchmark_sets s on s.id = r.set_id
-                   where s.kind = 'length_balanced' and r.accuracy is not null
-                   order by r.accuracy desc limit 1""").fetchone()
+            # 双集契约（bal-v1/v2 同 kind）：先取**最新创建**的 split，再在
+            # 该集内取最高分——跨集挑最高分是樱桃采摘（会审 qwen 指出）
+            latest = bcon.execute(
+                """select id, name from benchmark_sets
+                   where kind = 'length_balanced'
+                   order by created_at desc limit 1""").fetchone()
+            bal = None
+            if latest:
+                bal = bcon.execute(
+                    """select r.model, r.n, r.n_correct, r.accuracy, ? as set_name
+                       from benchmark_runs r
+                       where r.set_id = ? and r.accuracy is not null
+                       order by r.accuracy desc limit 1""",
+                    (latest["name"], latest["id"])).fetchone()
     except Exception as e:                     # 纪律④：查询失败不许静默
         print(f"[gate 分档] bal 读数查询失败：{type(e).__name__}: {e}", file=sys.stderr)
         bal = None
