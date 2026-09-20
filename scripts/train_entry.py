@@ -5,13 +5,15 @@
 「训练入口必须拒绝未经此验收的旧版本」——会审指出：验收函数写成工具
 函数、没人调用 = 可被绕过。本脚本就是那个**入口**：任何 SFT/Rewrite/RM
 数据要进训练，必须从这里走 accept_for_training；拒绝即非零退出，
-不产生任何训练产物。
+不产生任何训练产物。每个参数位还校验文件 kind（--sft 必须真是
+writer_sft 导出，张冠李戴拒收）。
 
 ## 边界（诚实声明）
 
 实际训练流程仍然后置（未实现，见训练可行性文档）——本入口当前**只做
-验收门**：验收通过打印各文件的 manifest 摘要后退出 0；任何一项拒绝
-即退出 1。将来接训练框架时，训练命令必须以本入口验收通过为先决。
+验收门**：验收通过打印各文件摘要后退出 0；任何一项拒绝即退出 1。
+「不可绕过」的真正强制点在训练流程实现时必须以本入口为先决——
+这是**已记账的未闭环风险**，不是已闭环的事实。
 
 ## 用法
 
@@ -30,6 +32,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import verify_training_export as VT              # noqa: E402
 
+# 参数位 → 必须的导出类型（张冠李戴拒收）：train_entry 的 --sft 传 rm 文件
+# 会被 verify 认成 rm——本表在验收前先对上 kind。
+_ARG_KIND = {"--sft": "writer_sft", "--rewrite": "rewrite", "--rm": "rm"}
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -42,20 +48,41 @@ def main() -> None:
         raise SystemExit("什么都没给：--sft/--rewrite/--rm 至少其一")
 
     all_ok = True
-    for f in files:
+    for flag, f in (("--sft", args.sft), ("--rewrite", args.rewrite), ("--rm", args.rm)):
+        if not f:
+            continue
+        try:
+            kind = VT._kind_of(Path(f))
+        except SystemExit as e:
+            print(f"[FAIL] {f}\n    - {e}")
+            all_ok = False
+            continue
+        if kind != _ARG_KIND[flag]:
+            print(f"[FAIL] {f}\n    - {flag} 必须是 {_ARG_KIND[flag]} 导出，"
+                  f"实为 {kind}——张冠李戴拒收")
+            all_ok = False
+            continue
         ok, problems = VT.accept_for_training(f)
-        print(f"{'✓' if ok else '✗'} {f}")
+        print(f"{'[PASS]' if ok else '[FAIL]'} {f}")
         for p in problems:
             print(f"    - {p}")
         all_ok &= ok
 
     # 同源不相加：SFT 与 Rewrite 都给时，样本量按源段并集报
     if args.sft and args.rewrite:
-        u = VT.union_distinct_sources([args.sft, args.rewrite])
-        print(f"同源口径：SFT {u['per_file'].get(Path(args.sft).name)} 源段 × "
-              f"Rewrite {u['per_file'].get(Path(args.rewrite).name)} 源段"
-              f" → 并集 {u['union_distinct_sources']}（按行数相加会虚增 "
-              f"{u['sum_rows_would_overcount_by']}，不许）")
+        try:
+            u = VT.union_distinct_sources([args.sft, args.rewrite])
+            s = Path(args.sft).name
+            r = Path(args.rewrite).name
+            print(f"同源口径：SFT {u['per_file'][s]['n_distinct_sources']} 源段 × "
+                  f"Rewrite {u['per_file'][r]['n_distinct_sources']} 源段"
+                  f" → 并集 {u['union_distinct_sources']}"
+                  f"（按行数相加虚增 {u['overcount_if_summing_rows']}、"
+                  f"按各文件源段数相加虚增 {u['overcount_if_summing_sources']}，"
+                  "合计只认并集）")
+        except SystemExit as e:
+            print(f"[FAIL] 同源并集计算失败：{e}")
+            all_ok = False
 
     if not all_ok:
         raise SystemExit("训练入口验收：拒绝（exit 1）——先跑 "

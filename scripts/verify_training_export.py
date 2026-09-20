@@ -1,4 +1,4 @@
-"""训练导出验收器（审查 A03，2026-09-20；会审 09-21 二轮加固）。
+"""训练导出验收器（审查 A03，2026-09-20；会审 09-21 三轮加固）。
 
 ## 为什么需要它
 
@@ -10,19 +10,26 @@
 
 1. **隔离**：逐行目标+前文按「忽略空白、≥50 字」口径（审查复算法）
    对全库冻结基准文本哈希重算重合——导出侧排除逻辑失效时这里必须红。
-   基准哈希集为空（连错库/基准未冻结）→ 直接拒，不做恒绿检查；
-   实际参与比较的文本数计入 manifest，字段名漂移导致比较空转 → 拒。
-2. **冲突消解**（RM）：同源同文不同分的组数必须为 0（导出侧
-   _dedupe_rm_rows 优先级规则的独立复核）；
-3. **源质量**：逐行回连段 integrity.src_ok，未过闸的**段数**进
-   验收判据（>0 即拒）——「只报不闸」会让未校勘段混进训练还亮绿；
+   基准哈希集为空（连错库/基准未冻结）→ 直接拒；**每行的目标字段
+   （writer_sft:target / rewrite:output / rm:text）必须非空**——置空/
+   占位/半漂移 schema → 拒（三轮 BLOCK 项：空串占位混不进比较数）；
+   目标**短于 50 字**的行是合法短文本（真件实测 73/73/48 行），只降
+   低隔离复算的覆盖、不入闸——进 manifest 报 rows_target_short，闸的
+   是 rows_target_empty（空=导出坏了，短=数据本来就短，两回事）。
+2. **冲突消解**（RM）：同源同文不同分的组数必须为 0；分数不可哈希
+   （dict/list）→ 拒，不裸炸。
+3. **源质量**：逐行回连段 integrity.src_ok（批量 in_）。未校勘段与
+   悬空段（库中查无）**都入闸**且都进 manifest——两套口径一个家族，
+   不许一个闸一个抛（三轮 BLOCK 项）。
 4. **防手改**：manifest 是旁挂明文，手改 passed=true 挡不住——
-   accept_for_training **重跑 verify 的全部纯检查**并与 manifest
-   的 sha256/kind/行数交叉核对；无 manifest（旧导出）、sha 不符
-   （重导前旧文件/被改动）、交叉不一致 → 一律拒收；
-5. **同源不相加**：union_distinct_sources() 给出多文件的源段并集——
-   SFT 与 Rewrite 是同源段两种用法，合计只按并集数算，函数与测试
-   钉住这条规则，不靠口头约定。
+   accept_for_training **重跑 verify 的全部纯检查**并与 manifest 的
+   sha256/kind/行数/基准哈希数交叉核对；无 manifest（旧导出）、
+   sha 不符（重导前旧文件/被改动）、交叉不一致 → 一律拒收；
+   verify 的 SystemExit 在 accept 侧转结构化 (False, problems)——
+   训练入口对每个文件都能拿到拒收理由，不在第一个坏文件上裸崩。
+5. **同源不相加**：union_distinct_sources() 报源段并集 + 两种相加
+   口径的虚增量（按行数 / 按源段数）——SFT 与 Rewrite 是同源段两种
+   用法，合计只按并集算。
 
 ## 用法
 
@@ -50,12 +57,18 @@ from app.models import Segment                   # noqa: E402
 
 MIN_CHARS = 50          # 审查复算口径：忽略空白后 ≥50 字才参与重合比较
 
-# 每类导出参与重合检查的字段：目标 + 前文（审查：「比较范围包括目标与前文」）
+# 每类导出参与重合检查的字段：目标 + 前文（审查：「比较范围包括目标与前文」）。
+# 契约（三轮会审）：字段名须与 export_training 的行 schema 一致——导出器改键名
+# 而验收器不跟，会静默少比。tests 里有源码绊线（改字段名必须两头一起改）。
 _KIND_FIELDS = {
     "writer_sft": ("target", "prev1", "prev2"),
     "rewrite": ("output", "context"),
     "rm": ("text", "prev1", "prev2"),
 }
+# 每行必须产出 ≥MIN_CHARS 可比文本的字段（目标）：置空/占位 = 半漂移，拒
+_KIND_REQUIRED = {"writer_sft": "target", "rewrite": "output", "rm": "text"}
+_KINDS = {"sft": ("writer_sft", "--sft"), "rewrite": ("rewrite", "--rewrite"),
+          "rm": ("rm", "--rm")}
 
 
 def _kind_of(path: Path) -> str:
@@ -107,8 +120,9 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
         raise SystemExit(f"文件不存在：{path}")
     kind = _kind_of(path)
     fields = _KIND_FIELDS[kind]
-    # 走导出模块的显式接口作废缓存——不戳私有名（会审 09-21：改名后
-    # 静默不生效 = 基准哈希陈旧 = 重合漏检）
+    required = _KIND_REQUIRED[kind]
+    # 走导出模块的显式接口作废缓存——不戳私有名（改名后静默不生效
+    # = 基准哈希陈旧 = 重合漏检）
     ET.reset_bench_cache()
     bench = ET._bench_hashes()
     if not bench:
@@ -122,13 +136,20 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
+                r = json.loads(line)
             except json.JSONDecodeError as e:
                 raise SystemExit(f"第 {i + 1} 行不是合法 JSON：{e}")
+            if not isinstance(r, dict):
+                raise SystemExit(f"第 {i + 1} 行不是 JSON 对象（拿到 "
+                                 f"{type(r).__name__}）——导出损坏，拒收")
+            rows.append(r)
 
     overlap_rows, overlap_examples = 0, []
     missing_key_rows = 0
-    n_texts_compared = 0
+    n_texts_seen = 0          # 取到字段的文本数（三轮 BLOCK：与可比数分列，
+    n_texts_comparable = 0    # ≥MIN_CHARS 规范化后的可比文本数——占位空串混不进）
+    rows_target_empty = 0     # 目标字段空/缺失 = 半漂移，入闸
+    rows_target_short = 0    # 目标非空但 <50 字 = 合法短文本，只报不闸
     sources = set()
     for i, r in enumerate(rows):
         sid = r.get("segment_id")
@@ -137,46 +158,60 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
         else:
             sources.add(sid)
         hit = False
+        target_nonempty = target_comparable = False
         for fld in fields:
             for t in _texts_of(r.get(fld)):
-                n_texts_compared += 1
+                n_texts_seen += 1
                 norm = "".join(t.split())
+                if len(norm) >= MIN_CHARS:
+                    n_texts_comparable += 1
+                if fld == required and norm:
+                    target_nonempty = True
+                    if len(norm) >= MIN_CHARS:
+                        target_comparable = True
                 if len(norm) >= MIN_CHARS and _md5(norm) in bench:
                     hit = True
                     break
             if hit:
                 break
+        if not target_nonempty:
+            rows_target_empty += 1
+        elif not target_comparable:
+            rows_target_short += 1
         if hit:
             overlap_rows += 1
             if len(overlap_examples) < 10:
                 overlap_examples.append({"line_no": i + 1,
                                           "line_id": r.get("id"), "field": fld})
-    if n_texts_compared == 0:
+    if n_texts_comparable == 0:
         raise SystemExit(
-            f"0 条文本参与重合比较——{kind} 行里找不到字段 {fields}"
+            f"0 条可比文本（≥{MIN_CHARS} 字）——{kind} 行里字段 {fields} 全空/全短"
             "（导出 schema 漂移？）：比较空转还报 PASS 就是最危险的假绿")
 
-    rm_conflicts = 0
+    rm_conflicts, rm_bad_score = 0, 0
     if kind == "rm":
         groups: dict[tuple, set] = defaultdict(set)
         for r in rows:
+            score = r.get("score")
+            if isinstance(score, (dict, list)):
+                rm_bad_score += 1          # 不可哈希的多维分数：计数，不裸炸
+                continue
             key = (r.get("segment_id"), "".join((r.get("text") or "").split()))
-            groups[key].add(r.get("score"))
+            groups[key].add(score)
         rm_conflicts = sum(1 for v in groups.values() if len(v) > 1)
 
-    # 源质量：按源段批量回连（1672 段不许逐段 1672 查），integrity 兼容
-    # str 与 dict（JSON 列在 ORM 侧已解析）；未过闸段数 >0 即拒收
+    # 源质量：按源段批量回连（in_，不逐段查）。未校勘段与悬空段同入闸——
+    # 悬空=导出与库不同源，比未校勘更严重，但同属源质量家族，统一入清单。
     src_unverified, src_missing = 0, 0
     with db.session() as s:
-        segs = {seg.id: seg for seg in
-                s.query(Segment).filter(Segment.id.in_(sources)).all()} \
-            if sources else {}
+        seg_rows = {sid: integ for sid, integ in
+                    s.query(Segment.id, Segment.integrity)
+                    .filter(Segment.id.in_(sources)).all()} if sources else {}
     for sid in sources:
-        seg = segs.get(sid)
-        if seg is None:
+        if sid not in seg_rows:
             src_missing += 1
             continue
-        integ = seg.integrity
+        integ = seg_rows[sid]
         if isinstance(integ, str):
             try:
                 integ = json.loads(integ)
@@ -185,27 +220,30 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
         ok = bool((integ or {}).get("src_ok")) if isinstance(integ, dict) else False
         if not ok:
             src_unverified += 1
-    if src_missing:
-        raise SystemExit(f"{src_missing} 个源段在库里查无（行引用悬空段）——"
-                         "导出与库不同源，拒收")
 
     passed = (overlap_rows == 0 and missing_key_rows == 0
-              and rm_conflicts == 0 and src_unverified == 0)
+              and rm_conflicts == 0 and rm_bad_score == 0
+              and src_unverified == 0 and src_missing == 0
+              and rows_target_empty == 0)
     man = {
         "file": str(path), "kind": kind, "sha256": _sha256(path),
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "n_rows": len(rows), "n_distinct_sources": len(sources),
-        "n_texts_compared": n_texts_compared,
+        "n_bench_hashes": len(bench),   # 基准指纹：换小库重算，交叉核对能拦住
+        "n_texts_seen": n_texts_seen, "n_texts_comparable": n_texts_comparable,
+        "rows_target_empty": rows_target_empty, "rows_target_short": rows_target_short,
         "bench_overlap_rows": overlap_rows,
         "bench_overlap_examples": overlap_examples,
-        "rm_conflict_groups": rm_conflicts,
+        "rm_conflict_groups": rm_conflicts, "rm_bad_score_rows": rm_bad_score,
         "missing_key_rows": missing_key_rows,
         "src_unverified_segments": src_unverified,
+        "src_missing_segments": src_missing,
         "same_source_note": "SFT 与 Rewrite 同源段是同一批样本的两种用法——"
                             "合计只按 union_distinct_sources 并集算，不许按行数相加",
         "acceptance": {"passed": passed,
-                       "rule": "重合=0 且 主键齐全 且（RM）同源同文无多分 "
-                               "且 未校勘源段=0 且 比较文本>0"},
+                       "rule": "重合=0 且 主键齐全 且（RM）同源同文无多分且分数可哈希 "
+                               "且 未校勘源段=0 且 悬空源段=0 且 目标字段无空值行"
+                               "（目标短于50字只报不闸：rows_target_short）"},
     }
     if write_manifest:
         out = path.with_suffix(".manifest.json")
@@ -218,10 +256,10 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
 def accept_for_training(path_str: str) -> tuple[bool, list[str]]:
     """训练入口契约：只认「manifest 旁挂 + 与文件本体交叉一致 + 当场重算通过」。
 
-    手改 manifest 的 passed 位挡不住——这里重跑 verify 的全部纯检查
-    （write_manifest=False）并与旁挂清单的 sha256/kind/行数交叉核对；
-    拒收：无 manifest（旧导出/手生成）、文件缺失、sha 不符（重导前旧
-    文件/被改动）、交叉不一致、当场重算未过。"""
+    verify 的结构性 SystemExit（坏 JSON/空基准库/空比较等）在这里转成
+    (False, problems)——入口对每个文件都拿得到拒收理由，不在第一个
+    坏文件上裸崩。手改 manifest 的 passed 位同样挡不住：当场重跑全部
+    纯检查并与旁挂清单交叉核对。"""
     path = Path(path_str)
     if not path.exists():
         return False, [f"导出文件不存在：{path}"]
@@ -232,38 +270,62 @@ def accept_for_training(path_str: str) -> tuple[bool, list[str]]:
         man = json.loads(mf.read_text(encoding="utf-8"))
     except Exception as e:
         return False, [f"manifest 解析失败：{e}"]
+    try:
+        fresh = verify(path_str, write_manifest=False)
+    except SystemExit as e:
+        return False, [f"当场重算结构性失败：{e}"]
     problems = []
-    fresh = verify(path_str, write_manifest=False)   # 只信当场重算
     if man.get("sha256") != fresh["sha256"]:
         problems.append("manifest sha256 与文件本体不符（清单过期/文件被改）——拒收")
     if man.get("kind") != fresh["kind"] or man.get("n_rows") != fresh["n_rows"]:
         problems.append("manifest kind/行数与文件不符（备份文件/张冠李戴）——拒收")
+    if man.get("n_bench_hashes") != fresh["n_bench_hashes"]:
+        problems.append("基准哈希数与 manifest 不符（基准侧被换过）——拒收")
     if not fresh["acceptance"]["passed"]:
         problems.append(f"当场重算未通过：重合 {fresh['bench_overlap_rows']}"
                         f" / 缺键 {fresh['missing_key_rows']}"
                         f" / RM冲突 {fresh['rm_conflict_groups']}"
-                        f" / 未校勘段 {fresh['src_unverified_segments']}")
+                        f" / 未校勘段 {fresh['src_unverified_segments']}"
+                        f" / 悬空段 {fresh['src_missing_segments']}"
+                        f" / 目标空值行 {fresh['rows_target_empty']}")
     return (not problems), problems
 
 
 def union_distinct_sources(path_strs: list[str]) -> dict:
-    """多文件源段并集（「同源不相加」的机器口径）。
+    """多文件源段并集 + 两种相加口径的虚增量（「同源不相加」的机器口径）。
 
-    SFT 与 Rewrite 是同源段的两种用法：合计样本量按本函数返回的
-    union 数算；按行数相加会把同一源段重复计为独立样本。"""
-    union, per = set(), {}
+    虚增口径分列（三轮会审）：按**行数**相加的虚增（把同一源段的每个
+    样本当独立样本）与按**各文件源段数**相加的虚增，名字、算法、文案
+    三处一致；合计样本量只认 union_distinct_sources。"""
+    union: set = set()
+    per: dict[str, dict] = {}
     for p in path_strs:
-        rows = []
+        rows, n_bad = 0, 0
+        sids: set = set()
         with Path(p).open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        sids = {r.get("segment_id") for r in rows if r.get("segment_id")}
-        per[str(Path(p).name)] = len(sids)
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    n_bad += 1
+                    continue
+                rows += 1
+                if isinstance(r, dict) and r.get("segment_id"):
+                    sids.add(r["segment_id"])
+        per[str(Path(p).name)] = {"n_rows": rows, "n_distinct_sources": len(sids),
+                                  "n_bad_lines": n_bad}
         union |= sids
+    sum_rows = sum(v["n_rows"] for v in per.values())
+    sum_srcs = sum(v["n_distinct_sources"] for v in per.values())
     return {"per_file": per, "union_distinct_sources": len(union),
-            "sum_rows_would_overcount_by": sum(per.values()) - len(union)}
+            "sum_rows": sum_rows,
+            "overcount_if_summing_rows": sum_rows - len(union),
+            "sum_distinct_sources": sum_srcs,
+            "overcount_if_summing_sources": sum_srcs - len(union),
+            "n_bad_lines": sum(v["n_bad_lines"] for v in per.values())}
 
 
 def main() -> None:
