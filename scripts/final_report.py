@@ -174,8 +174,8 @@ def main() -> None:
     L.append("")
     L.append("### 档一：方向识别——达标线 **≥ 0.80**")
     L.append("")
-    L.append("判别「哪边是人类原文 / AI 生成」。**只认长度平衡基准**（bal-v1：")
-    L.append("S/L 各半，长度基线按构造 = 0.5）；长度混淆集的读数（nat-v1 / ")
+    L.append("判别「哪边是人类原文 / AI 生成」。**只认长度平衡基准**（S/L ")
+    L.append("各半，长度基线按构造 = 0.5，当前口径 bal-v2-prod）；长度混淆集的读数（nat-v1 / ")
     L.append("cc-v1 / hvai-v1 的 0.86~0.94）**不得作为达标依据**——军师 P1-3")
     L.append("实测「只选较短」基线 0.944/0.872 压过全部模型。")
     L.append("")
@@ -189,8 +189,13 @@ def main() -> None:
         bal = None
     if bal:
         L.append(f"- 当前最好诚实读数：**{bal['model']} = {bal['accuracy']:.3f}**"
-                 f"（{bal['n_correct']}/{bal['n']}，bal-v1）")
-        L.append(f"  → **未达标**（距 0.80 差 {0.80 - bal['accuracy']:.3f}；这段差距就是后续工作目标）。")
+                 f"（{bal['n_correct']}/{bal['n']}，{bal['set_name']}）")
+        if bal['accuracy'] >= 0.80:
+            L.append(f"  → **达标**（≥0.80 预注册线，超出 "
+                     f"{bal['accuracy'] - 0.80:+.3f}）。")
+        else:
+            L.append(f"  → **未达标**（距 0.80 差 "
+                     f"{0.80 - bal['accuracy']:.3f}；这段差距就是后续工作目标）。")
     else:
         L.append("- （库里还没有长度平衡基准的跑分：先跑 bal-v1。）")
     L.append("")
