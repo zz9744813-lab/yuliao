@@ -213,3 +213,26 @@ def test_judgements_written_under_the_dead_id_still_count():
         "旧 id 下的 adversarial 判定没算到这位评委头上"
     assert pref[0]["n"] == 1 and pref[0]["missing"] == 0, \
         "旧 id 下的 preference 判定被读成 missing → 这一位在矩阵里静默蒸发"
+
+
+def test_pref_judge_idempotency_counts_judgements_under_the_dead_id():
+    """pref_judge 的"判过没有"查询：旧 id 的判定要算数，而且这条查询得**能跑**。
+
+    两个坑叠在同一行上：`filter_by(model__in=...)` 是 SQLAlchemy 没有的语法，
+    真跑才炸——这条函数一直无测试覆盖，所以带着错语法躺了一轮；
+    而只按在册名精确匹配，会让重跑把改名前的判定当成"没判过"，白烧一遍评委额度。
+    """
+    import pref_judge as PJ
+    dead = next(iter(config.DEAD_MODEL_ALIASES))
+    live = config.DEAD_MODEL_ALIASES[dead]
+    exp = "EXP-JM-IDEM"
+    _seed_pref(exp, "idem", judge_pick="human", user_won="human")
+    with db.session() as s:
+        cid = s.query(Candidate).filter_by(experiment_id=exp).first().id
+        s.add(JudgeRun(experiment_id=exp, subject_type="candidate", subject_id=cid,
+                       judge_kind="preference", model=dead, status="ok",
+                       prompt_version="judge_preference_v1",
+                       verdict={"winner_resolved": "human"}, abstain=False))
+        s.commit()
+        done = PJ._already_done(s, exp, live, "judge_preference_v1")
+    assert cid in done, "旧 id 的判定没算进幂等键 → 整批重判一遍"

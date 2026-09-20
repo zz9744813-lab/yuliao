@@ -78,11 +78,15 @@ def load() -> tuple[list[str], np.ndarray, np.ndarray, dict[str, np.ndarray]]:
             continue
         vals = {}
         for key, (pv, model) in SIGNALS.items():
+            # model_any：历史判定写于改名前（model 列存旧 id），只查新名会
+            # 静默清空 → 「所有列齐全才纳入」的口径会无声丢光样本（会审实测指出）
+            any_ids = config.model_any(model)
             q = con.execute(
-                """select verdict, abstain from judge_runs
-                   where subject_id=? and judge_kind='preference' and model=?
-                   and prompt_version=? order by created_at desc limit 1""",
-                (r["cid"], model, pv)).fetchone()
+                f"""select verdict, abstain from judge_runs
+                    where subject_id=? and judge_kind='preference'
+                    and model in ({",".join("?" * len(any_ids))})
+                    and prompt_version=? order by created_at desc limit 1""",
+                (r["cid"], *any_ids, pv)).fetchone()
             if not q or not q["verdict"] or q["abstain"]:
                 vals[key] = None
                 continue

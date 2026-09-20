@@ -80,12 +80,14 @@ def _load_pairs(s, exp_id: str, batch: str | None, with_context: bool) -> list[d
 def _already_done(s, exp_id: str, model: str, prompt_version: str) -> set[str]:
     """幂等键含 prompt_version（沿用对抗审查 P1-2 教训）：
     只按 (subject, model) 判重会让改版 prompt 后的旧产物被静默复用。"""
-    # model__in：旧 id 的历史判定也算"判过"（改名不该让幂等键失效）
+    # model_any：旧 id 的历史判定也算"判过"（改名不该让幂等键失效）。
+    # 注意 filter_by 只支持等值，in_ 必须走 filter()——filter_by(model__in=...)
+    # 会抛 InvalidRequestError（实测），那是 SQLAlchemy 不存在的语法。
     rows = (s.query(JudgeRun)
             .filter_by(experiment_id=exp_id, judge_kind="preference",
-                       model__in=config.model_any(model),
                        prompt_version=prompt_version)
-            .filter(JudgeRun.status == "ok").all())
+            .filter(JudgeRun.model.in_(config.model_any(model)),
+                    JudgeRun.status == "ok").all())
     return {r.subject_id for r in rows}
 
 
