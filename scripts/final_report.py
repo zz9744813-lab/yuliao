@@ -163,7 +163,7 @@ def main() -> None:
             latest = bcon.execute(
                 """select id, name from benchmark_sets
                    where kind = 'length_balanced'
-                   order by created_at desc limit 1""").fetchone()
+                   order by created_at desc, id desc limit 1""").fetchone()  # 同秒建集按 id 确定性 tiebreak
             bal = None
             if latest:
                 bal = bcon.execute(
