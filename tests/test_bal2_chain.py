@@ -30,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import benchmark_build as BB               # noqa: E402
 import controlled_corruption as CC       # noqa: E402
+import verify_bal_universe as VU        # noqa: E402
 from app import db                       # noqa: E40402
 from app.models import (BenchmarkItem, BenchmarkSet, Candidate,  # noqa: E402
                         ControlledCorruption, Experiment, Frame,
@@ -42,6 +43,7 @@ _UNIQ = _uuid.uuid4().hex[:8]
 # 2 红，顺序依赖复现）。teardown 见 _pool_guard。
 _CREATED: dict[str, set] = {"exp": set(), "work": set(), "seg": set(),
                            "frame": set(), "cand": set(), "cc": set()}
+_FLIP: dict = {}   # 可翻转外段快照（id → 原 role），_pool_guard setup 存 teardown 用
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +59,12 @@ def _pool_guard():
     db.init_db()  # 本文件此前靠 2c 测试真跑 CC.main()（其内部 init_db）间接建表，
                   # 夹具查询先于它 → 单独跑文件会 no such table。init_db 幂等，先建。
     with db.session() as s:
-        roles_before = dict(s.query(Segment.id, Segment.role).all())
+        # split 只加标不去标 → 只有空 role 的段可能被翻成 'benchmark'。
+        # 快照只收可翻转集（id→原 role），不做全表物化（qwen 席 BLOCK 项：
+        # 共享库池卫生夹具若被复用到现场规模，两次全表物化是数量级慢）。
+        _FLIP.clear()
+        _FLIP.update(s.query(Segment.id, Segment.role)
+                     .filter((Segment.role.is_(None)) | (Segment.role == "")).all())
     yield
     with db.session() as s:
         mine = s.query(BenchmarkSet).filter(
@@ -77,10 +84,14 @@ def _pool_guard():
             s.query(Work).filter_by(id=w_id).delete()
         for e_id in _CREATED["exp"]:
             s.query(Experiment).filter_by(id=e_id).delete()
-        for sid, role in s.query(Segment.id, Segment.role).all():
-            if sid not in _CREATED["seg"] and sid in roles_before \
-                    and role != roles_before[sid]:
-                s.get(Segment, sid).role = roles_before[sid]
+        # 只回滚「快照为空 role、期间被 split 翻成 benchmark」的外段，
+        # 按 id 集合一次圈出、恢复原值，无逐行 s.get（role='benchmark' 是
+        # 持久单调标记，测试无权替生产改库底）。
+        flipped = s.query(Segment).filter(
+            Segment.id.in_(set(_FLIP) - _CREATED["seg"]),
+            Segment.role == "benchmark").all()
+        for seg in flipped:
+            seg.role = _FLIP[seg.id]
         s.commit()
 LONG_HUMAN = ("他把茶喝完才起身，屋外风声很紧，谁也没有再说话，窗纸被吹得鼓了一下，"
               "远处还有狗吠。")                        # 37 字（>min_chars=60 会被夹具外口径排除？
@@ -250,6 +261,7 @@ def test_split_benchmark_none_exp_marks_both():
 def test_same_name_refused_then_replace_reports():
     name = f"bal-guard-{_UNIQ}"
     _seed_pair(f"EXP-G1-{_UNIQ}", "benchmark", "L")
+    _seed_pair(f"EXP-G1-{_UNIQ}", "benchmark", "S")   # 只 seed L → k=0 空集假阴性
     out1 = BB.build_length_balanced(name, version=1, seed=71, per_side=5)
     # 同名重跑：默认拒绝（防重复集——监督实测 builder 无按名查重，此守卫即新契约）
     with pytest.raises(SystemExit, match="同名长度平衡集已存在"):
@@ -257,18 +269,44 @@ def test_same_name_refused_then_replace_reports():
     # replace=True：删旧建新，返回报 replaced
     out2 = BB.build_length_balanced(name, version=1, seed=71, per_side=5,
                                     replace=True)
-    assert out2["replaced"] == out1["set_id"]
+    assert out2["replaced"]["set_id"] == out1["set_id"], "replace 必须留删旧痕迹"
+    assert out2["replaced"]["n_items"] == out1["items"]
     with db.session() as s:
         assert s.get(BenchmarkSet, out1["set_id"]) is None, "旧集没删干净"
-        assert s.get(BenchmarkSet, out2["set_id"]) is not None
+        st2 = s.get(BenchmarkSet, out2["set_id"])
+        assert st2 is not None
+        # spec 记 replaced 痕迹（qwen 席 BLOCK 项：删旧入库必须有可追溯指针）
+        assert (st2.spec or {}).get("replaced", {}).get("set_id") == out1["set_id"]
         n = s.query(BenchmarkSet).filter_by(name=name,
                                             kind="length_balanced").count()
         assert n == 1, "replace 后必须恰好一个同名集"
 
 
+def test_dry_run_reports_name_conflict():
+    """dry-run 也报同名冲突：预演就能看出真跑会被拒绝还是要删哪个集
+    （qwen 席 BLOCK 项：dry_run 整体跳过守卫，replaced 恒 None）。"""
+    _seed_pair(f"EXP-DRY-{_UNIQ}", "benchmark", "L")
+    _seed_pair(f"EXP-DRY-{_UNIQ}", "benchmark", "S")   # 只 seed L → k=0 空集假阴性
+    name = f"bal-dry-{_UNIQ}"
+    d1 = BB.build_length_balanced(name, version=1, seed=97, per_side=1,
+                                  dry_run=True)
+    assert d1["name_conflict"] is None and d1["on_conflict"].startswith("refuse")
+    out = BB.build_length_balanced(name, version=1, seed=97, per_side=1)
+    d2 = BB.build_length_balanced(name, version=1, seed=97, per_side=1,
+                                  dry_run=True)
+    assert d2["name_conflict"] == {"set_id": out["set_id"],
+                                   "n_items": out["items"]}
+    assert d2["on_conflict"] == "refuse（SystemExit）"
+    d3 = BB.build_length_balanced(name, version=1, seed=97, per_side=1,
+                                  dry_run=True, replace=True)
+    assert d3["on_conflict"].startswith("replace"), "replace 预演要标明会删旧"
+    assert d3["replaced"] is None  # dry-run 只预告，不真删
+
+
 def test_bal_v2_carries_split_marker_and_universe():
     """spec 带 split=2 版本标记 + 实测宇宙字段（l/s_universe + 两侧实测库存）。"""
     _seed_pair(f"EXP-SP-{_UNIQ}", "benchmark", "L")
+    _seed_pair(f"EXP-SP-{_UNIQ}", "benchmark", "S")   # 只 seed L → k=0 空集假阴性
     out = BB.build_length_balanced(f"bal-sp-{_UNIQ}", version=1, seed=81, per_side=1)
     with db.session() as s:
         st = s.get(BenchmarkSet, out["set_id"])
@@ -289,3 +327,36 @@ def test_insufficient_stock_reports_per_side_fields():
     assert out["items"] == out["S"] + out["L"]
     assert "universe" in out and "l_stock_measured" in out["universe"], \
         "库存不足的报告必须带实测库存字段（预注册协议要求如实报）"
+
+
+# ── 宇宙核验脚本（qwen 席 BLOCK 项：读数证据必须可复现，不许拿建集函数自证） ──
+
+def test_verify_bal_universe_clean_set_passes():
+    """干净集核验通过：L 侧全部命中预期宇宙，0 mismatch，per-side 计数带实验 id。"""
+    eold, enew = f"EXP-VC-O-{_UNIQ}", f"EXP-VC-N-{_UNIQ}"
+    _seed_pair(eold, "benchmark", "L")   # 旧实验 L 行：宇宙过滤后不进集
+    _seed_pair(enew, "benchmark", "L")
+    _seed_pair(enew, "benchmark", "S")
+    out = BB.build_length_balanced(f"bal-vc-{_UNIQ}", version=1, seed=117,
+                                   per_side=1, l_experiments=(enew,))
+    rep = VU.verify_set(out["set_id"])
+    assert rep["n_mismatch"] == 0, f"干净集不该报 mismatch：{rep['mismatch']}"
+    assert any(k.startswith("L/") and enew in k
+               for k in rep["per_direction_experiment"]), \
+        "逐题回连计数必须带实验 id（不然等于没核）"
+    # 旧实验的 L 行若被宇宙过滤拦住，就不该出现在任何 L/ 计数里
+    assert not any(k.startswith("L/") and eold in k
+                   for k in rep["per_direction_experiment"]), "旧实验 L 行混进集"
+
+
+def test_verify_bal_universe_flags_foreign_l_rows():
+    """L 侧有行落在预期宇宙外 → n_mismatch≥1 且逐题列出（exit 1 的判据来自这里）。"""
+    evf = f"EXP-VF-{_UNIQ}"
+    _seed_pair(evf, "benchmark", "L")
+    _seed_pair(evf, "benchmark", "S")   # 不 seed S → k=0 建空集 → 0 mismatch 假阴性
+    out = BB.build_length_balanced(f"bal-vf-{_UNIQ}", version=1, seed=127, per_side=1)
+    assert out["items"] >= 2, "两侧都有库存时必须有题（空集的 mismatch 没有判别力）"
+    rep = VU.verify_set(out["set_id"], l_experiments=("EXP-NOPE",))
+    assert rep["n_mismatch"] >= 1, "宇宙外的 L 行必须被点出（宁报错不放过）"
+    assert any(m["reason"] == "outside_universe" for m in rep["mismatch"]), \
+        "mismatch 必须带原因分型（outside_universe/ambiguous/not_linked/EQ）"

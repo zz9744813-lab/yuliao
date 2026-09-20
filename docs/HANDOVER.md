@@ -245,16 +245,27 @@ already==0 非零退出、--exp 透传）+ 测试卫生（链测试 monkeypatch 
 共享库池卫生 teardown 夹具——teardown 删净本文件 seed 的行并回滚被 split
 标记的外段 role）+ 旧实验排除回归测试（混池按 exp 建集不得捞旧行）。
 旧集处置：BS-fe40d3fd9b1a 的三评委跑分在 kimi 完成 123/600 后终止（runner
-已杀，额度消耗审计见台账），集与 200 条目已删除——该集读数作废，不得引用。
+已杀，额度消耗审计见台账 F:\Hermes\team\gui_report.md 2026-09-20 17:00/18:24
+行；llm_calls purpose=benchmark 留存），集与 200 条目已删除——该集读数
+作废，不得引用；删除不可逆、无备份，追溯依赖上述台账行与残留 llm_calls。
 **bal-v2-prod 干净重建：BS-5543d4b7ac4c，180 题 = S 90 + L 90**（seed
 20260925，per_side 90）。实测宇宙：L 侧行宇宙 = **纯 EXP-BAL2-PROD**
-（实测库存 93 行；逐题按变体文本回连 ControlledCorruption 核验 90/90 全为
-PROD、0 旧行混入）；S 侧未限定（结构事实：窗口化产线只产 L 方向，PROD 无
+（实测库存 93 行；核验=scripts/verify_bal_universe.py 逐题按变体文本回连
+ControlledCorruption，证据 outputs/bal2-prod-verify/BS-5543d4b7ac4c.json：
+L/EXP-BAL2-PROD 90、S/EXP-0918-BENCH 57、S/EXP-0918-CORR 33、0 mismatch）；S 侧未限定（结构事实：窗口化产线只产 L 方向，PROD 无
 S 库存，纯 PROD 平衡集不可行），S 侧 90 题来自 legacy EXP-0918-BENCH（57）+
 EXP-0918-CORR（33），spec 已声明 s_universe=all、s_stock_measured=195。
 解读注记（继承产线声明）：S/L 对照带类型混杂——L 侧全部由
 LITERARY_OVERWRITE+SUBTEXT_ERASE 两型构成，S 侧为旧代多型；档一读数
-必须带此注记。下一步：BS-5543d4b7ac4c 三评委跑分（qoder/kimi/agnes 全报，
+必须带此注记。qwen 席会审 BLOCK 修复（同日第二轮）：dry-run 报
+name_conflict/on_conflict（预演可见冲突）；replace 在新集 spec 留
+replaced={set_id,n_items} 删旧痕迹（role='benchmark' 不回收——持久单调
+标记、段可被多集共享，行级宇宙过滤是兜底层）；k=0 拒建空集（空集曾让
+3 条测试假阴性通过，已补两侧 seed）；新增 scripts/verify_bal_universe.py
+（建集函数自证不算数：逐题回连、mismatch exit 1、--json 落证据）；
+链测试池夹具快照缩到可翻转集（role 空白段），teardown 只回滚被翻外段，
+不再两次全表物化。
+下一步：BS-5543d4b7ac4c 三评委跑分（qoder/kimi/agnes 全报，
 不许只挑好看的一家）+ benchmark_falsify 全套 N0~N5 → 档一读数（预注册：
 两侧各 n≥40，方向识别 ≥0.80 达标线，judge 面板含 N4 长度基线）。
 

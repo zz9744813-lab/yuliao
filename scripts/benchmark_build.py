@@ -284,7 +284,7 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
                           replace: bool = False) -> dict:
     """长度平衡基准（指标硬化收口，2026-09-20）：S（human 更短）与 L（human 更长）
     两侧各取一半——长度基线在平衡集上按构造 = 0.5，评委读数无法搭长度便车
-    （军师 P1-3：nat-v1 0.944 / hvai 0.87.2 的读数全部带着长度混淆）。
+    （军师 P1-3：nat-v1 0.944 / hvai 0.872 的读数全部带着长度混淆）。
 
     **按侧宇宙过滤**（2026-09-20 监督整改）：role='benchmark' 是持久单调标记，
     历次 split 留下的旧标记段永远在 _eligible_pairs 池里——不滤会混入
@@ -294,12 +294,17 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
     干净口径是 L 侧纯化到指定实验、S 侧用 legacy 库存并在 spec 显式声明。
 
     **同名守卫**：同名同 kind 已存在 → 默认拒绝（防重复集）；replace=True
-    删旧建新并在返回里报 replaced。spec 记录实测宇宙与真实两侧库存。
+    删旧建新并在返回与 spec 里留 replaced 痕迹（删了哪个集、多少题）——
+    role='benchmark' 不回收（持久单调标记，段可能被别的集合共享；行级
+    宇宙过滤是兜底层）。dry-run 也报 name_conflict，预演就能看出真跑
+    会被拒绝还是要删哪个集。spec 记录实测宇宙与真实两侧库存。
     控制臂（NEUTRAL_PARAPHRASE）保留：判别题（哪边是原文）里它是合法题。
     """
     with db.session() as s:
         existed = (s.query(BenchmarkSet)
                    .filter_by(name=name, kind="length_balanced").first())
+        conflict = None if existed is None else {"set_id": existed.id,
+                                                 "n_items": existed.n_items}
         if existed is not None and not dry_run:
             if not replace:
                 raise SystemExit(
@@ -308,7 +313,7 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
             s.query(BenchmarkItem).filter_by(set_id=existed.id).delete()
             s.query(BenchmarkSet).filter_by(id=existed.id).delete()
             s.commit()
-        replaced = existed.id if (existed is not None and replace and not dry_run) else None
+        replaced = dict(conflict) if (conflict and replace and not dry_run) else None
 
         rows = _eligible_pairs(s)
         s_side, l_side = [], []
@@ -334,11 +339,19 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
         if dry_run:
             return {"would_build": {"S": len(s_side), "L": len(l_side),
                                      "per_side": min(per_side, len(l_side), len(s_side))},
-                    "universe": universe, "replaced": replaced}
+                    "universe": universe, "replaced": replaced,
+                    "name_conflict": conflict,
+                    "on_conflict": ("replace（删旧建新，见 replaced）" if replace
+                                    else "refuse（SystemExit）")}
         rng = random.Random(seed)
         rng.shuffle(s_side)
         rng.shuffle(l_side)
         k = min(per_side, len(s_side), len(l_side))
+        if k == 0:
+            raise SystemExit(
+                f"建不出配平集：per_side={per_side}，实测库存 S={len(s_side)} / "
+                f"L={len(l_side)}——一侧为 0 两侧都配不平；先 --dry-run 看库存，"
+                "别建空集占名（同名守卫会挡住后续重建）。")
         picked = s_side[:k] + l_side[:k]
         st = BenchmarkSet(id=new_id("BS"), name=name, version=version,
                           kind="length_balanced", n_items=len(picked),
@@ -350,7 +363,8 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
                                 "position_seed": seed,
                                 "ctx": "near1",
                                 "split": 2,
-                                **universe},
+                                **universe,
+                                **({"replaced": replaced} if replaced else {})},
                           note="长度平衡判别题：S/L 各半，读数不被长度先验污染。"
                                "实测宇宙见 spec（l_universe/s_universe/两侧实测库存）。")
         s.add(st)
