@@ -54,9 +54,13 @@ GROUPS = [
 
 
 def exists(s, eid, frame_id, model, pv):
-    return s.query(Candidate.id).filter_by(
-        experiment_id=eid, frame_id=frame_id, model=model,
-        prompt_version=pv).first() is not None
+    # model.in_(model_any)：改名前生成的候选存的是旧 id（库里上千行），
+    # 精确匹配会把"已经做过"看成"没做过"→ 同一 (帧,模型,口径) 再生成一份，
+    # 盲评里出现同文双份、成本也白烧一遍。
+    q = (s.query(Candidate.id)
+          .filter_by(experiment_id=eid, frame_id=frame_id, prompt_version=pv)
+          .filter(Candidate.model.in_(config.model_any(model))))
+    return q.first() is not None
 
 
 def main():

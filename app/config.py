@@ -43,12 +43,31 @@ GATEWAY_API_KEY = os.environ.get("LG_GATEWAY_API_KEY", "")
 # 前缀的旧 id 已下线（503 model_not_found，09-19 20:00 起全线死）。全仓默认模型
 # 收敛到本常量（环境变量 LG_LLM_MODEL 可覆盖），不许再散落字面量。
 DEFAULT_LLM_MODEL = os.environ.get("LG_LLM_MODEL", "deepseek-v4.1-flash")
+# 已下线的历史 id → 在册 id。历史 JudgeRun/Candidate 行里存的是旧名：
+# ①查历史数据必须 model_any()（新旧都查）；②写新数据一律 canonical_model()；
+# ③按 model 去重/配对的池一律先 canonical 再比，防同一模型新旧名出现两份。
+DEAD_MODEL_ALIASES = {"deepseek/deepseek-v4.1-flash": DEFAULT_LLM_MODEL}
+
+
+def canonical_model(mid: str) -> str:
+    """写入侧统一 id：死别名归一到在册名，其余原样。"""
+    return DEAD_MODEL_ALIASES.get((mid or "").strip(), (mid or "").strip())
+
+
+def model_any(mid: str) -> tuple[str, ...]:
+    """查询侧兼容元组：给 `.in_()` 用——canonical 名 + 它的所有历史别名。"""
+    mid = (mid or "").strip()
+    ids = {mid, canonical_model(mid)}
+    ids |= {k for k, v in DEAD_MODEL_ALIASES.items() if v == canonical_model(mid)}
+    return tuple(sorted(ids))
+
+
 DEFAULT_RECON_MODELS = [
     m.strip()
     for m in os.environ.get(
         "LG_RECON_MODELS",
-        f"deepseek-v4.1-flash,z-ai/glm-5.3,"
-        f"moonshotai/kimi-k3,agnes-3.0-flash",
+        f"{DEFAULT_LLM_MODEL},z-ai/glm-5.3,"
+        "moonshotai/kimi-k3,agnes-3.0-flash",
     ).split(",")
     if m.strip()
 ]

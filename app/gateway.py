@@ -295,6 +295,11 @@ def _real_chat(*, model: str, system: str, user: str, purpose: str,
                            prompt_version=prompt_version)
     if not config.GATEWAY_BASE_URL or not config.GATEWAY_API_KEY:
         raise LLMError("LG_GATEWAY_BASE_URL / LG_GATEWAY_API_KEY 未配置")
+    # 出口归一（P0 死 id 事故）：历史实验配置、控制台默认值、存量脚本参数里都可能
+    # 还写着已下线的旧名。它的表现不是报错，而是**整批 503** 且调用方只看得见 failed
+    # 计数——于是又被归因成"池子没货"。别名表只此一份（config.DEAD_MODEL_ALIASES），
+    # 一处归一胜过全仓改字符串；llm_calls 记的也就是真正发出去的那个名字。
+    model = config.canonical_model(model)
 
     url = f"{config.GATEWAY_BASE_URL}/chat/completions"
     headers = {"Authorization": f"Bearer {config.GATEWAY_API_KEY}"}

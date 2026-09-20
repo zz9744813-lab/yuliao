@@ -58,7 +58,7 @@ python scripts/run_calibration.py --segments 60
 # ②b 直接按绝对路径导入一本书、只从它采样（评委模型避开重建家族）
 python scripts/run_calibration.py --file "F:\小说\gem\绿\长篇\【精校】琼明神女录.txt" \
     --work 琼明 --segments 30 \
-    --models "deepseek/deepseek-v4.1-flash,z-ai/glm-5.3" \
+    --models "deepseek-v4.1-flash,z-ai/glm-5.3" \
     --judge-models "moonshotai/kimi-k3" --samples 1 --concurrency 6
 
 # ③ Web 控制台（实验/语料/盲评/用量 四页签，无构建依赖）

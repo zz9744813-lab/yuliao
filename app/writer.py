@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from . import config
-from . import context_ablation
 from .context_ablation import MODES as CONTEXT_MODES  # noqa: F401  （口径引用）
 from .gateway import chat
 from .prompts_ctx import CTXONLY_SYSTEM, CTXONLY_USER, RECON_CTX_SYSTEM, RECON_CTX_USER

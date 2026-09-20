@@ -27,11 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config, db
 from app.context_ablation import scene_context
 from app.judges import PREFERENCE_PROMPT_VERSION, judge_preference
 from app.models import Candidate, JudgeRun, Segment, Work
+import preflight_models as pf
 
 # 语料 → 实验（各语料 v2 段 + S/M/L 双抽取器产物）
 CORPORA = [
@@ -44,7 +46,9 @@ JUDGE_KIND = "preference_xcorpus"      # 独立 kind，不污染正式 preferenc
 DEFAULT_JUDGES = "moonshotai/kimi-k3," + config.DEFAULT_LLM_MODEL
 
 _lock = threading.Lock()
-_counter = {"ok": 0, "failed": 0, "skip": 0}
+# first_error：本轮首条失败**原文**。judge_runs 只存 status、不存错误串，
+# 而"failed=全部"和"池子没货"在计数上长得一模一样（2026-09-20 P0 事故）→ 就地留一份。
+_counter = {"ok": 0, "failed": 0, "skip": 0, "first_error": ""}
 
 
 def _sample_pairs(s, exp_id: str, n: int, seed: int) -> list[dict]:
@@ -73,7 +77,8 @@ def _sample_pairs(s, exp_id: str, n: int, seed: int) -> list[dict]:
 
 def _already(s, exp_id: str, model: str) -> set[str]:
     rows = (s.query(JudgeRun)
-            .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND, model=model,
+            .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND,
+                       model__in=config.model_any(model),
                        prompt_version=PREFERENCE_PROMPT_VERSION)
             .filter(JudgeRun.status == "ok").all())
     return {r.subject_id for r in rows}
@@ -103,7 +108,11 @@ def run_one(exp_id: str, model: str, pair: dict) -> dict:
                        abstain=bool(out.get("abstain", False)), status=out["status"]))
         s.commit()
     with _lock:
-        _counter["ok" if out["status"] == "ok" else "failed"] += 1
+        key = "ok" if out["status"] == "ok" else "failed"
+        _counter[key] += 1
+        if key == "failed" and not _counter["first_error"]:
+            _counter["first_error"] = pf.redact(
+                out.get("error") or out.get("raw") or f'status={out["status"]}')
     return {"ok": out["status"] == "ok"}
 
 
@@ -114,7 +123,8 @@ def _report() -> None:
         for label, exp_id in CORPORA:
             for m in ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL):
                 rows = (s.query(JudgeRun)
-                        .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND, model=m,
+                        .filter_by(experiment_id=exp_id, judge_kind=JUDGE_KIND,
+                                   model__in=config.model_any(m),
                                    prompt_version=PREFERENCE_PROMPT_VERSION)
                         .filter(JudgeRun.status == "ok").all())
                 pc = ph = other = 0

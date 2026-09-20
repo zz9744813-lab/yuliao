@@ -4,7 +4,8 @@
 `deepseek/deepseek-v4.1` → 网关逐个 503 → 387 段白跑 7.4 分钟、ok=0。
 
 锁定的不变量：
-1. `check_model`：池内命中放行；`vendor/model` 与裸名混写都算命中（配置里在用两种写法）。
+1. `check_model`：池内命中放行；`vendor/model` 与裸名混写都算命中（配置里在用两种写法），
+   但这种"去前缀才对上"的软命中必须显形（见 §8 末两条）。
 2. 池外给出 difflib 最近候选，且**排序确定**（同分按名字，不随池顺序漂移）。
 3. 本机桥接通道（agy/ qoder/ wb/ zcode/）不发网关请求就放行；前缀表与
    `app.gateway.SERIAL_MODEL_PREFIXES` 同源。
@@ -327,6 +328,26 @@ def test_preflight_block_skips_network_in_mock_mode(monkeypatch):
     monkeypatch.setattr(pf, "check_model", never)
     monkeypatch.setattr(pf.config, "LLM_MODE", "mock")
     assert pf.preflight_block(["deepseek/deepseek-v4.1"]) is None
+
+
+def test_bare_prefix_hit_passes_but_says_so(gw, monkeypatch, capsys):
+    """去前缀才命中的名字：判定照旧放行（放宽是既定口径），但必须把风险念出来。
+
+    第五批的 503 正是这一型——预检当时会判它"OK"，网关却按池内原样要名字。
+    """
+    monkeypatch.setattr(config, "LLM_MODE", "real")
+    assert pf.preflight_block(["anthropic/glm-5.3"], source="heldout_eval") is None
+    err = capsys.readouterr().err
+    assert "[预检提示] heldout_eval：" in err and "z-ai/glm-5.3" in err, \
+        "软命中不显形，就等于把同一个误判留给下一轮"
+
+
+def test_alias_covered_name_gets_no_redundant_warning(gw, monkeypatch, capsys):
+    """别名表已经接管的名字，出口会归一成池内写法，再提醒就是噪音。"""
+    monkeypatch.setattr(config, "LLM_MODE", "real")
+    name = next(iter(config.DEAD_MODEL_ALIASES))
+    assert pf.preflight_block([name], source="scale_corpus") is None
+    assert "[预检提示]" not in capsys.readouterr().err
 
 
 def test_require_models_exits_2_before_any_call(gw, monkeypatch, capsys):

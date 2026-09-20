@@ -209,8 +209,10 @@ def load_probe(session_factory) -> ProbeData:
     if not ctrl_judges:
         raise ValueError("控制臂（NEUTRAL_PARAPHRASE）候选上没有任何评委判定，"
                          "偏移量 r̂ 无从估计")
+    # model_any：corr24 的判定大多写于改名之前（库里是 deepseek/deepseek-v4.1-flash）。
+    # 按新名精确比对会把"其实在家"的评委报成缺家，进而让整支探针拒绝出数。
     missing = [m for m in REQUIRED_MODELS
-               if not any(mm == m for mm, _ in judges)]
+               if not any(mm in config.model_any(m) for mm, _ in judges)]
     if missing:
         raise ValueError(f"指定口径的评委在 corr24 上无判定：{missing}——"
                          f"任务要求至少 kimi 与 deepseek 可用，不许静默缺家")

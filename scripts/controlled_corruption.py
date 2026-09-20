@@ -61,6 +61,7 @@ from app.gateway import bind_experiment, chat  # noqa: E402
 from app.models import (Candidate, ControlledCorruption, Experiment, Frame,  # noqa: E402
                         ReviewItem, Segment, Work, exclude_corpus_v2_segments)
 from app.prompt_render import render  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
@@ -538,9 +539,12 @@ def run_one(s_pair: tuple, ctypes: list[str], *, exp_id: str, gen_model: str,
             # failed（empty_text 之类）允许重试，否则一次空返回就永久锁死这一格。
             # prompt_version 进 key：换了生成口径（v1→v2）时**允许重生成**同一格，
             # 否则修好的 prompt 永远覆盖不到旧格，数据集里会永久留着已知有缺陷的样本。
+            # generator_model__in：生成模型改名不该让"这格已做过"失效
+            # （否则断点续跑会把同一 (段,类型) 再劣化一遍，数据集里出现双份）
             dup = (s.query(ControlledCorruption)
                    .filter_by(segment_id=seg.id, corruption_type=ctype,
-                              generator_model=gen_model, prompt_version=GEN_PV)
+                              generator_model__in=config.model_any(gen_model),
+                              prompt_version=GEN_PV)
                    .filter(ControlledCorruption.status != "failed").first())
         if dup is not None:
             with _lock:
@@ -1256,6 +1260,38 @@ def build_batch(tag: str, n: int, seed: int, *, db_path: Path | str | None = Non
             if picked else 0}
 
 
+def _llm_models(args) -> list[str]:
+    """这条命令**真正会调到**的模型名——预检只问这些。
+
+    多问会误拦：`--recheck/--reverify` 只用校验模型，把生成模型一起校验等于
+    让一个挂掉的生成 id 挡住"救回已生成数据"的通路。分支判定顺序与 main() 一致。
+    """
+    if args.report or args.build_batch or args.split_benchmark >= 0:
+        return []                       # 纯确定性分支：不碰网关
+    if args.judge:
+        return [m.strip() for m in args.judge_models.split(",") if m.strip()]
+    if args.recheck or args.reverify:
+        return [args.verify_model]
+    return [args.gen_model, args.verify_model]
+
+
+def _first_error(exp_id: str) -> str:
+    """本实验首条**异常**原文（压成一行，可直接贴进汇报）。
+
+    为什么必须打出来：死模型 id 的表现是整批 status='failed'，而"完成"行只有计数——
+    2026-09-20 那次就把 100% 的 `503 model_not_found` 误判成"池子耗尽"。
+    只取 gen:/verify: 前缀的行：rejected_* 的 error 存的是语义拒收理由，不是故障。
+    """
+    with db.session() as s:
+        row = (s.query(ControlledCorruption.error)
+               .filter(ControlledCorruption.experiment_id == exp_id,
+                       ControlledCorruption.error.isnot(None),
+                       ControlledCorruption.error.like("gen:%")
+                       | ControlledCorruption.error.like("verify:%"))
+               .order_by(ControlledCorruption.created_at).first())
+    return pf.redact(row[0]) if row and row[0] else ""
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-seg", type=int, default=12, help="取多少个人类段落")
@@ -1288,6 +1324,10 @@ def main() -> None:
     ap.add_argument("--judge-limit", type=int, default=0)
     ap.add_argument("--variant", default="v4")
     args = ap.parse_args()
+
+    # 批量防呆①（P0 死 id 事故）：会发 LLM 调用的分支，开跑前先把模型名问一遍网关。
+    if not args.dry_run:
+        pf.require_models(_llm_models(args), source="controlled_corruption")
 
     if args.report:
         report()
@@ -1341,6 +1381,8 @@ def main() -> None:
                                            ctx_limit=args.ctx_limit, dry_run=False), picked))
         print(f"\n完成：生成 ok={_stat['gen_ok']} failed={_stat['gen_failed']} "
               f"skip={_stat['skip']}；拒收 {_stat['rejected']}")
+        if _stat["gen_failed"]:
+            print(f"       首条错误原文：{_first_error(exp_id) or '（一条异常文本都没存进 DB）'}")
         report()
         return
     if args.split_benchmark >= 0:
@@ -1410,6 +1452,8 @@ def main() -> None:
     print(f"\n完成：生成 ok={_stat['gen_ok']} failed={_stat['gen_failed']} "
           f"skip={_stat['skip']}；校验 {_stat['verified']} 条，拒收 {_stat['rejected']} 条"
           f"（{dt / 60:.1f} 分钟）")
+    if _stat["gen_failed"]:
+        print(f"       首条错误原文：{_first_error(exp_id) or '（一条异常文本都没存进 DB）'}")
     report()
 
 

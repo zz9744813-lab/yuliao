@@ -28,12 +28,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import config, db  # noqa: E402
 from app.config import BLIND_REVIEW_PROMPT_VERSIONS  # noqa: E402
 from app.gateway import chat  # noqa: E402
 from app.models import Candidate, Segment, exclude_corpus_v2_segments  # noqa: E402
 from app.ids import new_id  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 # 评委名单可被调度覆盖（LG_RANKING_JUDGES=逗号分隔）；通道挂掉时降级
 # （如 2026-09-19 晚 deepseek 网关连败 → kimi+agnes 双评委，n_valid=2 需一致票）。
@@ -223,6 +225,10 @@ def main() -> None:
     ap.add_argument("--ver", default="v1")
     ap.add_argument("--run", action="store_true", help="真跑（默认 dry-run）")
     args = ap.parse_args()
+    if args.run:
+        # 批量防呆①（P0 死 id 事故）：评委整串不在池内的表现是 n_valid=0，
+        # 看上去像"没有可判的 pair"，实际全在 503 —— 开跑前先问一遍网关。
+        pf.require_models([m.strip() for m in JUDGES], source="ai_ranking_build")
     db.init_db()
     out = build(args.pairs, args.seed, args.ver, dry_run=not args.run)
     print(json.dumps(out, ensure_ascii=False, indent=1))

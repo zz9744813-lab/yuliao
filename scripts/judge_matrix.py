@@ -54,10 +54,14 @@ def _adversarial_rows(s, exp_id: str, user_call: dict, judges) -> list[dict]:
     rows = []
     for judge in judges:
         pairs, abstain = [], 0
+        # model_any：deepseek 评委的历史判定写在改名前的旧 id 下（库里 3.4k 行），
+        # 按新名精确查会把整位评委读成"没有判定"，矩阵静默少一列。
+        want = config.model_any(judge)
         for cid, human_won in user_call.items():
             j = (s.query(JudgeRun)
                  .filter_by(experiment_id=exp_id, subject_type="candidate",
-                            subject_id=cid, judge_kind="adversarial", model=judge)
+                            subject_id=cid, judge_kind="adversarial")
+                 .filter(JudgeRun.model.in_(want))
                  .order_by(JudgeRun.created_at.desc()).first())
             if not j or not j.verdict:
                 continue
@@ -86,10 +90,12 @@ def preference_rows(s, exp_id: str, user_call: dict, judges) -> list[dict]:
     rows = []
     for judge in judges:
         pairs, non_decisive, missing = [], 0, 0
+        want = config.model_any(judge)      # 同上：旧 id 下的历史判定也算这一位评委
         for cid, human_won in user_call.items():
             j = (s.query(JudgeRun)
                  .filter_by(experiment_id=exp_id, subject_type="candidate",
-                            subject_id=cid, judge_kind="preference", model=judge)
+                            subject_id=cid, judge_kind="preference")
+                 .filter(JudgeRun.model.in_(want))
                  .order_by(JudgeRun.created_at.desc()).first())
             if not j or not j.verdict:
                 missing += 1

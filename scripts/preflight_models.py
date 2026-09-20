@@ -58,6 +58,10 @@ class ModelCheck:
     reason: str = ""
     candidates: tuple[str, ...] = ()
     pool_size: int = 0
+    # 只有"去掉 vendor 前缀才命中"时为真：网关要的是**池内原样**的 id，
+    # 这种写法照样可能 503（第五批扩产就是这一型），所以单独标出来给调用方显形。
+    bare_hit: bool = False
+    pool_hint: str = ""
 
 
 def _bare(name: str) -> str:
@@ -127,7 +131,8 @@ def check_model(name: str) -> ModelCheck:
         return ModelCheck(name, True, pool_size=len(pool))
     hit = next((m for m in pool if _bare(m) == _bare(name)), None)
     if hit:
-        return ModelCheck(name, True, reason=f"按去 vendor 前缀命中池内 `{hit}`", pool_size=len(pool))
+        return ModelCheck(name, True, reason=f"按去 vendor 前缀命中池内 `{hit}`",
+                          pool_size=len(pool), bare_hit=True, pool_hint=hit)
     return ModelCheck(name, False,
                       reason=f"网关模型池里没有 `{name}`（池内 {len(pool)} 个）",
                       candidates=tuple(nearest(name, pool)), pool_size=len(pool))
@@ -159,10 +164,15 @@ def preflight_block(models, *, source: str = "") -> str | None:
     调用方自己决定怎么收场（CLI 用 require_models；返回 dict 的 run() 用它置 aborted）。
     mock 模式根本不发网络调用（gateway 回确定性伪输出），无从校验也无需校验 → 放行。
     拿不到池按**不放行**处理，与 check_model 同口径（不猜）。
+
+    "去 vendor 前缀才命中"这一类**不改判定**（放宽是既定口径，见模块 docstring：
+    池里两种写法混用，收紧会误杀在用的配置），但会把原名打给用户——第五批扩产的
+    503 就是这个形状：`deepseek/deepseek-v4.1-flash` 去前缀能对上池里的名字，
+    预检当时会说"OK"，网关却照收 503。判定不变、原因显形，才既不误杀也看得见。
     """
     if config.LLM_MODE == "mock":
         return None
-    msgs, seen = [], set()
+    msgs, soft, seen = [], [], set()
     for name in models:
         name = (name or "").strip()
         if not name or name in seen:
@@ -175,6 +185,12 @@ def preflight_block(models, *, source: str = "") -> str | None:
             continue
         if not c.ok:
             msgs.append(describe(c))
+        elif c.bare_hit and config.canonical_model(name) == name:
+            # 别名表覆盖到的名字走的是出口归一（发出去的就是池内名），不必再提醒
+            soft.append(f"`{name}` 不在池内原样名单里，靠去 vendor 前缀命中 `{c.pool_hint}`"
+                        f"——若这轮报 model_not_found，改成 `{c.pool_hint}`")
+    for line in soft:
+        print(f"[预检提示] {source or '?'}：{line}", file=sys.stderr)
     if not msgs:
         return None
     return (f"[{source}] " if source else "") + "；".join(msgs)

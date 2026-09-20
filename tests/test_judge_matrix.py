@@ -5,6 +5,9 @@
 原实现写的是 `judge_says_human_won = (guess_hit_ai is False)`，方向反了。
 反证：一个 100% 认出 AI 的完美评委，在用户 93% 判 human 胜的数据上，
 原口径只给 7% agreement（显然错误），正确口径给 93%。
+
+另锁一条（P0 死模型 id · 2026-09-20）：评委改过名，历史判定存的是旧 id——
+矩阵按在册名查**也必须**把它们算到这位评委头上，不许少一列。
 """
 import sys
 from pathlib import Path
@@ -15,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import judge_matrix as jm
-from app import db
+from app import config, db
 from app.models import Candidate, Experiment, Frame, JudgeRun, ReviewItem, Segment, Work
 
 JUDGE = "moonshotai/kimi-k3"
@@ -183,3 +186,30 @@ def test_preference_rows_non_decisive_excluded(capsys):
     r = rows[0]
     assert r["n"] == 1 and r["non_decisive"] == 1
     assert r["agreement"] == 1.0
+
+
+def test_judgements_written_under_the_dead_id_still_count():
+    """改名前落库的判定，按在册名查也要查得到（P0 死 id 事故的**查询侧**）。
+
+    不修的形状不是报错，是**少一列**：库里 3.4k 行 deepseek 判定写于改名前，
+    `model=新名` 精确匹配会把整位评委读成"没有判定"，矩阵与 κ 就此缺一家而无声。
+    """
+    dead = next(iter(config.DEAD_MODEL_ALIASES))
+    live = config.DEAD_MODEL_ALIASES[dead]
+    exp = "EXP-JM-DEADID"
+    _seed_case(exp, "deadid", hit_ai=True, user_won="human")
+    with db.session() as s:
+        cid = s.query(Candidate).filter_by(experiment_id=exp).first().id
+        s.add(JudgeRun(experiment_id=exp, subject_type="candidate", subject_id=cid,
+                       judge_kind="adversarial", model=dead, prompt_version="pv",
+                       verdict={"guess_hit_ai": True, "guess_ai": "A"}, abstain=False))
+        s.add(JudgeRun(experiment_id=exp, subject_type="candidate", subject_id=cid,
+                       judge_kind="preference", model=dead, prompt_version="pv",
+                       verdict={"winner_resolved": "human"}, abstain=False))
+        s.commit()
+        adv = jm._adversarial_rows(s, exp, {cid: True}, (live,))
+        pref = jm.preference_rows(s, exp, {cid: True}, (live,))
+    assert [r["judge"] for r in adv] == [live] and adv[0]["n"] == 1, \
+        "旧 id 下的 adversarial 判定没算到这位评委头上"
+    assert pref[0]["n"] == 1 and pref[0]["missing"] == 0, \
+        "旧 id 下的 preference 判定被读成 missing → 这一位在矩阵里静默蒸发"

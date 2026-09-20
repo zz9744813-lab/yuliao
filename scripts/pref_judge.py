@@ -29,16 +29,20 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config, db
 from app.context_ablation import scene_context
 from app.judges import PREFERENCE_PROMPT_VERSION, judge_preference
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
+import preflight_models as pf
 
 DEFAULT_JUDGES = "moonshotai/kimi-k3," + config.DEFAULT_LLM_MODEL
 
 _lock = threading.Lock()
-_counter = {"ok": 0, "failed": 0, "skip": 0}
+# first_error：本轮首条失败**原文**。judge_runs 只存 status、不存错误串，
+# 而"failed=全部"和"池子没货"在计数上长得一模一样（2026-09-20 P0 事故）→ 就地留一份。
+_counter = {"ok": 0, "failed": 0, "skip": 0, "first_error": ""}
 
 
 def _load_pairs(s, exp_id: str, batch: str | None, with_context: bool) -> list[dict]:
@@ -76,8 +80,10 @@ def _load_pairs(s, exp_id: str, batch: str | None, with_context: bool) -> list[d
 def _already_done(s, exp_id: str, model: str, prompt_version: str) -> set[str]:
     """幂等键含 prompt_version（沿用对抗审查 P1-2 教训）：
     只按 (subject, model) 判重会让改版 prompt 后的旧产物被静默复用。"""
+    # model__in：旧 id 的历史判定也算"判过"（改名不该让幂等键失效）
     rows = (s.query(JudgeRun)
-            .filter_by(experiment_id=exp_id, judge_kind="preference", model=model,
+            .filter_by(experiment_id=exp_id, judge_kind="preference",
+                       model__in=config.model_any(model),
                        prompt_version=prompt_version)
             .filter(JudgeRun.status == "ok").all())
     return {r.subject_id for r in rows}
@@ -115,6 +121,9 @@ def run_one(exp_id: str, model: str, pair: dict, prompt_version: str) -> dict:
     with _lock:
         key = "ok" if out["status"] == "ok" else "failed"
         _counter[key] += 1
+        if key == "failed" and not _counter["first_error"]:
+            _counter["first_error"] = pf.redact(
+                out.get("error") or out.get("raw") or f'status={out["status"]}')
         n = _counter["ok"] + _counter["failed"]
         if n % 10 == 0:
             print(f"  progress: ok={_counter['ok']} failed={_counter['failed']}", flush=True)
@@ -174,11 +183,17 @@ def main() -> None:
         print("dry-run：未调用任何 API")
         return
 
+    # 批量防呆①（P0 死 id 事故）：dry-run 之后、真调用之前问一遍网关。
+    # 池外评委的表现是 failed=整批，而"没货"与"名字错了"在计数上完全同形。
+    pf.require_models(judges, source="pref_judge")
     jobs = [(args.exp_id, m, p, prompt_version) for m in judges for p in pairs]
+    _counter["first_error"] = ""      # 本轮失败原因只属于本轮
     with ThreadPoolExecutor(max_workers=args.conc) as pool:
         for _ in pool.map(lambda j: run_one(*j), jobs):
             pass
     print(f"完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
+    if _counter["failed"]:
+        print(f"       首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")
     print(f"下一步：python scripts/judge_matrix.py {args.exp_id}"
           + (f" {args.batch}" if args.batch else ""))
 

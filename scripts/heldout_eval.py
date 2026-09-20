@@ -32,11 +32,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config, db
 from app.context_ablation import scene_context
 from app.judges import PROMPT_VARIANTS, judge_preference
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
+import preflight_models as pf
 
 DB = Path(__file__).resolve().parent.parent / "data" / "language_genome.db"
 EXP = "EXP-0911-B82D"
@@ -46,7 +48,9 @@ BATCH_EPOCH = "2026-09-14T13:15:00Z"
 JUDGES = ("moonshotai/kimi-k3", config.DEFAULT_LLM_MODEL)
 
 _lock = threading.Lock()
-_counter = {"ok": 0, "failed": 0, "skip": 0}
+# first_error：本轮首条失败**原文**。judge_runs 只存 status、不存错误串，
+# 而"failed=全部"和"池子没货"在计数上长得一模一样（2026-09-20 P0 事故）→ 就地留一份。
+_counter = {"ok": 0, "failed": 0, "skip": 0, "first_error": ""}
 
 
 def load_items(heldout_only: bool, batch: str = BATCH,
@@ -125,9 +129,11 @@ def resolve_exp(batch: str, db_path: Path | str | None = None) -> str:
 
 
 def _done(s, cid: str, model: str, pv: str, exp: str | None = None) -> bool:
+    # model__in（不是 model=）：历史行存的是已下线的旧 id，按新名精确查会把
+    # "已判过"看成"没判过"→ 重复烧额度并多写一行，κ 就在重复样本上算。
     return bool(s.query(JudgeRun).filter_by(
         experiment_id=exp or EXP, subject_type="candidate", subject_id=cid,
-        judge_kind="preference", model=model, prompt_version=pv,
+        judge_kind="preference", model__in=config.model_any(model), prompt_version=pv,
         status="ok").first())
 
 REVERSE_SUFFIX = "_rev"
@@ -154,10 +160,13 @@ def _as_dict(v) -> dict | None:
 def _human_was_a(cid: str, model: str, pv: str, exp: str | None = None) -> bool | None:
     """读某条已有的判定记录的 human_was_a（用于构造它的"反序"重跑）。"""
     with db.session() as s:
+        # model__in：正向判定可能写于改名之前，精确查会把"有反序可对"看成"没有"，
+        # 于是反序臂静默缺样本（读数少一截却不报错）。
         r = (s.query(JudgeRun)
              .filter_by(experiment_id=exp or EXP, subject_type="candidate", subject_id=cid,
-                        judge_kind="preference", model=model, prompt_version=pv,
+                        judge_kind="preference", prompt_version=pv,
                         status="ok")
+             .filter(JudgeRun.model.in_(config.model_any(model)))
              .order_by(JudgeRun.created_at.desc()).first())
         d = _as_dict(r.verdict) if r else None
         return None if not d else d.get("human_was_a")
@@ -197,7 +206,13 @@ def run_one(cid: str, ctx: str, model: str, variant: str,
                        abstain=bool(out.get("abstain", False)), status=out["status"]))
         s.commit()
     with _lock:
-        _counter["ok" if out["status"] == "ok" else "failed"] += 1
+        if out["status"] == "ok":
+            _counter["ok"] += 1
+        else:
+            _counter["failed"] += 1
+            if not _counter["first_error"]:
+                _counter["first_error"] = pf.redact(
+                    out.get("error") or out.get("raw") or f'status={out["status"]}')
 
 
 def _kappa(pairs: list[tuple[int, int]]) -> float:
@@ -559,6 +574,8 @@ def _run_reverse(items: list[dict], conc: int, exp: str | None = None) -> None:
                                   exp=exp), jobs):
             pass
     print(f"  完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
+    if _counter["failed"]:
+        print(f"        首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")
     report(items, batch="（正序+反序）", reverse=True)
 
 
@@ -582,6 +599,11 @@ def main() -> None:
     for _v in args.variants:
         if _v not in PROMPT_VARIANTS:
             raise SystemExit(f"未知口径 {_v}；可选 {list(PROMPT_VARIANTS)}")
+
+    # 批量防呆①（P0 死 id 事故）：正序与 --reverse 两条路都会发调用，闸门放最前面。
+    if not args.dry_run:
+        pf.require_models(list(JUDGES), source="heldout_eval")
+        _counter["first_error"] = ""      # 本轮失败原因只属于本轮
 
     db.init_db()
     # --batch 支持逗号分隔多批次（用途：在"未标注过"的优先队列上跑缺陷口径，
@@ -637,6 +659,8 @@ def main() -> None:
         for _ in pool.map(lambda j: run_one(*j, exp=exp), jobs):
             pass
     print(f"完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
+    if _counter["failed"]:
+        print(f"       首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")
     if len(experiments_of_batch(btags[0])) > 1:
         print()
         print("⚠ 本批跨多个实验（跨语料）：各语料的入样概率不同，")

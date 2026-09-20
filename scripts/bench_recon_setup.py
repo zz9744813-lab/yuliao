@@ -27,9 +27,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import config, db  # noqa: E402
 from app.models import Experiment, Frame, Segment  # noqa: E402
+import preflight_models as pf  # noqa: E402  # 批量防呆①：模型名预检
 
 EXP_ID = "EXP-BENCH-RECON"
 MODEL = config.DEFAULT_LLM_MODEL   # 中转网关，非串行通道；够快且便宜
@@ -73,6 +75,9 @@ def main() -> None:
     ap.add_argument("--run", action="store_true", help="真写库（默认 dry-run）")
     args = ap.parse_args()
     db.init_db()
+    if args.run:
+        # 死 id 写进 exp.config，代价是后面整批抽帧静默 503（P0 事故形状）→ 真写库前先验名
+        pf.require_models([MODEL], source="bench_recon_setup")
     out = setup(dry_run=not args.run)
     print(json.dumps(out, ensure_ascii=False))
 

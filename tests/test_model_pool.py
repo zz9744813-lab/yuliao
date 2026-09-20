@@ -10,6 +10,7 @@
 """
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -94,3 +95,105 @@ def test_qoder_wb_routes(monkeypatch):
 def test_cli_output_unwrapping():
     """本机 CLI 的输出要剥壳：Qoder 会先打一行 `[meta] {...}`，WB 把回答塞在 detail 里。"""
     assert gateway._META_LINE.sub("", '[meta] {"a":1}\n{"ok": true}').strip() == '{"ok": true}'
+
+
+# ── P0 死模型 id（2026-09-20）：残留必须是 0，且出口要能自纠 ──────
+
+def test_egress_canonicalizes_the_dead_alias(monkeypatch):
+    """调用方递来已下线的旧 id 时，出口必须换成在册名再发。
+
+    为什么放在出口而不是"改完字符串就完事"：旧名还活在**历史实验配置**与
+    控制台默认值里，改不完；而它的表现不是报错，是整批 503 + 调用方只见计数
+    （第五批扩产就被这么误判成"池子耗尽"）。
+    """
+    sent: dict = {}
+
+    class Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "好"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    class Client:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, url, headers=None, json=None):
+            sent["model"], sent["auth"] = json["model"], dict(headers or {})
+            return Resp()
+
+    import httpx
+    monkeypatch.setattr(gateway, "httpx", SimpleNamespace(Client=Client,
+                                                          HTTPError=httpx.HTTPError))
+    monkeypatch.setattr(gateway, "_record",
+                        lambda purpose, model, pv, r: sent.setdefault("logged", model))
+    monkeypatch.setattr(config, "GATEWAY_BASE_URL", "http://gw.test:3000/v1")
+    monkeypatch.setattr(config, "GATEWAY_API_KEY", "sk-test")
+    dead, live = next(iter(config.DEAD_MODEL_ALIASES.items()))
+    assert gateway._real_chat(model=dead, system="s", user="u", purpose="t",
+                              prompt_version="pv", temperature=0.0,
+                              max_tokens=16, seed=None).text == "好"
+    assert sent["model"] == live, "发出去的仍是死 id → 整批 503"
+    assert sent["logged"] == live, "llm_calls 要记真正发出去的名字，否则用量表在骗人"
+
+
+def test_live_model_defaults_carry_no_dead_id():
+    """脚本级"默认模型常量"一律指向在册名（默认值会被整批复用，错一个=白跑一轮）。
+
+    只收**导入不碰库**的脚本：v2_rebuild / gen_cand_one 这类在模块级查库，
+    放进单测里会让这一条变成分钟级慢测。
+    """
+    import ai_ranking_build as AR
+    import bench_recon_setup as BR
+    import controlled_corruption as CC
+    import heldout_eval as HE
+    import pref_judge as PJ
+    import source_check as SRC
+    import xcorpus_bias as XC
+    dead = set(config.DEAD_MODEL_ALIASES)
+    defaults = [BR.MODEL, SRC.MODEL, CC.DEFAULT_GEN, CC.DEFAULT_VERIFY, *CC.DEFAULT_JUDGES,
+                *HE.JUDGES, *AR.JUDGES, *PJ.DEFAULT_JUDGES.split(","),
+                *XC.DEFAULT_JUDGES.split(","), config.DEFAULT_LLM_MODEL, config.STRONG_MODEL,
+                *config.DEFAULT_RECON_MODELS, *config.EXTRACTOR_MODELS]
+    bad = sorted({m.strip() for m in defaults if m.strip() in dead})
+    assert not bad, f"默认值里仍有已下线 id {bad}"
+    # 单一来源：默认名必须就是常量本身，而不是又一份同字面量（改常量要能全线跟着变）
+    assert CC.DEFAULT_GEN == config.DEFAULT_LLM_MODEL
+    assert config.DEFAULT_RECON_MODELS[0] == config.DEFAULT_LLM_MODEL
+
+
+def test_live_surfaces_do_not_advertise_the_dead_id():
+    """README / .env 模板 / 控制台默认值是"人会抄的地方"，残留数必须为 0。
+
+    docs/*.md 与 data/ 是历史证据，不在射程内（事故记录里就是要留旧名）。
+    """
+    dead = set(config.DEAD_MODEL_ALIASES)
+    root = Path(__file__).resolve().parent.parent
+    hits = []
+    for rel in ("README.md", ".env.example", "app/static/index.html"):
+        text = (root / rel).read_text(encoding="utf-8")
+        hits += [(rel, d) for d in dead if d in text]
+    assert not hits, f"活文件里还写着已下线 id：{hits}"
+
+
+def test_alias_table_is_two_way_consistent():
+    """死 id 别名表是**唯一口径**：写入侧归一、查询侧新旧都认，两边吃同一张表。
+
+    表被 7 处调用（gateway 出口、pref_judge/heldout_eval/xcorpus_bias 的幂等键、
+    controlled_corruption 的去重、judge_matrix 的读数）。写新查旧或写旧查新都
+    不报错，只是静默漏数据——所以口径一致性只能靠测试钉住。
+    """
+    for dead, live in config.DEAD_MODEL_ALIASES.items():
+        assert config.canonical_model(dead) == live
+        assert config.canonical_model(live) == live, "在册名再被改写就是二次事故"
+        assert set(config.model_any(dead)) == set(config.model_any(live)) == {dead, live}
+    assert config.canonical_model(f"  {config.DEFAULT_LLM_MODEL}  ") == config.DEFAULT_LLM_MODEL
+    assert set(config.model_any("moonshotai/kimi-k3")) == {"moonshotai/kimi-k3"}
