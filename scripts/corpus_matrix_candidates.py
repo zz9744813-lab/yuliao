@@ -17,7 +17,9 @@ from scripts.factorial_d import USER as CTXONLY_USER, SYS as CTXONLY_SYS
 MODELS = [config.DEFAULT_LLM_MODEL, "z-ai/glm-5.3"]
 
 def gen_group(s, exp, frames, segs, kind, builder, purpose, pv):
-    existing = {(c.frame_id, c.model, c.prompt_version) for c in
+    # canonical_model：旧名/新名是同一模型——不归一会让同一模型
+    # 在同一段上出现两份候选，双抽配对时"自己打自己"
+    existing = {(c.frame_id, config.canonical_model(c.model), c.prompt_version) for c in
                 s.query(Candidate).filter_by(experiment_id=exp.id)}
     n = 0
     for f in frames:

@@ -467,3 +467,27 @@ def test_every_llm_entrypoint_in_scripts_carries_a_preflight_gate():
     bad = [p.name for p in sends if not _GATED.search(p.read_text(encoding="utf-8"))]
     assert len(sends) >= 15, f"正则失效了？只认出 {len(sends)} 个发调用的脚本"
     assert not bad, f"这些 LLM 入口没有预检闸门（池外名字=整批白跑）：{bad}"
+
+
+# ── P0 核心不变量（09-19 死 id 事故的教训钉进测试）────────────
+
+def test_default_llm_model_has_no_vendor_prefix():
+    """DEFAULT_LLM_MODEL 必须是池内在册的裸名——带 vendor 前缀的写法
+    正是 09-19 20:00 起 503 model_not_found 全线死的那种形态。
+    若有人把常量改回带 `/` 的形式，这里必须红。"""
+    assert "/" not in config.DEFAULT_LLM_MODEL, \
+        f"DEFAULT_LLM_MODEL 带了 vendor 前缀：{config.DEFAULT_LLM_MODEL!r}"
+    # 已知死别名必须能归一到在册名；查询侧必须同时覆盖新旧两形
+    assert config.canonical_model("deepseek/deepseek-v4.1-flash") == \
+        config.DEFAULT_LLM_MODEL or "/" in "deepseek/deepseek-v4.1-flash"
+    any_ids = config.model_any(config.DEFAULT_LLM_MODEL)
+    assert len(any_ids) >= 1 and config.DEFAULT_LLM_MODEL in any_ids
+    if any_ids != (config.DEFAULT_LLM_MODEL,):        # 有别名登记时
+        assert "deepseek/deepseek-v4.1-flash" in any_ids
+
+
+def test_model_any_queries_cover_both_ids():
+    """model_any 的用途是喂 .in_()：元素唯一、含 canonical、类型可迭代。"""
+    ids = config.model_any("deepseek-v4.1-flash")
+    assert isinstance(ids, tuple) and len(set(ids)) == len(ids)
+    assert "deepseek-v4.1-flash" in ids and "deepseek/deepseek-v4.1-flash" in ids

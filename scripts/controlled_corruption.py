@@ -787,8 +787,11 @@ def _ensure_frames(seg_ids: list[str], exp_id: str) -> int:
         # （2026-09-18 实测：5 个基准段因此永远补不上帧）。
         e.config = {**(e.config or {}), "segment_ids": sorted(set(need)),
                     "granularities": ["L"],
-                    "extractors": (e.config or {}).get(
-                        "extractors") or [config.DEFAULT_LLM_MODEL],
+                    # canonical_model：存量配置里的死 id 归一到在册名——
+                    # 「源校勘 0/300 → 0 帧」事故的残留入口就是这里只补空不洗存量
+                    "extractors": [config.canonical_model(x)
+                                   for x in ((e.config or {}).get("extractors") or [])
+                                   if config.canonical_model(x)] or [config.DEFAULT_LLM_MODEL],
                     "concurrency": 4}
         s.commit()
         print(f"补抽 L 帧：{len(need)} 段（基准段本来没抽过帧）")

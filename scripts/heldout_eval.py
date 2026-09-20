@@ -358,10 +358,13 @@ def _two_order_verdict(cid: str, model: str, base_pv: str, con) -> str | None:
 
 
 def _read_verdict(cid: str, model: str, pv: str, con) -> str | None:
+    # model_any：历史判定写于改名前（model 列存旧 id），只查新名会静默清空
+    any_ids = config.model_any(model)
     r = con.execute(
-        """select verdict, abstain from judge_runs where subject_id=? and judge_kind='preference'
-           and model=? and prompt_version=? order by created_at desc limit 1""",
-        (cid, model, pv)).fetchone()
+        f"""select verdict, abstain from judge_runs where subject_id=? and judge_kind='preference'
+            and model in ({",".join("?" * len(any_ids))})
+            and prompt_version=? order by created_at desc limit 1""",
+        (cid, *any_ids, pv)).fetchone()
     if not r or not r["verdict"] or r["abstain"]:
         return None
     d = _as_dict(r["verdict"])

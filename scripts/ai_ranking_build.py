@@ -109,7 +109,8 @@ def sample_pairs(s, n_pairs: int, seed: int) -> list[dict]:
         def _distinct(i, j):
             return (cands[i].text or "") != (cands[j].text or "")
         cross = [(i, j) for i in range(len(cands)) for j in range(i + 1, len(cands))
-                 if cands[i].model != cands[j].model and _distinct(i, j)]
+                 if config.canonical_model(cands[i].model) != config.canonical_model(cands[j].model)
+                 and _distinct(i, j)]
         fallback = [(i, j) for i in range(len(cands)) for j in range(i + 1, len(cands))
                     if _distinct(i, j)]
         choice = rng.choice(cross if cross else fallback) if (cross or fallback) else None
