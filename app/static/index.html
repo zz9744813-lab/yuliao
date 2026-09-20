@@ -661,7 +661,7 @@
 <script src="/static/diff.js"></script>
 <script>
 const $ = s => document.querySelector(s);
-let curExp = null, curReview = null, autoTimer = null, batchTotal = 0, batchDone = 0;
+let curExp = null, curReview = null, curPid = null, curAh = null, curBh = null, autoTimer = null, batchTotal = 0, batchDone = 0;
 
 let toastTimer = null;
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.style.display='block';
@@ -917,6 +917,7 @@ async function loadNext(){
       ? `/review/next?batch=${BATCH}&ctx=${CTX_SCOPE}`
       : `/experiments/${exp}/review/next?batch=${BATCH}&ctx=${CTX_SCOPE}`);
     curReview = item.review_id;
+    curPid = item.presentation_id || null; curAh = item.a_hash || null; curBh = item.b_hash || null;   // 呈现不可变标识：提交必须带回
     curRaw = {A: item.text_a || '', B: item.text_b || ''};
     diffStale = true;
     lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
@@ -952,7 +953,8 @@ function pushHistory(entry){
 function updateHistory(id, w, tags){
   const h = sessionHistory.find(x=>x.id===id);
   if(h){ h.winner = w; h.marks = deepCopyMarks(marks); h.tags = tags || h.tags; }
-  else pushHistory({id, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
+  else pushHistory({id, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B, pid:curPid,
+                    ahash:curAh, bhash:curBh,
                     ctx:lastCtx, tags:tags||[], marks:deepCopyMarks(marks), winner:w});
 }
 
@@ -978,19 +980,19 @@ async function sendVerdict(w){
       }
     }
     const resp = await api('/review/'+curReview+'/verdict',
-              {body:{winner:w, reasons:[], annotations}});
+              {body:{winner:w, presentation_id:curPid, a_hash:curAh, b_hash:curBh, reasons:[], annotations}});
     unlockChips(resp.tags||[]);
     const note = annotations.length ? ` · ${annotations.length} 处批注` : '';
     if(inRj){
       updateHistory(rejudge.id, w, resp.tags||[]);
       $('#rv-state').textContent = `改判完成 ✓（${WIN_LABEL[w]}${note}）`;
     } else {
-      pushHistory({id:curReview, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
-                   ctx:lastCtx, tags:resp.tags||[], marks:deepCopyMarks(marks), winner:w});
+      pushHistory({id:curReview, pid:curPid, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
+                   ctx:lastCtx, tags:resp.tags||[], marks:deepCopyMarks(marks), ahash:curAh, bhash:curBh, winner:w});
       batchDone = Math.min(batchDone+1, batchTotal); renderProgress();
       $('#rv-state').textContent = `已记录：${WIN_LABEL[w]}${note}`;
     }
-    curReview = null;
+    curReview = null; curPid = null; curAh = null; curBh = null;
     setTimeout(loadNext, 820);
   }catch(e){
     submitting = false;
@@ -1038,8 +1040,17 @@ function rejudgeLast(){
 }
 
 function enterRejudge(entry){
-  // 本会话快照里 A/B 位与原始一致，映射仍在服务端内存里，直接复用
+  // 本会话快照里 A/B 位与原始一致，但服务端的呈现可能已被后续出题覆盖/被逐出。
+  // 缺 pid 的是**升级前**存进 localStorage 的历史条目：直接交卷会走服务端 legacy 兜底
+  // （= 按 review_id 猜，正是审计 A01 的污染路径），所以先请服务端重端一次拿新呈现再改判。
+  if(!entry.pid){
+    toast('这一条是升级前的快照，先重新端题再改判…');
+    return rejudgeFromDone(entry.id);
+  }
   rejudge = {id: entry.id, prev: entry.winner};
+  curPid = entry.pid;
+  curAh = entry.ahash || null;
+  curBh = entry.bhash || null;
   curReview = entry.id;
   curRaw = {A: entry.a, B: entry.b};
   diffStale = true;
@@ -1072,6 +1083,7 @@ async function rejudgeFromDone(id){
   try{
     const item = await api(`/experiments/${curExp}/review/${id}/serve`);
     curReview = item.review_id;
+    curPid = item.presentation_id || null; curAh = item.a_hash || null; curBh = item.b_hash || null;   // 呈现不可变标识：提交必须带回
     curRaw = {A: item.text_a || '', B: item.text_b || ''};
     diffStale = true;
     lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
