@@ -278,25 +278,63 @@ def build_human_vs_ai(name: str, version: int = 1, seed: int = 20260918,
 
 
 def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
-                          per_side: int = 19, dry_run: bool = False) -> dict:
+                          per_side: int = 19, dry_run: bool = False,
+                          l_experiments: tuple[str, ...] | None = None,
+                          s_experiments: tuple[str, ...] | None = None,
+                          replace: bool = False) -> dict:
     """长度平衡基准（指标硬化收口，2026-09-20）：S（human 更短）与 L（human 更长）
     两侧各取一半——长度基线在平衡集上按构造 = 0.5，评委读数无法搭长度便车
-    （军师 P1-3：nat-v1 0.944 / hvai 0.872 的读数全部带着长度混淆）。
+    （军师 P1-3：nat-v1 0.944 / hvai 0.87.2 的读数全部带着长度混淆）。
 
-    L 侧全库只有 19 对，故 per_side 默认 19；S 侧按同种子随机抽样配平。
+    **按侧宇宙过滤**（2026-09-20 监督整改）：role='benchmark' 是持久单调标记，
+    历次 split 留下的旧标记段永远在 _eligible_pairs 池里——不滤会混入
+    旧代生成器的劣化行（bal-v2 首建实测 59.5% 行来自旧实验）。
+    l_experiments / s_experiments 按**行**的 experiment_id 过滤各自一侧；
+    None=不过滤（旧口径）。结构事实：窗口化产线只产 L 方向，PROD 无 S 库存——
+    干净口径是 L 侧纯化到指定实验、S 侧用 legacy 库存并在 spec 显式声明。
+
+    **同名守卫**：同名同 kind 已存在 → 默认拒绝（防重复集）；replace=True
+    删旧建新并在返回里报 replaced。spec 记录实测宇宙与真实两侧库存。
     控制臂（NEUTRAL_PARAPHRASE）保留：判别题（哪边是原文）里它是合法题。
     """
     with db.session() as s:
+        existed = (s.query(BenchmarkSet)
+                   .filter_by(name=name, kind="length_balanced").first())
+        if existed is not None and not dry_run:
+            if not replace:
+                raise SystemExit(
+                    f"同名长度平衡集已存在：{name}（{existed.id}，{existed.n_items} 题）。"
+                    f"要重建用 --replace（旧集及条目将被删除）。")
+            s.query(BenchmarkItem).filter_by(set_id=existed.id).delete()
+            s.query(BenchmarkSet).filter_by(id=existed.id).delete()
+            s.commit()
+        replaced = existed.id if (existed is not None and replace and not dry_run) else None
+
         rows = _eligible_pairs(s)
         s_side, l_side = [], []
         for cc, seg in rows:
             human = (seg.text_clean or seg.text or "")
             var = cc.text or ""
+            if l_experiments is not None and len(human) > len(var) \
+                    and cc.experiment_id not in l_experiments:
+                continue
+            if s_experiments is not None and len(human) < len(var) \
+                    and cc.experiment_id not in s_experiments:
+                continue
             (s_side if len(human) < len(var) else
              l_side if len(human) > len(var) else []).append((cc, seg))
+        universe = {
+            "l_universe": list(l_experiments) if l_experiments else "all",
+            "s_universe": list(s_experiments) if s_experiments else "all",
+            "l_stock_measured": len(l_side), "s_stock_measured": len(s_side),
+            "structural_note": (None if s_experiments or not l_experiments else
+                                "S 侧未限定（窗口化产线只产 L 方向，PROD 无 S 库存）；"
+                                "L 侧已纯化，S 侧 era 混杂见 spec 声明"),
+        }
         if dry_run:
             return {"would_build": {"S": len(s_side), "L": len(l_side),
-                                     "per_side": min(per_side, len(l_side), len(s_side))}}
+                                     "per_side": min(per_side, len(l_side), len(s_side))},
+                    "universe": universe, "replaced": replaced}
         rng = random.Random(seed)
         rng.shuffle(s_side)
         rng.shuffle(l_side)
@@ -311,14 +349,16 @@ def build_length_balanced(name: str, version: int = 1, seed: int = 20260919,
                                 "require_not_ungrammatical": True,
                                 "position_seed": seed,
                                 "ctx": "near1",
-                                "split": 2},
-                          note="长度平衡判别题：S/L 各半，读数不被长度先验污染")
+                                "split": 2,
+                                **universe},
+                          note="长度平衡判别题：S/L 各半，读数不被长度先验污染。"
+                               "实测宇宙见 spec（l_universe/s_universe/两侧实测库存）。")
         s.add(st)
         s.flush()
         _frozen_items(s, st, picked, seed, "length_balanced")
         s.commit()
         return {"set_id": st.id, "items": len(picked),
-                "S": k, "L": k}
+                "S": k, "L": k, "universe": universe, "replaced": replaced}
 
 
 def scan() -> dict:
@@ -354,6 +394,12 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=20260918)
     ap.add_argument("--per-side", type=int, default=19, dest="per_side",
                     help="length_balanced 每侧题数（上限受 L 侧库存约束）")
+    ap.add_argument("--l-experiments", default="", dest="l_experiments",
+                    help="length_balanced L 侧行宇宙：逗号分隔 experiment_id（空=不过滤）")
+    ap.add_argument("--s-experiments", default="", dest="s_experiments",
+                    help="length_balanced S 侧行宇宙：同上")
+    ap.add_argument("--replace", action="store_true",
+                    help="length_balanced 同名重建：删旧建新（返回报 replaced）")
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -368,8 +414,12 @@ def main() -> None:
     elif args.kind == "human_vs_ai":
         out = build_human_vs_ai(args.name, args.version, args.seed, args.dry_run)
     elif args.kind == "length_balanced":
+        lex = tuple(x for x in args.l_experiments.split(",") if x) or None
+        sex = tuple(x for x in args.s_experiments.split(",") if x) or None
         out = build_length_balanced(args.name, args.version, args.seed,
-                                    per_side=args.per_side, dry_run=args.dry_run)
+                                    per_side=args.per_side, dry_run=args.dry_run,
+                                    l_experiments=lex, s_experiments=sex,
+                                    replace=args.replace)
     else:
         out = build_corruption_detection(args.name, args.version, args.seed, args.dry_run)
     print(json.dumps(out, ensure_ascii=False))

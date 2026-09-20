@@ -1508,12 +1508,18 @@ def main() -> None:
         report()
         return
     if args.split_benchmark >= 0:
-        n = args.split_benchmark or None
+        # 0 与 None 必须分开（监督整改）：0 = 标零段（校验/干跑语义），
+        # 默认 -1 = 不进本分支。旧写法 `or None` 把 0 吃成全库默认比例。
+        n = args.split_benchmark if args.split_benchmark >= 0 else None
         # --exp 透传（监督方实测缺口）：不限定会混入旧实验的无窗样本，
         # 破坏 bal-v2 的强制长度方向性质；空=全库（旧行为，供对照）。
         out = split_benchmark(n=n, seed=args.seed, dry_run=args.dry_run,
-                             exp=(args.exp or None) or None)
+                              exp=args.exp or None)
         print(json.dumps(out, ensure_ascii=False))
+        # 划零段且此前也没划过 = 大概率 exp 打错 / 池空——静默成功是谎报
+        if not args.dry_run and out.get("marked", 0) == 0 and out.get("already", 0) == 0:
+            raise SystemExit(f"[split-benchmark] 一段都没标成（pool_total="
+                            f"{out.get('pool_total', 0)}）——exp 打错或池空，非零退出")
         return
     if args.recheck:
         out = recheck(verify_model=args.verify_model, conc=args.conc,

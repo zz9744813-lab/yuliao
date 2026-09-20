@@ -2,6 +2,8 @@
 
 > 2026-09-20 Codex：长篇总方案已定稿，单场景恢复与连续三场 CLI 试点完成（含 Codex 复核，第一场未重跑）；508 项测试通过，调用 / 收据 / 验收边界见 [Runtime 交接](runtime-handover-20260920.md) 与 [执行计划](plan.md)。
 
+> 2026-09-20 18:10 起全面审查：仍有 8 项 P1 / 3 项 P2，含盲评映射、训练分组、调用漏账、租约竞争及测试污染真实游标；另 1 项测试夹具问题审查期间已修复。最新 LG 593 passed / 1 项模型下载连接失败，Distiller 214 passed。原三场收据保留，详见 [全面审查报告](project-audit-20260920-1810.md)，修复前不扩为无人值守长篇或开训。
+
 > 交接时间：2026-09-18 · 交接人：ZCode（肉包之后一任）
 > 目标读者：接手本项目的智能体
 >
@@ -230,6 +232,31 @@ L上界<S下界模块断言防重叠）+ 压缩型 prompt 60%~90% 指令 + judge
 · **复核条件**（满足其一可重开这 4 类）：① 出现更强的生成模型
   （可通过 20 对 pilot 复验）；② 修改类型规格本身（如放宽压缩下限）——
   属规格变更，须按提案 §3 重新预注册。
+
+**2026-09-20 监督整改（采样宇宙污染修复 + bal-v2-prod 干净重建）**：
+监督实测（非自述）：bal-v2 首建集 BS-fe40d3fd9b1a 的 200 题只落 93 段，
+其中 17 段 119 题（59.5%）的合格劣化行全部来自旧实验——role='benchmark'
+是持久单调标记，`--exp` 只限新标记，不限池内历史行。修复（2a-2e）：
+`build_length_balanced` 增**按侧行宇宙过滤**（l_experiments/s_experiments，
+按行 experiment_id 过滤各自一侧）+ 同名守卫（重名拒绝/`--replace` 删旧建新并报
+replaced）+ spec 记实测宇宙与两侧真实库存（l/s_universe + l/s_stock_measured，
+不写口号）+ split CLI 加固（`--split-benchmark 0` 与 None 分开、marked==0 且
+already==0 非零退出、--exp 透传）+ 测试卫生（链测试 monkeypatch spy、_UNIQ、
+共享库池卫生 teardown 夹具——teardown 删净本文件 seed 的行并回滚被 split
+标记的外段 role）+ 旧实验排除回归测试（混池按 exp 建集不得捞旧行）。
+旧集处置：BS-fe40d3fd9b1a 的三评委跑分在 kimi 完成 123/600 后终止（runner
+已杀，额度消耗审计见台账），集与 200 条目已删除——该集读数作废，不得引用。
+**bal-v2-prod 干净重建：BS-5543d4b7ac4c，180 题 = S 90 + L 90**（seed
+20260925，per_side 90）。实测宇宙：L 侧行宇宙 = **纯 EXP-BAL2-PROD**
+（实测库存 93 行；逐题按变体文本回连 ControlledCorruption 核验 90/90 全为
+PROD、0 旧行混入）；S 侧未限定（结构事实：窗口化产线只产 L 方向，PROD 无
+S 库存，纯 PROD 平衡集不可行），S 侧 90 题来自 legacy EXP-0918-BENCH（57）+
+EXP-0918-CORR（33），spec 已声明 s_universe=all、s_stock_measured=195。
+解读注记（继承产线声明）：S/L 对照带类型混杂——L 侧全部由
+LITERARY_OVERWRITE+SUBTEXT_ERASE 两型构成，S 侧为旧代多型；档一读数
+必须带此注记。下一步：BS-5543d4b7ac4c 三评委跑分（qoder/kimi/agnes 全报，
+不许只挑好看的一家）+ benchmark_falsify 全套 N0~N5 → 档一读数（预注册：
+两侧各 n≥40，方向识别 ≥0.80 达标线，judge 面板含 N4 长度基线）。
 
 ## 0.6 接手者第一天照这个做
 
