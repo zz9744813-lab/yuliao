@@ -9,6 +9,12 @@
 | 段落级 | **0.443（低于随机）** | 他标的是一处用词，整段向量把它淹没了 |
 | 片段级（他标的片段 vs 同段等长随机片段） | **0.794** | 长度已严格配平；去掉长度成分后 0.789 |
 
+**2026-09-20 A02 修复后重训复算**（审查 20260920-1810：旧版 groups 与
+texts 错位，按题折失效）：对齐修复 + 折隔离断言下重跑，AUC 0.794
+（各折 0.781/0.796/0.743/0.781/0.867），长度基线 0.500，165 样本
+（正 55 / 负 110）；劣化对外部验证 52.9% 劣化版更高。此为本口径的
+有效读数，旧 AUC 不再引用。
+
 反证检查（先找能推翻它的证据）：
 - 长度基线 **0.500**（无长度混淆）
 - 表面特征基线（标点/的-地/汉字比）0.664（有信号但明显低于向量）
@@ -61,7 +67,11 @@ def build_dataset(seed: int = 7, neg_per_pos: int = 2) -> tuple[list[str], np.nd
                           where ri.status='done'""").fetchall()
     con.close()
     rng = random.Random(seed)
-    pos, neg, groups = [], [], []
+    # A02（审查 2026-09-20）：记录一次成行 (text, y, rid)，最后统一拆列——
+    # 旧实现 pos/neg 交错追加 groups、texts 却按 pos+neg 重排，两组错位，
+    # 按题分组折被破坏（3 题 9 样本隔离复现：5 样本组别错误、3 题跨验证折），
+    # 历史 AUC 因此不可信，须修复后重训重算。
+    recs: list[tuple[str, int, str]] = []
     for r in rows:
         hv = r["hv"]
         if isinstance(hv, str):
@@ -78,8 +88,7 @@ def build_dataset(seed: int = 7, neg_per_pos: int = 2) -> tuple[list[str], np.nd
             span = (src[s0:s1] or "").strip()
             if not (2 <= len(span) <= 30):
                 continue
-            pos.append(span)
-            groups.append(r["rid"])
+            recs.append((span, 1, r["rid"]))
             L, made = len(span), 0
             while made < neg_per_pos and len(src) > L:
                 k = rng.randrange(0, len(src) - L)
@@ -89,12 +98,24 @@ def build_dataset(seed: int = 7, neg_per_pos: int = 2) -> tuple[list[str], np.nd
                 # 不取到标注本身的近似重复
                 if piece.strip() == span:
                     continue
-                neg.append(piece)
-                groups.append(r["rid"])
+                recs.append((piece, 0, r["rid"]))
                 made += 1
-    texts = pos + neg
-    y = np.array([1] * len(pos) + [0] * len(neg))
+    texts = [t for t, _, _ in recs]
+    y = np.array([yy for _, yy, _ in recs])
+    groups = [g for _, _, g in recs]
     return texts, y, groups
+
+
+def _assert_folds_isolated(groups: list[str], folds) -> None:
+    """A02 验收：一轮划分里同一题（rid）只许出现在一侧——出现在两侧就是泄漏。"""
+    for te in folds:
+        tes = set(np.asarray(te).tolist())
+        sides: dict[str, set] = {}
+        for i, g in enumerate(groups):
+            sides.setdefault(g, set()).add(i in tes)
+        split = sorted(g for g, s in sides.items() if len(s) > 1)
+        if split:
+            raise SystemExit(f"按题分组被破坏：{split[:5]} 的样本跨了训练/测试两侧")
 
 
 def train(save: bool = True) -> dict:
@@ -102,6 +123,7 @@ def train(save: bool = True) -> dict:
     print(f"片段样本 {len(texts)}（正 {int(y.sum())} / 负 {len(y) - int(y.sum())}）")
     X = embed(texts)
     folds = group_folds(groups, 5, 7)
+    _assert_folds_isolated(groups, folds)
     aucs, accs = [], []
     for te in folds:
         tr = np.array([i for i in range(len(y)) if i not in set(te.tolist())])
