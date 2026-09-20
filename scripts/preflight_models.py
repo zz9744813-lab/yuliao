@@ -144,6 +144,54 @@ def describe(c: ModelCheck) -> str:
     return line
 
 
+def redact(text, limit: int = 300) -> str:
+    """把网关错误原文压成"可直接贴进汇报"的一行：去 key、压平换行、截断。"""
+    t = " ".join(str(text or "").split())
+    key = (config.GATEWAY_API_KEY or "").strip()
+    if key and key in t:
+        t = t.replace(key, "***")
+    return t[:limit] + ("…" if len(t) > limit else "")
+
+
+def preflight_block(models, *, source: str = "") -> str | None:
+    """批量脚本开跑前的统一闸门：None=可跑，否则返回拒绝理由（含最接近候选）。
+
+    调用方自己决定怎么收场（CLI 用 require_models；返回 dict 的 run() 用它置 aborted）。
+    mock 模式根本不发网络调用（gateway 回确定性伪输出），无从校验也无需校验 → 放行。
+    拿不到池按**不放行**处理，与 check_model 同口径（不猜）。
+    """
+    if config.LLM_MODE == "mock":
+        return None
+    msgs, seen = [], set()
+    for name in models:
+        name = (name or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        try:
+            c = check_model(name)
+        except GatewayUnreachable as e:
+            msgs.append(f"拿不到网关模型池，无法确认 `{name}`：{e}")
+            continue
+        if not c.ok:
+            msgs.append(describe(c))
+    if not msgs:
+        return None
+    return (f"[{source}] " if source else "") + "；".join(msgs)
+
+
+def require_models(models, *, source: str = "") -> None:
+    """CLI 入口用：池外/拿不到池 → 一秒退出（exit 2），绝不让整轮批量白跑。
+
+    2026-09-19 的 387 段源校勘与 09-20 的第五批扩产都是同一形状：模型名不在池内
+    → 100% 503 → 跑完才看得见"failed"，原因要人工翻 DB 才找到。
+    """
+    blocked = preflight_block(models, source=source)
+    if blocked:
+        print(f"[预检失败] 未开跑：{blocked}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
     names = list(sys.argv[1:] if argv is None else argv)
     if not names:

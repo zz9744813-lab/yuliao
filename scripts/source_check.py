@@ -94,7 +94,9 @@ PROMPT = """下面是一段从网上下载的中文小说（盗版 txt 常有掉
 纯粹是作者文风、但文本完整的，src_ok=true。"""
 
 _lock = threading.Lock()
-_stat = {"ok": 0, "failed": 0, "skip": 0, "bad": 0}
+# first_error：本轮**首条失败原文**。纪律：失败率再高，只报数字不报原因就等于没报
+# （2026-09-20 第五批扩产 100% failed 被误归因成"池子耗尽"，就是因为它）。
+_stat = {"ok": 0, "failed": 0, "skip": 0, "bad": 0, "first_error": ""}
 
 # 批量防呆②：失败率熔断。累计 LLM 调用满 BREAKER_MIN_CALLS 次后，failed/total 超线
 # 就当场中止（返回 dict 里 aborted=true），不等跑完 387 条再报 ok=0。
@@ -108,13 +110,7 @@ def _preflight() -> str | None:
 
     mock 模式根本不发网络调用（gateway 回确定性伪输出），无从校验也无需校验。
     """
-    if config.LLM_MODE == "mock":
-        return None
-    try:
-        c = pf.check_model(MODEL)
-    except pf.GatewayUnreachable as e:
-        return f"拿不到网关模型池，无法确认 `{MODEL}`：{e}"
-    return None if c.ok else pf.describe(c)
+    return pf.preflight_block([MODEL], source="source_check")
 
 
 def parse_json(text: str) -> dict | None:
@@ -204,20 +200,27 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
     if blocked:
         print(f"[预检失败] 模型名 `{MODEL}` 用不了，未开跑：{blocked}")
         return {**dict(_stat), "aborted": True}
+    _stat["first_error"] = ""          # 本轮失败原因只属于本轮
     abort = threading.Event()
 
-    def _count(*keys: str) -> None:
-        """累计计数；满 BREAKER_MIN_CALLS 次后失败率超线就置熔断（只报一次）。"""
+    def _count(*keys: str, first_error: str = "") -> None:
+        """累计计数；满 BREAKER_MIN_CALLS 次后失败率超线就置熔断（只报一次）。
+
+        first_error 只记**本轮第一条**原文（后来的不覆盖）：熔断/日报要能自己说原因。
+        """
         msg = None
         with _lock:
             for k in keys:
                 _stat[k] += 1
+            if first_error and not _stat["first_error"]:
+                _stat["first_error"] = pf.redact(first_error)
             calls = _stat["ok"] + _stat["failed"]
             rate = _stat["failed"] / calls if calls else 0.0
             if (calls >= BREAKER_MIN_CALLS and rate > BREAKER_FAIL_RATE
                     and not abort.is_set()):
                 abort.set()
-                msg = f"熔断：失败率 {rate:.1%}，已中止"
+                msg = (f"熔断：失败率 {rate:.1%}，已中止；"
+                       f"首条错误原文：{_stat['first_error'] or '（一条异常文本都没捕获到）'}")
         if msg:
             print(msg)
 
@@ -275,11 +278,12 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
             return
         try:
             d = check_one(text, exp_id)
-        except Exception:                            # noqa: BLE001
-            _count("failed")
+        except Exception as e:                             # noqa: BLE001
+            _count("failed", first_error=f"{type(e).__name__}: {e}")
             return
         if not d:
-            _count("failed")
+            _count("failed",
+                   first_error="LLM 返回空/JSON 解析不出（原文见 llm_calls 该行 error 字段）")
             return
         with db.session() as s:
             seg = s.get(Segment, sid)
@@ -302,8 +306,12 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
         list(ex.map(one, todo))
-    print(f"完成：ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
-          f"（{(time.time() - t0) / 60:.1f} 分钟）")
+    done = (f"完成：ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
+            f"（{(time.time() - t0) / 60:.1f} 分钟）")
+    if _stat["failed"]:
+        # 有失败就必须当场说原因——不许把"去找网关"留给人工翻 DB
+        done += f"；首条错误原文：{_stat['first_error'] or '（未捕获到异常文本）'}"
+    print(done)
     return {**dict(_stat), "aborted": abort.is_set()}
 
 

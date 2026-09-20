@@ -124,13 +124,21 @@ def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
             s.commit()
         else:
             print(f"复用已有扩产实验 {exp_id}")
+            # 预检对象 = 实际要用的对象（会审意见）：复用实验真正跑的是
+            # e.config["extractors"]，存量配置里的死 id 必须拦在开跑前——
+            # 这正是「源校勘通过 0/300」那条路径的残留入口。
+            stored = list((e.config or {}).get("extractors") or [])
+            if stored:
+                blocked = pf.preflight_block(stored, source=f"scale_corpus:{exp_id}")
+                if blocked:
+                    print(f"[预检失败] 复用实验的存量 extractors 有死 id，未开跑：{blocked}")
+                    return {"picked": 0, "aborted": True, "reason": blocked}
     # 1) 源校勘（确定性规则先跑，命中直接判坏）
-    from source_check import rule_defects
     bad = []
     with db.session() as s:
         for sid in ids:
             seg = s.get(Segment, sid)
-            hits = rule_defects(seg.text_clean or seg.text)
+            hits = source_check.rule_defects(seg.text_clean or seg.text)
             if hits:
                 bad.append(sid)
                 seg.integrity = json.dumps({"src_ok": False, "severity": "high",
@@ -141,8 +149,14 @@ def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
         ids = [i for i in ids if i not in set(bad)]
         print(f"规则判坏 {len(bad)} 段，剩 {len(ids)}")
     # 1b) LLM 源校勘（规则抓不到掉字/错字；训练数据不能用坏源）
-    import source_check
-    source_check.run(conc=conc, ids=list(ids))
+    sc_res = source_check.run(conc=conc, ids=list(ids))
+    if sc_res.get("aborted"):
+        # 源校勘自己没跑完（预检拦下 / 失败率熔断）：原因原样上抛。
+        # 绝不能继续往下算 ok_ids——那会把它伪装成"源校勘无一通过"（=池子耗尽的假象）。
+        reason = sc_res.get("first_error") or "源校勘中途熔断（失败率超线，原文见上方输出）"
+        print(f"[扩产中止] 源校勘未跑完，不进入抽帧：{reason}")
+        return {"picked": 0, "aborted": True, "reason": reason,
+                "source_check": {k: sc_res.get(k) for k in ("ok", "failed", "skip", "bad")}}
     with db.session() as s:
         ok_ids = []
         for sid in ids:
@@ -156,7 +170,8 @@ def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
     print(f"源校勘通过 {len(ok_ids)}/{len(ids)}")
     ids = ok_ids
     if not ids:
-        return {"picked": 0, "reason": "源校勘无一通过"}
+        return {"picked": 0, "reason": "源校勘无一通过（LLM 侧失败 "
+                                       f"{sc_res.get('failed', 0)} 条）"}
     # 2) 抽 L 帧
     with db.session() as s:
         e = s.get(Experiment, exp_id)
@@ -167,7 +182,18 @@ def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
                                          Frame.granularity == "L",
                                          Frame.status != "failed").count()
     print(f"抽到 L 帧 {n_frames}/{len(ids)}（实验 {exp_id}）")
-    return {"picked": len(ids), "frames": n_frames, "exp": exp_id}
+    out = {"picked": len(ids), "frames": n_frames, "exp": exp_id}
+    if ids and n_frames == 0:
+        # 全灭不是"池子小"，通常是抽帧模型整批报错：把首条原文就地打出来
+        with db.session() as s:
+            fr = (s.query(Frame)
+                  .filter(Frame.experiment_id == exp_id, Frame.granularity == "L",
+                          Frame.status == "failed").first())
+        hint = (fr.raw_output or "")[:200] if fr else "（库里没有 failed 帧行可引）"
+        print(f"[抽帧全灭] 0/{len(ids)}；首条原文：{hint or '（帧行没留 raw_output）'}"
+              f"；明细看 llm_calls（experiment_id={exp_id}）的 error 字段")
+        out.update(aborted=True, reason=f"L 帧全灭 0/{len(ids)}，首条原文：{hint}")
+    return out
 
 
 def main() -> None:
@@ -189,8 +215,10 @@ def main() -> None:
                 print(f'   {sid} {len(seg.text)}字 :: {seg.text[:44]}')
         return
     if args.run:
-        print(json.dumps(run(args.run, args.seed, args.conc, args.exp,
-                             args.min_chars), ensure_ascii=False))
+        res = run(args.run, args.seed, args.conc, args.exp, args.min_chars)
+        print(json.dumps(res, ensure_ascii=False))
+        if res.get("aborted"):
+            sys.exit(2)     # 预检没过 / 源校勘熔断 / 抽帧全灭：非零退出，别静默空转
         return
     ap.print_help()
 
