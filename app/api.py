@@ -260,7 +260,12 @@ _SERVE_CURSOR: dict[str, int] = {}   # 批次轮换游标（进程内缓存；�
 # 根因是游标只在进程内存里 —— 当天重启 4 次（改代码/改 UI），每次归零，
 # 队列就从第一批待判题重新开始，于是他反复看到同一批题。
 # 落盘后重启不再回退；想从头再来删掉这个文件即可。
-_CURSOR_FILE = Path(__file__).resolve().parent.parent / "data" / "serve_cursor.json"
+# 路径必须从 config.DATA_DIR 派生（A04，审查 20260920-1810）：旧硬编码
+# 直接指向仓库 data/serve_cursor.json，测试只隔离了 LG_DATA_DIR 与数据库、
+# 管不住这个路径——unlink/写入全打在真实文件上，测试批次键（c41/rj*/pr*）
+# 污染正式游标，多轮全量测试还反复销毁历史内容。派生后测试自动落进
+# LG_DATA_DIR 的临时目录，正式文件不再被测试触碰。
+_CURSOR_FILE = config.DATA_DIR / "serve_cursor.json"
 
 
 def _load_cursor(key: str) -> int:
