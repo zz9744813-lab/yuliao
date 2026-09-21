@@ -36,6 +36,71 @@ class Work(Base):
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
 
 
+class Author(Base):
+    """K1-A 来源登记（知识化方案 §4.1）：已核对的作者。
+
+    「已核对」必须有核对依据（verified_basis）——标题/来源文件名/公开书目
+    一致性的人工核对声明；不可考据的作者**留空**（WorkSource.author_id=NULL +
+    metadata_status 如实标注），不许猜。"""
+    __tablename__ = "authors"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("AUTH"))
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    verified_basis: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class Genre(Base):
+    """K1-A：题材词表（最小集，按需增补；分配必须有核对依据）。"""
+    __tablename__ = "genres"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("GEN"))
+    name: Mapped[str] = mapped_column(String(60), unique=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class WorkSource(Base):
+    """K1-A 来源登记：Work 的**扩展关联表**（方案 §4.1）——迁移不改旧 ID，
+    works 表零改动；一行一 Work（work_id 唯一）。
+
+    字段对照 §4.1：canonical_work_id / 已核对的 author_id / genre_ids /
+    来源类型 / 文本版本·哈希 / 用途依据 / 允许用途 / 元数据核对状态与依据。
+
+    纪律（方案原文逐条落死）：
+    · corpus v2 镜像、重切段、清洗副本的 canonical_work_id 一律回连**同一根
+      作品**——不计作独立复现（独立人类源计数只认
+      canonical_work_id == work_id 的根作品行，见 verify_work_registry.py）；
+    · 来源类型分型 fixture / synthetic / commentary / human_fiction——
+      测试材料可验契约，但**不得给人类来源计数加分**；
+    · src_ok=true（segments.integrity 的源检查）只证源检查通过，
+      **不替代**作者身份、用途或质量证明——所以登记表独立于 integrity；
+    · author_id=NULL 不是缺陷：metadata_status/metadata_basis 如实说明
+      「无可靠考据来源，留空待补」。"""
+    __tablename__ = "work_sources"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("WSRC"))
+    work_id: Mapped[str] = mapped_column(String(32), ForeignKey("works.id"),
+                                         unique=True, index=True)
+    # 根作品 id：根作品=自身 work_id；镜像/派生=根的 work_id（回连同一根）
+    canonical_work_id: Mapped[str] = mapped_column(String(32), index=True)
+    author_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # 已核对作者；NULL=未核对
+    genre_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 来源类型：fixture / synthetic / commentary / human_fiction
+    source_type: Mapped[str] = mapped_column(String(20), index=True)
+    # 文本版本标签（corpus-v1 / corpus-v2-mirror / test-fixture…）；
+    # seg_version 是**切分**版本，不等于「属于 corpus v2 镜像」——镜像判定
+    # 只认 works.v2_of（方案 §4.1 明令）
+    text_version: Mapped[str] = mapped_column(String(40))
+    # 内容锚：按 ordinal 序拼接各段 text_clean（缺失用 text）后的 sha256——
+    # 同一内容的不同切分/清洗版本可由版本与哈希区分对账
+    text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    purpose_basis: Mapped[str] = mapped_column(Text)      # 用途依据
+    allowed_purposes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    metadata_status: Mapped[str] = mapped_column(String(20))   # verified/partial/unverified
+    metadata_basis: Mapped[str] = mapped_column(Text)     # 元数据核对依据
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
 class Segment(Base):
     """Human Anchor 的最小实验单位：1~10 句，句末/段末切分，不截断句中。"""
 

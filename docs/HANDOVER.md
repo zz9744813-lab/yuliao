@@ -549,6 +549,28 @@ CI/置换/分层/留一全表）；N4 长度基线 0.500 三家全碾压；类�
 均不推断）；首建集污染与作废记录入档；**Freeze=研究范围冻结**，
 不再无目标扩充 bal-v3/v4，仪器保留作回归工具。零 LLM 调用，
 不受 402 资金墙影响。
+**K1-A 收口（2026-09-21，来源登记与镜像对账）**：按方案 §4.1 落
+`authors` / `genres` / `work_sources` 三张**增量**表（扩展关联表，
+迁移不改旧 ID、works 零改动）+ `scripts/register_work_sources.py`
+幂等登记 + `scripts/verify_work_registry.py` 一键对账（照
+verify_bal_universe 口径：mismatch 非零退、--json 证据）。真库实测：
+**8 部 Work 全登记，独立人类源 = 4（仅根作品；2 部 corpus v2 镜像回连
+根不计独立复现、2 部 fixture 只验契约不加分）；corpus_v2_map 106,489
+条逐条回连 0 悬空；对账 PASS**。作者可考据才填：猫腻/忘语/唐家三少
+（核对依据=标题与来源文件名署名一致，人工核对入表），
+《琼明神女录》作者无可靠考据——显式留空 + metadata_status=partial。
+text_sha256 内容锚按 ordinal 序锚定各版本；隔离三查（源身份+文本
+版本+目标与上下文区间）作为 K2 发现/复现样本的前置契约冻结在
+verify_work_registry 的 isolation_contract（基准源普查含根作品
+benchmark 段计数）。**验证命令**：
+`"$PY" scripts/register_work_sources.py`（幂等）、
+`"$PY" scripts/verify_work_registry.py --json <路径>.json`；
+证据 `outputs/work-registry-20260921/registry.json`（gitignore
+外置可再生）。回归 9 测（干净树 PASS 且只计根、漏登/悬空/镜像回连
+错/fixture 冒充/map 悬空/空表宁拒不恒绿/map 缺席如实 skipped、
+登记幂等+不可考据留空）；共享库现实（他文件遗留 Work/镜像）由
+synthetic 占位登记处理且 teardown 只删自建行。全量 **683 例全绿**
+（674→683 只增不减，退出码 0）。
 
 ## 0.6 接手者第一天照这个做
 
