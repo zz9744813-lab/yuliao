@@ -514,6 +514,19 @@ Writer 只发 1 次+返修一轮即过+lamp 不进正史补丁+审计 ok；返�
 性质不变（零提交、世界零改动、缓存回放不重复计费）。全量 674 例
 全绿（661→674 只增不减，退出码 0）。**LG 侧审查项至此全清**
 （A01-A11 除 A08 属 novel-distiller 仓）。
+**审查 A08 已修（2026-09-21 午后，novel-distiller 仓）——审查项
+P1×8/P2×3 至此全清**：核查确认 A08 核心竞争（complete_task 事务外查
+租约、UPDATE 不查 rowcount、无条件写 completed——两连接复现：先过
+租约检查、另一连接 mark_interrupted 后旧提交仍返 True、事件序列同时
+含 unknown 与 completed）已由并行席位修复（complete/fail/needs_input
+三方法均事务内条件 UPDATE+rowcount 守卫，三个竞争回归钉死复现
+口径）。我补上审查点名的最后一格「**输入 stale 检查时机**」：
+stale_input_exists 从写事务外移入 BEGIN IMMEDIATE 事务内——旧位置
+下新输入版本在判定与提交之间入队会被漏标 stale，旧产物会并进新版本
+（JOB-04）；+ 时机回归（hook 断言判定发生在事务内）。distiller 全量
+测试退出码 0（该目录无 git 仓，改动即落盘）。**审查全部 11 项
+（8 P1 + 3 P2）至此修复完毕**；扩产/基准扩产仍卡 deepseek 402 资金墙
+（拍板点见 §12 第 2 项）。
 
 ## 0.6 接手者第一天照这个做
 
