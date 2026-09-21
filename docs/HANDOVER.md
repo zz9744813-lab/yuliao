@@ -384,7 +384,22 @@ logical_call_id + attempt_no 两列（_migrate 只增列），账本分列
 预留→结算单元、cost=None、单发 lcid、报表双口径 n=2/n_logical=1）。
 test_model_pool 的「账本记真名」契约随记账点从 _record 移钉 _reserve。
 全量 638 例全绿（630→638 只增不减）。
-审查剩余：3 项 P1 / 3 项 P2 排队中。
+**审查 A06 已修（2026-09-21 上午，接 A05）**：非空截断输出不再当成功。
+事故：网关读了 finish_reason 却只拒绝空正文——finish_reason=length 且
+正文非空时照样返回 status=ok（审查复现：返回「尚未写完的半句」，
+调用状态成功）——自由文本候选可能以完整样本身份进重建与后续评审。
+修复：①完成原因白名单 OK_FINISH_REASONS={stop, end_turn,
+stop_sequence, None}（None 显式接受：部分中转成功时不回 finish_reason，
+空正文另有 P0 闸）；②length/content_filter/tool_calls 等非白名单完成
+方式，正文非空也一律记**非完整产物**（本趟 usage 由 A05 结算入账，
+error 带 finish_reason）→ 抛错，绝不以 ok 落库；③有上限恢复：
+length 走既有预算加倍重试（≤MAX_RETRIES、≤8192），不可恢复的完成
+方式（content_filter 等）立即失败不空转烧钱。回归 5 测（监督口径：
+不许只覆盖「截断且空文本」）：半句+length 拒收留痕（截断趟 usage
+12/8 入账）→ 加预算重试成功；MAX_RETRIES 趟全截断→抛错且每趟留痕；
+content_filter 一次即止（第二发是白烧钱）；白名单 end_turn/None 放行；
+截断且空文本走 P0 空容闸不回归。全量 643 例全绿（638→643 只增不减）。
+审查剩余：2 项 P1 / 3 项 P2 排队中。
 
 ## 0.6 接手者第一天照这个做
 

@@ -47,6 +47,17 @@ class LLMError(Exception):
     pass
 
 
+# A06（审查 20260920-1810）：完成原因白名单——只有这些能让**非空正文**以
+# status=ok 返回。None 显式接受：部分中转/模型成功时根本不回 finish_reason
+# （空正文另有 P0 闸兜底）。length=截断（半句）；content_filter=过滤；
+# tool_calls / function_call=不兼容完成方式——正文再长也是**非完整产物**，
+# 一律记失败（usage 已由 A05 结算入账），绝不让半句以 ok 身份进重建/评审
+# （下游会把非空文本当完整样本）。
+# 恢复上限：length 走既有预算加倍重试（≤MAX_RETRIES、≤8192）；其余完成
+# 原因重发同 payload 也救不回来 → 立即失败，不空转烧钱。
+OK_FINISH_REASONS = frozenset({"stop", "end_turn", "stop_sequence", None})
+
+
 def _record(purpose: str, model: str, prompt_version: str, r: ChatResult,
             logical_call_id: str | None = None,
             attempt_no: int | None = None) -> None:
@@ -396,6 +407,22 @@ def _real_chat(*, model: str, system: str, user: str, purpose: str,
                         latency_ms=int((time.time() - t_a) * 1000),
                         status="failed", error=str(last_err)))
                     if attempt < config.MAX_RETRIES - 1:
+                        cur_tokens = min(cur_tokens * 2, 8192)
+                        continue
+                    raise last_err
+                # A06：完成原因白名单——length（半句截断）/content_filter/
+                # tool_calls 等，正文非空也一律记**非完整产物**（本趟 usage
+                # 已结算入账），绝不让半句以 ok 落库。恢复有上限：length
+                # 加预算重试；不可恢复的完成方式立即失败，不空转。
+                if finish not in OK_FINISH_REASONS:
+                    last_err = LLMError(f"incomplete (finish_reason={finish}, "
+                                        f"max_tokens={cur_tokens})")
+                    _settle(rid, ChatResult(
+                        text="", tokens_in=int(usage.get("prompt_tokens") or 0),
+                        tokens_out=int(usage.get("completion_tokens") or 0),
+                        latency_ms=int((time.time() - t_a) * 1000),
+                        status="failed", error=str(last_err)))
+                    if attempt < config.MAX_RETRIES - 1 and finish == "length":
                         cur_tokens = min(cur_tokens * 2, 8192)
                         continue
                     raise last_err
