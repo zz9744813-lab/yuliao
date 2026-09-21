@@ -35,7 +35,8 @@ def _migrate(engine) -> None:
     """create_all 不会 alter 已有表；这里做只增列的轻量迁移。"""
     if not engine.url.get_backend_name().startswith("sqlite"):
         return
-    additions = {"llm_calls": {"experiment_id": "TEXT"},
+    additions = {"llm_calls": {"experiment_id": "TEXT",
+                                "logical_call_id": "TEXT", "attempt_no": "INTEGER"},
                  "segments": {"integrity": "TEXT", "role": "TEXT", "seg_version": "INTEGER DEFAULT 1",
                  "text_clean": "TEXT"},
                  "works": {"anchors": "TEXT", "v2_of": "TEXT"}}

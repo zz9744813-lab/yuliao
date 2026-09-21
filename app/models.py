@@ -255,6 +255,14 @@ class LlmCall(Base):
     cost: Mapped[float | None] = mapped_column(Float, nullable=True)  # 中转单价未知→None
     status: Mapped[str] = mapped_column(String(20), default="ok")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A05（审查 20260920-1810）：账本分列「逻辑调用」与「HTTP 尝试」两个口径。
+    # 一次 chat() = 一个逻辑调用（logical_call_id 分组，同组 attempt_no 0..N-1）；
+    # 重试环里**每次 HTTP 派发各自留痕**（含失败/被吞的那几次）。旧实现只在
+    # 最终结果落一行——重试期烧掉的 token 与失败率在账上凭空消失（实测复现：
+    # 两次上游请求 45 token，账上只有一条成功 15 token）。历史行两列为
+    # NULL，报表口径按「每行即一个逻辑调用」回退（coalesce(lcid, id)）。
+    logical_call_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    attempt_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
 
 

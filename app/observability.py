@@ -70,6 +70,9 @@ def _block(rows: list[LlmCall]) -> dict[str, Any]:
     lats = sorted(r.latency_ms or 0 for r in rows)
     b: dict[str, Any] = {
         "n": n,
+        # A05 逻辑口径：按 logical_call_id 分组（历史行 NULL → 每行自成一组）。
+        # n=HTTP 尝试数（含重试/失败趟），n_logical=逻辑调用数——两个口径分列。
+        "n_logical": len({r.logical_call_id or r.id for r in rows}),
         "ok": ok,
         "failed": n - ok,
         "success_rate": round(ok / n, 4) if n else None,

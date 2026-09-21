@@ -21,6 +21,7 @@ import httpx
 
 from . import config
 from .db import session
+from .ids import new_id
 from .models import LlmCall
 
 # 线程本地实验归属：stage 线程设置后，该线程发出的所有调用都记到该实验名下，
@@ -46,14 +47,61 @@ class LLMError(Exception):
     pass
 
 
-def _record(purpose: str, model: str, prompt_version: str, r: ChatResult) -> None:
+def _record(purpose: str, model: str, prompt_version: str, r: ChatResult,
+            logical_call_id: str | None = None,
+            attempt_no: int | None = None) -> None:
+    """落一行账（单发路径：agy/qoder/wb/zcode 桥与 mock——每行自成逻辑调用）。
+
+    A05（审查 20260920-1810）：账本分列「逻辑调用」与「HTTP 尝试」两个
+    口径。_real_chat 的重试环不走这里——走 _reserve/_settle（每次派发先
+    预留、每次返回单独结算，失败/被吞的尝试一样留痕）；本函数给单发
+    调用方用，不传 lcid 时自铸一个、attempt_no=0。未知费用保持 None
+    （cost=None，不冒充已知 0）。"""
+    if logical_call_id is None:
+        logical_call_id, attempt_no = new_id("LC"), 0
     with session() as s:
         s.add(LlmCall(
             experiment_id=getattr(_tls, "experiment_id", None),
             purpose=purpose, model=model, prompt_version=prompt_version,
             tokens_in=r.tokens_in, tokens_out=r.tokens_out,
             latency_ms=r.latency_ms, status=r.status, error=r.error,
+            logical_call_id=logical_call_id,
+            attempt_no=attempt_no if attempt_no is not None else 0,
         ))
+        s.commit()
+
+
+def _reserve(purpose: str, model: str, prompt_version: str,
+             logical_call_id: str, attempt_no: int) -> str:
+    """A05「先预留」：HTTP 派发**前**落一行 status=dispatched——进程在
+    请求中途崩掉/被杀，这次尝试也已留痕（结算由 _settle 兜底）。"""
+    rid = new_id("LC")
+    with session() as s:
+        s.add(LlmCall(id=rid,
+                      experiment_id=getattr(_tls, "experiment_id", None),
+                      purpose=purpose, model=model, prompt_version=prompt_version,
+                      tokens_in=0, tokens_out=0, latency_ms=0,
+                      status="dispatched", error=None,
+                      logical_call_id=logical_call_id, attempt_no=attempt_no))
+        s.commit()
+    return rid
+
+
+def _settle(rid: str, r: ChatResult) -> None:
+    """A05「单独结算」：预留行更新为本次尝试的实际结果。usage/延迟按
+    **本尝试**各自入账——重试期已烧掉的 token 不许凭空消失（事故复现：
+    两次上游请求合计 45 token，旧账只留最后一行 15 token）。"""
+    with session() as s:
+        row = s.get(LlmCall, rid)
+        if row is None:     # 极端：结算时行已不在（清表/换库）——补一行孤儿账，不丢
+            s.add(LlmCall(id=rid, purpose="settle_orphan", model="unknown",
+                          prompt_version="", tokens_in=r.tokens_in,
+                          tokens_out=r.tokens_out, latency_ms=r.latency_ms,
+                          status=r.status, error=r.error))
+        else:
+            row.tokens_in, row.tokens_out = r.tokens_in, r.tokens_out
+            row.latency_ms = r.latency_ms
+            row.status, row.error = r.status, r.error
         s.commit()
 
 
@@ -315,10 +363,15 @@ def _real_chat(*, model: str, system: str, user: str, purpose: str,
     if seed is not None:
         payload["seed"] = seed
 
-    t0 = time.time()
     last_err: Exception | None = None
     cur_tokens = max_tokens
+    # A05：一个 lcid 贯穿本次逻辑调用的全部 HTTP 尝试；每次派发先预留
+    # （dispatched 行），每次返回单独结算——账本从此按尝试口径反映真实
+    # 请求次数/失败率，逻辑口径按 lcid 分组聚合。
+    lcid = new_id("LC")
     for attempt in range(config.MAX_RETRIES):
+        rid = _reserve(purpose, model, prompt_version, lcid, attempt)
+        t_a = time.time()
         try:
             payload_local = dict(payload)
             payload_local["max_tokens"] = cur_tokens
@@ -334,42 +387,52 @@ def _real_chat(*, model: str, system: str, user: str, purpose: str,
                 # 空容陷阱（P0）：推理预算烧完 → content 空；或某模型偶发 stop+空。
                 # 未用完重试：加倍 max_tokens；最后一次仍空 → 记 failed 并抛错，
                 # 绝不让空文本以 ok 身份落库（下游 judge 会拿空串当真样本评）。
+                # A05：结算按**本尝试**——空正文那趟已烧的 usage 必须入账。
                 if not content.strip():
                     last_err = LLMError(f"empty content (finish={finish}, max_tokens={cur_tokens})")
+                    _settle(rid, ChatResult(
+                        text="", tokens_in=int(usage.get("prompt_tokens") or 0),
+                        tokens_out=int(usage.get("completion_tokens") or 0),
+                        latency_ms=int((time.time() - t_a) * 1000),
+                        status="failed", error=str(last_err)))
                     if attempt < config.MAX_RETRIES - 1:
                         cur_tokens = min(cur_tokens * 2, 8192)
                         continue
-                    r = ChatResult(text="", tokens_in=int(usage.get("prompt_tokens") or 0),
-                                   tokens_out=int(usage.get("completion_tokens") or 0),
-                                   latency_ms=int((time.time() - t0) * 1000),
-                                   status="failed", error=str(last_err))
-                    _record(purpose, model, prompt_version, r)
                     raise last_err
                 r = ChatResult(
                     text=content,
                     tokens_in=int(usage.get("prompt_tokens") or 0),
                     tokens_out=int(usage.get("completion_tokens") or 0),
-                    latency_ms=int((time.time() - t0) * 1000),
+                    latency_ms=int((time.time() - t_a) * 1000),
                 )
-                _record(purpose, model, prompt_version, r)
+                _settle(rid, r)
                 return r
             if resp.status_code in {408, 409, 429, 500, 502, 503, 504} and attempt < config.MAX_RETRIES - 1:
+                # A05：可重试 HTTP 也留痕——旧实现这条路径静默 continue，
+                # 失败次数/失败率在账上凭空消失
+                _settle(rid, ChatResult(
+                    text="", tokens_in=0, tokens_out=0,
+                    latency_ms=int((time.time() - t_a) * 1000),
+                    status="failed", error=f"HTTP {resp.status_code}: {resp.text[:200]}"))
                 time.sleep(2 ** attempt)
                 continue
             r = ChatResult(text="", tokens_in=0, tokens_out=0,
-                           latency_ms=int((time.time() - t0) * 1000),
+                           latency_ms=int((time.time() - t_a) * 1000),
                            status="failed", error=f"HTTP {resp.status_code}: {resp.text[:200]}")
-            _record(purpose, model, prompt_version, r)
+            _settle(rid, r)
             raise LLMError(r.error)
         except httpx.HTTPError as e:
+            # A05：传输异常同样预留-结算留痕
             last_err = e
+            _settle(rid, ChatResult(
+                text="", tokens_in=0, tokens_out=0,
+                latency_ms=int((time.time() - t_a) * 1000),
+                status="failed", error=f"transport: {e}"))
             if attempt < config.MAX_RETRIES - 1:
                 time.sleep(2 ** attempt)
                 continue
-    r = ChatResult(text="", tokens_in=0, tokens_out=0,
-                   latency_ms=int((time.time() - t0) * 1000),
-                   status="failed", error=str(last_err))
-    _record(purpose, model, prompt_version, r)
+            raise LLMError(str(last_err))
+    # 兜底不可达（最后一趟必抛）；保留以防 MAX_RETRIES=0 之类的边界改动。
     raise LLMError(str(last_err))
 
 

@@ -133,8 +133,12 @@ def test_egress_canonicalizes_the_dead_alias(monkeypatch):
     import httpx
     monkeypatch.setattr(gateway, "httpx", SimpleNamespace(Client=Client,
                                                           HTTPError=httpx.HTTPError))
-    monkeypatch.setattr(gateway, "_record",
-                        lambda purpose, model, pv, r: sent.setdefault("logged", model))
+    # A05 后重试环的记账点从 _record 移到 _reserve（先预留）/_settle
+    # （单独结算）——「账本记真正发出去的名字」契约钉在 _reserve 上。
+    monkeypatch.setattr(gateway, "_reserve",
+                        lambda purpose, model, pv, lcid, att:
+                        (sent.setdefault("logged", model), "LC-fake")[1])
+    monkeypatch.setattr(gateway, "_settle", lambda rid, r: None)
     monkeypatch.setattr(config, "GATEWAY_BASE_URL", "http://gw.test:3000/v1")
     monkeypatch.setattr(config, "GATEWAY_API_KEY", "sk-test")
     dead, live = next(iter(config.DEAD_MODEL_ALIASES.items()))

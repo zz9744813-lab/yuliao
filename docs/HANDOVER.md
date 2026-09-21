@@ -366,7 +366,25 @@ sha256）；但游标只是**轮换起点**，真实进度在 review_items
 跳过已判、从首个待判继续，无判定数据损失。处置：删除仅含测试键的
 正式文件；新增 tests/test_cursor_isolation.py 2 测钉死派生契约与
 禁回硬编码；验收=全量 630 例前后正式文件不变（实测 ABSENT→ABSENT）。
-审查剩余：4 项 P1 / 3 项 P2 排队中。
+**审查 A05 已修（2026-09-21 上午）**：网关重试不再吞账。事故（审查
+MockTransport 复现）：两次上游请求合计 45 token，账上只留一条成功
+15 token——可重试 HTTP / 空正文续试 / 传输异常都在重试环内静默
+continue，只有最终结果落一行；实验引擎又把 llm_calls 当唯一费用/
+失败账本 → 失败率被低估、成本少记。修复（监督 08:25 口径）：①每次
+派发**先预留**（status=dispatched 行，进程中途崩掉该尝试也留痕）、
+每次返回**单独结算**（本尝试 usage/延迟/状态/错误）；②LlmCall 增
+logical_call_id + attempt_no 两列（_migrate 只增列），账本分列
+「逻辑调用」（n_logical，按 lcid 分组，历史行 NULL→每行自成一组）
+与「HTTP 尝试」（n，逐行）两个口径，observability._block 同步报双
+口径；③空正文那趟已烧的 usage 必须入账（回归复现 45 token 全额）；
+④未知费用保持 None 不冒充 0；⑤单发路径（桥接/mock/_record）每行
+自成逻辑调用（attempt_no=0）。回归 8 测钉死监督验收口径
+「N 次 HTTP 尝试 = N 条尝试记录、失败那次同样留痕」（503→ok 两行、
+空正文重试两行 30+15、传输异常两行、全军覆没 MAX_RETRIES 行、
+预留→结算单元、cost=None、单发 lcid、报表双口径 n=2/n_logical=1）。
+test_model_pool 的「账本记真名」契约随记账点从 _record 移钉 _reserve。
+全量 638 例全绿（630→638 只增不减）。
+审查剩余：3 项 P1 / 3 项 P2 排队中。
 
 ## 0.6 接手者第一天照这个做
 
