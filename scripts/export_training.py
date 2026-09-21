@@ -125,16 +125,33 @@ def _bench_hashes() -> set:
     global _BENCH_HASHES
     if _BENCH_HASHES is None:
         import hashlib
+        import re
         def _norm(t: str) -> str:
             return "".join((t or "").split())
+        def _add_any(t: str) -> None:
+            # a/b 是判别题两侧本体：**无长度下限**（原口径）——短文本同串
+            # 同内容也是隔离对象；误加 ≥50 下限会挤掉 365 个短哈希（实测
+            # 1971→1606，test_benchmark_content_twin_excluded 打红）
+            if t:
+                hs.add(hashlib.md5(_norm(t).encode("utf-8")).hexdigest())
+        def _add_long(t: str) -> None:
+            # context 及其组成段落：≥50 字才参与比较（训练侧同一口径）
+            n = _norm(t)
+            if len(n) >= 50:
+                hs.add(hashlib.md5(n.encode("utf-8")).hexdigest())
         hs = set()
         with db.session() as s:
             for it in s.query(BenchmarkItem).all():
                 for t in (it.text_a, it.text_b):
-                    if t:
-                        hs.add(hashlib.md5(_norm(t).encode("utf-8")).hexdigest())
-                if it.context and len(it.context) >= 50:
-                    hs.add(hashlib.md5(_norm(it.context).encode("utf-8")).hexdigest())
+                    _add_any(t)
+                if it.context:
+                    # A11（审查 20260920-1810）：context 只按整段哈希有隔离
+                    # 空隙——「段落A\n\n段落B」的基准 context 里，A 单独作为
+                    # 训练目标/前文时不命中整段哈希（70 字隔离复现实测放行）。
+                    # 组成段落各自入哈希集：命中整段或任一组成段落都算重合。
+                    _add_long(it.context)
+                    for piece in re.split(r"\n\s*\n", it.context):
+                        _add_long(piece)
         _BENCH_HASHES = hs
     return _BENCH_HASHES
 

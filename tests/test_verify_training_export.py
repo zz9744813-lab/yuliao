@@ -292,3 +292,54 @@ def test_export_schema_contract_tripwire():
             assert f'"{k}"' in src, \
                 f"{kind} 的验收字段 {k} 在 export_training 源码中不存在——" \
                 "导出器改了键名？两头必须一起改（否则验收静默少比）"
+
+
+def test_context_piece_alone_hits_isolation(tmp_path):
+    """A11（审查 20260920-1810）：多段基准 context 的隔离空隙——
+    「段落A\n\n段落B」的基准 context，A 单独作为训练目标不命中整段
+    哈希（70 字复现实测放行）。修复：组成段落各自入哈希集。"""
+    db.init_db()
+    para_a = ("他把茶喝完才起身，屋外风声很紧，谁也没有再说话，"
+              "窗纸被吹得鼓了一下，远处的狗吠了一声又渐渐停了，屋里只剩灯花轻响。")   # ≥50
+    para_b = "灯芯跳了一下，他坐回桌前，把没有写完的信重新拿起，又慢慢放下了，夜还很长。"
+    seg = None
+    with db.session() as s:
+        st = BenchmarkSet(id="BS-a11", name="a11", version=1,
+                          kind="corruption_detection", n_items=1, spec={}, note="")
+        s.add(st)
+        s.flush()
+        s.add(BenchmarkItem(set_id=st.id, segment_id="SEG-a11", kind="x",
+                            context=f"{para_a}\n\n{para_b}",       # 多段 context
+                            text_a="题面甲", text_b="题面乙", answer="A", meta={}))
+        w = Work(title="t-a11", source="test:a11")
+        s.add(w)
+        s.flush()
+        seg = Segment(work_id=w.id, ordinal=0, text="源文本", role=None,
+                       integrity='{"src_ok": true}', n_sentences=1, n_chars=4)
+        s.add(seg)
+        s.commit()
+        seg_id, wid, st_id = seg.id, w.id, st.id
+    try:
+        # 训练行 target = 基准 context 的**组成段落 A 单独**——旧整段哈希
+        # 命不中，隔离放行（审查 70 字复现）；修复后必须逮住
+        p = _write_rows(tmp_path, "writer_sft_v9.jsonl", [
+            {"id": "R1", "segment_id": seg_id, "target": para_a,
+             "prev1": "无关前文" * 10}])
+        rep = VT.verify(str(p), write_manifest=False)
+        assert rep["bench_overlap_rows"] == 1, \
+            "基准 context 的组成段落单独出现必须算重合（A11 空隙）"
+        assert rep["acceptance"]["passed"] is False
+        # 对照：与基准内容完全无关的行不受影响（组成段落哈希不误伤）
+        p2 = _write_rows(tmp_path, "writer_sft_v9b.jsonl", [
+            {"id": "R2", "segment_id": seg_id,
+             "target": "完全无关的另一段训练文本，内容与基准毫无关系。" * 3}])
+        rep2 = VT.verify(str(p2), write_manifest=False)
+        assert rep2["bench_overlap_rows"] == 0 and \
+            rep2["acceptance"]["passed"] is True, "组成段落哈希不许误伤干净行"
+    finally:
+        with db.session() as s:
+            s.query(BenchmarkItem).filter_by(set_id="BS-a11").delete()
+            s.query(BenchmarkSet).filter_by(id="BS-a11").delete()
+            s.query(Segment).filter_by(id=seg_id).delete()
+            s.query(Work).filter_by(id=wid).delete()
+            s.commit()
