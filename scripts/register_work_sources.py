@@ -10,7 +10,8 @@ canonical_work_id / 已核对的 author_id / genre_ids / 来源类型 /
 ## 纪律（方案原文）
 
 - corpus v2 镜像 / 重切段 / 清洗副本回连**同一根作品**（canonical_work_id
-  = 根的 work_id），不计作独立复现；
+  = 根的 work_id），不计作独立复现；镜像行显式复制根的 author/genre，
+  verify_work_registry 逐行比对继承一致性；
 - fixture / synthetic / commentary / human_fiction 分型——测试材料可验
   契约，不给人类来源计数加分；
 - src_ok=true 只证源检查通过，不替代作者身份、用途或质量证明；
@@ -18,21 +19,27 @@ canonical_work_id / 已核对的 author_id / genre_ids / 来源类型 /
   metadata_basis；无可靠考据（如《琼明神女录》的作者）显式留空 +
   metadata_status=partial，不许猜。
 
-## 隔离规则（K2 发现/复现样本的前置契约，一并冻结于此）
+## 内容锚的漂移语义（会审 09-21 二轮 BLOCK 项）
+
+text_sha256 是**登记时的内容指纹**：重跑发现库内容与登记不符 → 响亮
+报错（内容漂移必须显式处理，不许静默重锚把漂移洗掉）；确需重锚
+（如整个语料重新清洗）用 --reset-anchor 显式声明。0 段作品的锚为
+NULL——不是缺失，是如实（空作品）。
+
+## 隔离规则（K2 发现/复现样本的执行契约）
 
 发现与复现样本的基准隔离按「**源身份 + 文本版本 + 目标与上下文区间**」
-三查执行，缺一不可：
-①源身份：样本的根作品在 work_sources 里分型且用途允许（镜像/fixture 不
-  计入人类证据）；
-②文本版本：样本引用的段属 text_version 一致的行（v1 样本不许冒 v2）；
-③区间：目标与上下文文本对全库冻结基准哈希族（整段 + 组成段落，
-  scripts/export_training.py::_bench_hashes / verify_bal_universe.py 口径）
-  比对——只查 role 或整段哈希不够（A03/A11 教训）。
+三查执行：①源身份与②文本版本由本登记与 verify_work_registry 承担
+（分型/允许用途/text_version/内容锚）；③区间比对由既有基准哈希族
+（export_training._bench_hashes：整段+组成段落）承担——**本脚本只
+登记与对账，不在此执行区间检查**（那是 K2 发现管线的运行时检查）。
 
 ## 用法
 
-    python scripts/register_work_sources.py --dry-run   # 只报告将登记什么
-    python scripts/register_work_sources.py             # 幂等登记（重跑更新）
+    python scripts/register_work_sources.py --dry-run        # 只报告（含内容锚）
+    python scripts/register_work_sources.py                  # 幂等登记（漂移即报）
+    python scripts/register_work_sources.py --only WK-a,WK-b # 作用域登记
+    python scripts/register_work_sources.py --reset-anchor   # 显式重锚（漂移时）
 """
 from __future__ import annotations
 
@@ -55,7 +62,6 @@ _AUTHORS = {
     "忘语": "标题与来源文件名署名一致（凡人修仙传_忘语），公开通行署名，人工核对 2026-09-21",
     "唐家三少": "标题与来源文件名署名一致（斗罗大陆_唐家三少），公开通行署名，人工核对 2026-09-21",
 }
-_GENRES = {"玄幻", "仙侠"}
 
 # 根作品登记（key=作品标题）。genre 分配依据：公开书目的通行分类（人工核对）。
 _ROOT_META = {
@@ -69,30 +75,21 @@ _ROOT_META = {
                      "basis": "作者与题材无可靠考据来源——显式留空待补（不许猜），"
                               "人工核对 2026-09-21"},
 }
+# 题材词表从根作品元数据派生（会审二轮：两处清单不许漂移）
+_GENRES = {g for meta in _ROOT_META.values() for g in meta["genres"]}
 
 
-def _is_fixture(w: Work) -> bool:
+def _is_fixture(w) -> bool:
+    """fixture 判定唯一口径（register 与 verify 共用，会审二轮：不许两套）。"""
     return (w.source or "").startswith("inbox:fixture") \
         or (w.title or "").startswith("fixture")
 
 
-def _work_sha256(work_id: str) -> tuple[str | None, int]:
-    """内容锚：按 ordinal 序拼接段 text_clean（缺失用 text）的 sha256。"""
-    h = hashlib.sha256()
-    n = 0
-    with db.session() as s:
-        segs = (s.query(Segment).filter(Segment.work_id == work_id)
-                .order_by(Segment.ordinal).all())
-        for seg in segs:
-            h.update(((seg.text_clean or seg.text or "") + "\n").encode("utf-8"))
-            n += 1
-    return (h.hexdigest() if n else None), n
-
-
-def register(dry_run: bool = False, only: set[str] | None = None) -> list[dict]:
-    """only：只处理这些 work_id（测试用作用域）；None=全部（生产口径——
-    全覆盖是登记的契约，未知根作品标题必须响亮失败）。"""
-    out: list[dict] = []
+def register(dry_run: bool = False, only: set[str] | None = None,
+             reset_anchor: bool = False) -> list[dict]:
+    """only：只处理这些 work_id（测试/局部补登）；None=全部（生产口径——
+    全覆盖是契约，未知根作品标题响亮失败）。reset_anchor：内容漂移时
+    显式重锚（默认漂移即报错——锚被随手改写就失去检测漂移的能力）。"""
     with db.session() as s:
         # 词表（幂等）
         name2author: dict[str, str] = {}
@@ -104,7 +101,7 @@ def register(dry_run: bool = False, only: set[str] | None = None) -> list[dict]:
                 s.flush()
             name2author[name] = a.id
         name2genre: dict[str, str] = {}
-        for gname in _GENRES:
+        for gname in sorted(_GENRES):
             g = s.query(Genre).filter_by(name=gname).first()
             if g is None:
                 g = Genre(name=gname)
@@ -115,7 +112,12 @@ def register(dry_run: bool = False, only: set[str] | None = None) -> list[dict]:
         works = s.query(Work).all()
         if only is not None:
             works = [w for w in works if w.id in only]
-        rows = []
+        # 根先于镜像（镜像行要复制根的 author/genre——继承是登记数据，
+        # verify 逐行比对，不是口头承诺）
+        works.sort(key=lambda w: 1 if w.v2_of else 0)
+
+        root_meta_cache: dict[str, dict] = {}
+        rows: list[dict] = []
         for w in works:
             if _is_fixture(w):
                 row = dict(
@@ -123,72 +125,118 @@ def register(dry_run: bool = False, only: set[str] | None = None) -> list[dict]:
                     genre_ids=[], source_type="fixture",
                     text_version="test-fixture",
                     purpose_basis="测试夹具：只验管线契约，不给人类来源计数加分",
-                    allowed_purposes=["test_contract"],
+                    identity_purposes=["test_contract"], license_purposes=[],
                     metadata_status="verified",
                     metadata_basis=f"夹具身份明确（source={w.source}），非人类语料")
             elif w.v2_of:
+                if w.v2_of == w.id:
+                    raise SystemExit(f"自指镜像（v2_of==自身）：{w.id}——"
+                                    "血缘键坏了，这行会虚增独立人类源")
                 root = s.get(Work, w.v2_of)
+                if root is None:
+                    raise SystemExit(f"镜像 {w.id} 的 v2_of 指向不存在的作品 "
+                                     f"{w.v2_of}——先登记根作品")
+                rmeta = root_meta_cache.get(w.v2_of) or {}
                 row = dict(
-                    work_id=w.id, canonical_work_id=w.v2_of, author_id=None,
-                    genre_ids=[], source_type="human_fiction",
+                    work_id=w.id, canonical_work_id=w.v2_of,
+                    # 继承是登记数据（会审二轮：不许留指向不存在检查的说明）
+                    author_id=rmeta.get("author_id"),
+                    genre_ids=list(rmeta.get("genre_ids") or []),
+                    source_type="human_fiction",
                     text_version="corpus-v2-mirror",
                     purpose_basis="corpus v2 校勘镜像：回连根作品"
-                                  f"（{root.title if root else w.v2_of}）与内容区间，"
-                                  "不计独立复现；用途限研究对照",
-                    allowed_purposes=["research_reference"],
+                                  f"（{root.title}）与内容区间，"
+                                  "不计独立复现；署名继承根作品",
+                    identity_purposes=["research_reference"], license_purposes=[],
                     metadata_status="partial",
                     metadata_basis="镜像身份由 works.v2_of 血缘键确立；"
-                                   "作者/题材继承根作品（对账见 verify_work_registry.py）")
+                                   "author/genre 从根作品行复制（verify 逐行比对继承一致）")
             else:
                 meta = _ROOT_META.get(w.title)
                 if meta is None:
                     raise SystemExit(f"未登记元数据的根作品：{w.title!r}——"
-                                    "先在 _ROOT_META 里补齐核对依据（可考据才填）")
+                                    "先在 _ROOT_META 里补齐核对依据（可考据才填）；"
+                                    "局部补登用 --only")
                 row = dict(
                     work_id=w.id, canonical_work_id=w.id,
                     author_id=name2author.get(meta["author"]),
                     genre_ids=[name2genre[g] for g in meta["genres"]],
                     source_type="human_fiction", text_version="corpus-v1",
-                    purpose_basis="人类长篇小说语料：表达研究 / 训练源段 / "
-                                  "基准源段的根作品（role 闸与内容级隔离由 "
-                                  "export_training / verify 链承担）",
-                    allowed_purposes=["research", "training_source",
-                                      "benchmark_source"],
+                    purpose_basis="署名可核对（作者/题材核对依据见上）——"
+                                  "**不构成训练/基准用途授权**",
+                    # 身份可核对面；授权面留空——训练/基准用途授权是集霸的
+                    # 决策位（license_basis 须记授权人/日期/范围），未授权
+                    # 前一律不得进训练/基准用途（会审二轮 BLOCK 项）
+                    identity_purposes=["research"], license_purposes=[],
                     metadata_status="verified" if meta["author"] else "partial",
                     metadata_basis=meta["basis"])
+                root_meta_cache[w.id] = row
             rows.append(row)
 
         if dry_run:
-            return rows
+            out = []
+            for row in rows:
+                sha, n = _work_sha256(s, row["work_id"])
+                out.append({**row, "text_sha256": sha, "n_segments": n})
+            return out                       # 词表 flush 随 close 回滚，不落
 
         for row in rows:
-            sha, n_segs = _work_sha256(row["work_id"])
-            row = {**row, "text_sha256": sha, "n_segments": n_segs}
+            sha, n_segs = _work_sha256(s, row["work_id"])
             src = s.query(WorkSource).filter_by(work_id=row["work_id"]).first()
+            if src is not None and src.text_sha256 is not None \
+                    and src.text_sha256 != sha and not reset_anchor:
+                raise SystemExit(
+                    f"内容漂移：{row['work_id']} 的库内容与登记锚不符"
+                    f"（登记 {src.text_sha256[:12]}… vs 现算 {sha[:12]}…）——"
+                    "锚是登记时的事实，不许静默重写；确认漂移无害用 "
+                    "--reset-anchor 显式重锚")
+            payload = {**row, "text_sha256": sha}
             if src is None:
-                s.add(WorkSource(**{k: v for k, v in row.items()
-                                   if k != "n_segments"}))
+                s.add(WorkSource(**payload))
             else:
-                for k, v in row.items():
-                    if k != "n_segments":
-                        setattr(src, k, v)
-            out.append(row)
+                for k, v in payload.items():
+                    setattr(src, k, v)
+            row["text_sha256"] = sha
+            row["n_segments"] = n_segs
         s.commit()
-    return out
+    return rows
+
+
+def _work_sha256(s, work_id: str) -> tuple[str | None, int]:
+    """内容锚：按 ordinal 序流式拼接段 text_clean（缺失用 text）的 sha256。
+
+    在调用方 session 内读（会审二轮：另开 session 读同一 SQLite 有
+    BUSY/快照风险）；yield_per 流式——10 万段级不整载。"""
+    h = hashlib.sha256()
+    n = 0
+    q = (s.query(Segment.text_clean, Segment.text)
+         .filter(Segment.work_id == work_id)
+         .order_by(Segment.ordinal)
+         .yield_per(500))
+    for text_clean, text in q:
+        h.update(((text_clean or text or "") + "\n").encode("utf-8"))
+        n += 1
+    return (h.hexdigest() if n else None), n
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--dry-run", action="store_true", help="只报告将登记什么")
+    ap.add_argument("--dry-run", action="store_true", help="只报告（含内容锚）")
+    ap.add_argument("--only", default="",
+                    help="逗号分隔 work_id——只登记这些（生产默认全部）")
+    ap.add_argument("--reset-anchor", action="store_true",
+                    help="内容漂移时显式重锚（默认漂移即报错）")
     args = ap.parse_args()
     db.init_db()
-    rows = register(dry_run=args.dry_run)
+    only = {x for x in args.only.split(",") if x} or None
+    rows = register(dry_run=args.dry_run, only=only,
+                    reset_anchor=args.reset_anchor)
     print(json.dumps(rows, ensure_ascii=False, indent=1))
     n_human_roots = sum(1 for r in rows
                         if r["source_type"] == "human_fiction"
                         and r["canonical_work_id"] == r["work_id"])
-    print(f"[register_work_sources] 登记 {len(rows)} 部 Work；"
-          f"独立人类源（仅根作品，镜像/fixture 不计）= {n_human_roots}")
+    print(f"[register_work_sources] 处理 {len(rows)} 部 Work；"
+          f"人类源根作品（镜像/fixture 不计）= {n_human_roots}")
 
 
 if __name__ == "__main__":

@@ -41,11 +41,26 @@ def _migrate(engine) -> None:
                  # SQLite 容忍、换后端即炸）
                  "experiments": {"run_owner": "VARCHAR(64)",
                                  "run_claimed_at": "VARCHAR(32)"},
+                 # K1-A 二轮（会审）：身份/授权拆分的新列——只增列；旧
+                 # allowed_purposes 列保留为遗留（模型不再读写），重跑
+                 # register_work_sources.py 补齐新列
+                 "work_sources": {"identity_purposes": "TEXT",
+                                  "license_purposes": "TEXT",
+                                  "license_basis": "TEXT"},
                  "segments": {"integrity": "TEXT", "role": "TEXT", "seg_version": "INTEGER DEFAULT 1",
                  "text_clean": "TEXT"},
                  "works": {"anchors": "TEXT", "v2_of": "TEXT"}}
     with engine.begin() as conn:
         for table, cols in additions.items():
+            # 缺表跳过：建表归 create_all 全责（新表带全量列，无漂移）；
+            # additions 只对**既有表**增列。旧口径「缺表 ALTER 直接炸」在
+            # K1-A 增列 work_sources 后被 A07 迁移测打红——缺表不是迁移
+            # 失败，是 create_all 的辖区（K1-A 二轮改定）。
+            hit = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)).fetchone()
+            if hit is None:
+                continue
             existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
             for col, ddl in cols.items():
                 if col not in existing:

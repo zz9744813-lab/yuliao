@@ -400,8 +400,8 @@ def test_migrate_adds_owner_columns_to_old_db(tmp_path):
     con.execute("""CREATE TABLE experiments (
         id TEXT PRIMARY KEY, name TEXT, status TEXT, config TEXT,
         stats TEXT, error TEXT, created_at TEXT, updated_at TEXT)""")
-    # _migrate 的 additions 覆盖多张表——旧库必须都在（缺表时 PRAGMA
-    # 返回空集、ALTER 直接炸，这也是本测要钉的口径之一）
+    # _migrate 的 additions 覆盖多张表——缺表跳过（建表归 create_all 全责，
+    # K1-A 二轮改定）；本测钉的是「既有旧表缺列 → 迁移后可写」
     con.execute("""CREATE TABLE llm_calls (id TEXT PRIMARY KEY, purpose TEXT,
         model TEXT, prompt_version TEXT, tokens_in INTEGER, tokens_out INTEGER,
         latency_ms INTEGER, cost REAL, status TEXT, error TEXT, created_at TEXT)""")

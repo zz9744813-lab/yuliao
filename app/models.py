@@ -94,8 +94,16 @@ class WorkSource(Base):
     # 内容锚：按 ordinal 序拼接各段 text_clean（缺失用 text）后的 sha256——
     # 同一内容的不同切分/清洗版本可由版本与哈希区分对账
     text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    purpose_basis: Mapped[str] = mapped_column(Text)      # 用途依据
-    allowed_purposes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 用途依据（§4.1）：**只证作者/题材署名可核对**——不构成任何授权
+    purpose_basis: Mapped[str] = mapped_column(Text)
+    # 身份与授权**拆开**（会审二轮 BLOCK 项：署名可核对 ≠ 用途授权）——
+    # 身份可核对面（研究侧）：research / research_reference / test_contract
+    identity_purposes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 训练/再分发**授权面**：training_source / benchmark_source——只有拿到
+    # 集霸的显式授权记录才允许非空；未授权源一律不得进训练/基准用途
+    license_purposes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # 授权依据（license_purposes 非空时必填：授权人/日期/范围）
+    license_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_status: Mapped[str] = mapped_column(String(20))   # verified/partial/unverified
     metadata_basis: Mapped[str] = mapped_column(Text)     # 元数据核对依据
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
