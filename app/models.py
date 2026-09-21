@@ -548,6 +548,28 @@ class KnowledgeLink(Base):
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
 
 
+class KnowledgePackage(Base):
+    """K3-A 冻结知识包（方案 §6.2 每场冻结；K3-B 在 Runtime prepare 前写入）。
+
+    内容寻址：package_sha256 = sha256(policy 规范化 + 选中策略 id/版本序列
+    + 库知识快照指纹)——同策略同快照同 policy 必得同包（幂等）。
+    包内容**不含任何原文**（§4.2：Writer 只得到抽象操作、条件、例外和
+    不含原文的引用）——evidence 只留 instance id 与 canonical 来源引用。
+    K3-A 的 HTTP 只读（GET packages）；写入由 Runtime 冻结流程（K3-B）。"""
+    __tablename__ = "knowledge_packages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("KPKG"))
+    package_sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    policy_sha256: Mapped[str] = mapped_column(String(64))
+    policy: Mapped[dict] = mapped_column(JSON)          # 规范化后的查询 policy
+    selected: Mapped[list] = mapped_column(JSON)        # 选中策略（含版本与分量明细）
+    rejected_summary: Mapped[list] = mapped_column(JSON, default=list)
+    snapshot_fingerprint: Mapped[str] = mapped_column(String(64))
+    contract_version: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
 class ControlledCorruption(Base):
     """受控劣化数据集（总方案 §4.6 / §7 主工作流 B / §8 Minimal Pair）。
 
