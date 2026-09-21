@@ -36,6 +36,7 @@ import time
 from datetime import datetime
 
 from sqlalchemy import or_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from . import config, experiments
@@ -496,42 +497,91 @@ def _stage_record(exp_id: str, name: str) -> dict:
 
 
 def _claim_run(exp_id: str, token: str) -> bool:
-    """A07：**原子领取执行权**——条件 UPDATE，只有把 status 从非 running
-    翻成 running 的那一个赢；owner/lease（领取凭据）随领取一次写入。
+    """A07：**原子领取执行权**——条件 UPDATE，只有赢得条件竞争的那一个能跑。
 
-    为什么必须是领取事务：「检查 running 再启动」不是原子操作——API 先查
-    后启线程、CLI 与 API 同时启动、双请求竞争，都读到「阶段尚未完成」
-    （审查实测：屏障控制顺序后，阶段体执行 2 次、两边都返回成功；真实
-    阶段则重复生成与计费）。UI 禁用按钮、单纯读 status，都不能替代本事务。
-    无自动 TTL 接管：合法实验一跑数小时（PROD 290 变体），固定 TTL 会在
-    长跑中途被误抢——A07 换姿势重演。卡死恢复走 release_run 显式释放。"""
-    with session() as s:
-        n = (s.query(Experiment)
-             .filter(Experiment.id == exp_id,
-                     Experiment.status != "running")
-             .update({Experiment.status: "running",
-                      Experiment.run_owner: token,
-                      Experiment.run_claimed_at: _now()},
-                     synchronize_session=False))
-        s.commit()
-        return bool(n)
+    领取条件（二选一命中即可翻 running）：
+    ① status != running（正常路径：created/done/failed 都可领）；
+    ② status == running 但 run_owner IS NULL——**存量对账**（会审 09-21
+       三轮严重项）：迁移前就卡在 running 的老行没有 owner，不放开这一条
+       它们将永久领不到执行权（API 快路径永远回 already_running、点运行
+       没反应）。新制度的活 runner 领取时必写 owner，不会被这条误抢；
+       升级窗口里旧制度在跑的 runner（不写 owner）可能被新领取打断——
+       边缘场景，如实记录。
+    凭据（owner/领取时间戳）随领取一次写入；时间戳只做审计追溯，**无
+    TTL 判定**——自动过期会在数小时长跑（PROD 290 变体）中途误抢，
+    A07 换姿势重演；接管必须显式（release_run）。
+    「检查 running 再启动」不是原子操作（API 先查后启线程、CLI+API 并发、
+    双请求竞争都读到「阶段尚未完成」→ 审查实测阶段体执行 2 次）——
+    UI 禁用按钮、单纯读 status，都不能替代本事务。
+    SQLITE_BUSY 防御：跨进程双写锁下条件 UPDATE 可能撞锁，短退避重试。"""
+    for i in range(3):
+        try:
+            with session() as s:
+                n = (s.query(Experiment)
+                     .filter(Experiment.id == exp_id,
+                             or_(Experiment.status != "running",
+                                 Experiment.run_owner.is_(None)))
+                     .update({Experiment.status: "running",
+                              Experiment.run_owner: token,
+                              Experiment.run_claimed_at: _now(),
+                              Experiment.error: None,
+                              Experiment.updated_at: _now()},
+                             synchronize_session=False))
+                s.commit()
+                return n > 0    # rowcount 未知(-1) 的 DBAPI 不许误判成赢
+        except OperationalError:
+            if i == 2:
+                raise
+            time.sleep(0.5 * (i + 1))
 
 
 def release_run(exp_id: str) -> dict:
-    """显式释放卡死的执行权（A07 运维口径，CLI --release）。
+    """显式释放执行权（A07 运维口径，CLI --release）。
 
-    只对 running 态生效：release 后 status=failed，下次 run 可重新领取。"""
+    **立即夺权**（会审三轮严重项）：对误判卡死、其实还活着的 runner，
+    release 必须让它停下来——所以这里 ①条件 UPDATE（与领取同一原子
+    语义，读改写在并发下会丢更新）；②owner 清空（持有权校验只认
+    owner+status 双匹配，活 runner 在下一道校验即停）；③status 翻
+    failed（同样喂给校验）。error 不动：审计留痕走返回值与台账，
+    不幂等地往 error 追加长文本。
+
+    CAS：只对「running 且 owner 仍是观察值」的行生效——观察与提交之间
+    领取权若已易主（升级窗口/并发），绝不误杀新主。"""
     with session() as s:
         exp = _exp(s, exp_id)
         if exp.status != "running":
             return {"released": False, "status": exp.status,
                     "note": "不在 running 态，无需释放"}
-        owner = exp.run_owner
-        exp.status = "failed"
-        exp.error = ((exp.error or "") + "；执行权被显式释放（release_run）").lstrip("；")
-        exp.updated_at = _now()
+        observed_owner = exp.run_owner
+    with session() as s:
+        n = (s.query(Experiment)
+             .filter(Experiment.id == exp_id,
+                     Experiment.status == "running",
+                     Experiment.run_owner == observed_owner)
+             .update({Experiment.status: "failed",
+                      Experiment.run_owner: None,
+                      Experiment.updated_at: _now()},
+                     synchronize_session=False))
         s.commit()
-        return {"released": True, "run_owner": owner}
+    if not n:      # 观察与提交之间状态已变（owner 易主）——如实报告，不误杀
+        with session() as s:
+            exp = _exp(s, exp_id)
+            return {"released": False, "status": exp.status,
+                    "run_owner": exp.run_owner,
+                    "note": "观察期间执行权已易主，本次未释放"}
+    return {"released": True, "run_owner": observed_owner}
+
+
+def list_stuck() -> list[dict]:
+    """列出卡在 running 的实验（A07 运维口径）——存量对账与卡死排查的
+    发现手段（--release 需要先知道是谁卡了）。"""
+    with session() as s:
+        rows = (s.query(Experiment)
+                .filter(Experiment.status == "running")
+                .order_by(Experiment.updated_at.desc()).all())
+        return [{"id": r.id, "name": r.name, "run_owner": r.run_owner,
+                 "run_claimed_at": r.run_claimed_at,
+                 "updated_at": r.updated_at} for r in rows]
 
 
 def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
@@ -554,11 +604,12 @@ def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
             raise EngineError(f"{exp_id} 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
     token = new_id("RUN")
     if not _claim_run(exp_id, token):
-        with session() as s:
-            exp = _exp(s, exp_id)
-            return {"status": "already_running", "run_owner": exp.run_owner,
-                    "stages": {},
-                    "note": "执行权已被领取（原子 UPDATE 竞争失败）——阶段体不重复执行"}
+        # 输家不再回读 owner（会审三轮：赢家可能已跑完，回显陈旧/None
+        # 只会误导）——note 说清是领取竞争失败即可。
+        return {"status": "already_running",
+                "stages": {},
+                "note": "执行权已被领取（原子 UPDATE 竞争失败）——阶段体不重复执行；"
+                        "卡死排查用 engine.list_stuck() / CLI --list-stuck"}
 
     clean = True
     try:
@@ -568,11 +619,14 @@ def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
             try:
                 with session() as s:
                     exp = _exp(s, exp_id)
-                    if exp.run_owner != token:
-                        # A07：持有权被显式 release 后被别人领走——本 runner
-                        # 的结果可能已过期，停止提交，绝不覆盖新主的进度
-                        raise EngineError(f"失去运行持有权（owner={exp.run_owner}≠{token}）"
-                                          "——停止提交阶段结果")
+                    if exp.run_owner != token or exp.status != "running":
+                        # A07 三轮：持有权校验必须 owner+status **双匹配**——
+                        # release 立即夺权（owner 清空+status 翻 failed），活
+                        # runner 误被打中时在这里停下，不许继续烧钱；被夺权
+                        # runner 的结果可能已过期，停止提交，绝不覆盖新主进度
+                        raise EngineError(
+                            f"失去运行持有权（owner={exp.run_owner}≠{token} 或 "
+                            f"status={exp.status}≠running）——停止提交阶段结果")
                     miss = _prereq_missing(s, exp.id, name)
                     if miss:
                         raise EngineError(f"阶段 {name} 前置未满足：{miss}")
@@ -596,7 +650,14 @@ def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
 
 
 def run_experiment_background(exp_id: str, stages=None) -> threading.Thread:
-    """给 API 用：后台线程跑引擎。失败已落库（stats + status），线程异常无需上报。"""
-    t = threading.Thread(target=run, args=(exp_id, stages), daemon=True)
+    """给 API 用：后台线程跑引擎。失败已落库（stats + status），线程异常无需上报。
+
+    竞争输家（快路径漏过去、领取失败的那次）在服务端日志回显 note——
+    「线程连 note 都不看」= 已启动的假象（会审三轮点名）。"""
+    def _bg():
+        result = run(exp_id, stages)
+        if result.get("status") == "already_running":
+            print(f"[engine] {exp_id}: {result.get('note')}", flush=True)
+    t = threading.Thread(target=_bg, daemon=True)
     t.start()
     return t

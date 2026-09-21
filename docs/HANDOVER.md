@@ -416,8 +416,24 @@ token——中途被夺权的 runner 立即停止提交，finally 收尾同样�
 双线程屏障起跑→阶段体恰好 1 次（旧事故=2 次）、输家拿
 already_running；赢家在跑时第二 run 直接输；夺权后下一阶段即停、
 status 不被旧 runner 收尾；卡死 release 后可重领；冻结在领取前拒
-（status 不翻 running）；已 done 阶段跳过幂等不回归。全量 649 例
-全绿（643→649 只增不减）。
+（status 不翻 running）；已 done 阶段跳过幂等不回归。
+**会审三轮加固（qwen 3 严重项）**：①release 语义重定义——**立即
+夺权**：条件 UPDATE（CAS：只动 running 且 owner 仍是观察值的行，
+与领取同一原子语义，读改写并发下会丢更新）+ owner 清空 + status
+翻 failed；持有权校验改 **owner+status 双匹配**——release 打到
+还活着的 runner 时它在下一道校验即停（旧版只比 owner，活 runner
+会继续烧钱=并发姿势的事故换运维姿势重演）；②**存量对账**：领取
+条件放开 running+run_owner IS NULL（迁移前卡死的老行否则永久
+already_running、点运行没反应）；升级窗口里旧制度在跑的 runner
+可能被新领取打断——边缘场景如实记录；③领取时 error=None（重跑
+成功不许挂旧错）；engine.list_stuck() / CLI --list-stuck 卡死发现
+手段；CLI already_running 非零退出（自动化不再把没干活当成功）；
+后台线程回显输家 note；_claim_run 对 SQLITE_BUSY 短退避重试；
+run_claimed_at 时间戳**只审计追溯、无 TTL 判定**（措辞与实现对齐）；
+rowcount 未知(-1) 的 DBAPI 不误判成赢（n>0）。回归 6→11 测（新增：
+release 打活 runner 必停、release→reclaim 真夺权路径、存量
+NULL-owner 可领、error 清空、list_stuck；Event 握手替代 sleep 时序
+断言）。全量 654 例全绿（643→654 只增不减，退出码 0）。
 审查剩余：1 项 P1 / 3 项 P2 排队中。
 
 ## 0.6 接手者第一天照这个做

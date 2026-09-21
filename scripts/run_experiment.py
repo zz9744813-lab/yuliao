@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 def main() -> None:
     ap = argparse.ArgumentParser(description="实验引擎：plan→source_check→extract→"
                                              "reconstruct→residual→judge→report")
-    ap.add_argument("--exp", required=True, help="实验 id（experiments.id）")
+    ap.add_argument("--exp", default=None, help="实验 id（experiments.id）")
     ap.add_argument("--stages", default=None,
                     help="逗号分隔的阶段子集（默认全部）；顺序恒按状态机")
     ap.add_argument("--dry-run", action="store_true", help="只打印阶段计划，不跑不发调用")
@@ -33,6 +33,8 @@ def main() -> None:
     ap.add_argument("--release", action="store_true",
                     help="显式释放卡死的执行权（A07：status=running 但 runner 已死；"
                          "无自动 TTL 接管——长跑中途不许被误抢）")
+    ap.add_argument("--list-stuck", action="store_true",
+                    help="列出卡在 running 的实验（A07 存量对账/卡死排查的发现手段）")
     ap.add_argument("--json", dest="as_json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
@@ -46,6 +48,16 @@ def main() -> None:
         config.LLM_MODE = "mock"          # 双保险：环境变量没生效就直接改运行时配置
 
     db.init_db()
+
+    if args.list_stuck:
+        rows = engine.list_stuck()
+        print(json.dumps(rows, ensure_ascii=False, indent=1) if args.as_json
+              else (f"卡在 running 的实验 {len(rows)} 个：" +
+                    "；".join(f"{r['id']}(owner={r['run_owner']})" for r in rows)))
+        return
+
+    if not args.exp:
+        raise SystemExit("需要 --exp（或用 --list-stuck 查卡死实验）")
 
     if args.release:
         out = engine.release_run(args.exp)
@@ -73,6 +85,17 @@ def main() -> None:
         else:
             print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)
+
+    if result.get("status") == "already_running":
+        # 会审三轮：already_running 按 0 退出=自动化/定时任务把「什么都没
+        # 干」当成功——非零退出并说清怎么排查。
+        print(json.dumps({"experiment": args.exp, "ok": False,
+                          "status": "already_running",
+                          "note": result.get("note")}, ensure_ascii=False)
+              if args.as_json
+              else f"✗ {result.get('note')}（排查：--list-stuck / --release）",
+              file=sys.stderr)
+        raise SystemExit(2)
 
     stages = result.get("stages") or {}
     if args.as_json:
