@@ -37,7 +37,10 @@ def _migrate(engine) -> None:
         return
     additions = {"llm_calls": {"experiment_id": "TEXT",
                                 "logical_call_id": "TEXT", "attempt_no": "INTEGER"},
-                 "experiments": {"run_owner": "TEXT", "run_claimed_at": "TEXT"},
+                 # DDL 与模型声明同口径（四轮建议：迁移库/新建库 schema 漂移，
+                 # SQLite 容忍、换后端即炸）
+                 "experiments": {"run_owner": "VARCHAR(64)",
+                                 "run_claimed_at": "VARCHAR(32)"},
                  "segments": {"integrity": "TEXT", "role": "TEXT", "seg_version": "INTEGER DEFAULT 1",
                  "text_clean": "TEXT"},
                  "works": {"anchors": "TEXT", "v2_of": "TEXT"}}

@@ -434,6 +434,23 @@ rowcount 未知(-1) 的 DBAPI 不误判成赢（n>0）。回归 6→11 测（新
 release 打活 runner 必停、release→reclaim 真夺权路径、存量
 NULL-owner 可领、error 清空、list_stuck；Event 握手替代 sleep 时序
 断言）。全量 654 例全绿（643→654 只增不减，退出码 0）。
+**会审四轮加固（qwen 2 严重项）**：①API 改**领取即闸**——旧快路径
+把 running+NULL-owner 存量行永远挡回 already_running，自动对账在
+API 路径不可达；现端点在请求内 _claim_run：领到→带凭据
+（run_experiment_background token 透传）启动后台线程、响应如实
+started；没领到→**409 already_running**（不再发「已启动」假响应）；
+存量行经 API 也能自愈。②release 改**两段状态机**：running→（release，
+立即夺权：CAS 条件 UPDATE+owner 清空+error 留痕）→**releasing**（不可
+领取）→（原 runner 收尾翻 / 死透则二次 release 兜底）→failed——
+消灭「release 后 B 立刻可领、A 还在阶段体里=A/B 双跑双计费+stats
+互踩」的运维姿势事故；list_stuck 含 releasing。③NULL-owner 侧门
+收窄到 status==running 精确形状；④仅对 locked/busy 退避重试
+（no such column 等真错不被掩盖）；⑤CLI --release 未释放按非零退
+（exit 3）；⑥迁移 DDL 与模型 VARCHAR 同口径；⑦释放留痕入 error
+（打掉别人长跑的生产操作必须可持久化追溯）。回归 11→14 测
+（API 409/存量行 API 自愈/带 token 启动、CAS 的 IS NULL 渲染、
+_report 回显、releasing 挡领、二次 release 兜底、留痕断言）。
+全量 657 例全绿（643→657 只增不减，退出码 0）。
 审查剩余：1 项 P1 / 3 项 P2 排队中。
 
 ## 0.6 接手者第一天照这个做

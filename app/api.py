@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import access, config, console, corpus, db, engine, experiments, observability
+from .ids import new_id
 from .models import (Candidate, Experiment, Job, ReviewItem, ReviewPresentation,
                      Segment, Work, LlmCall)
 
@@ -170,13 +171,16 @@ def run_exp(exp_id: str, body: RunIn | None = None):
         e = s.get(Experiment, exp_id)
         if not e:
             raise HTTPException(404, "experiment 不存在")
-        if e.status == "running":
-            return {"status": "already_running", "id": exp_id}
-    # 上面这条只是**快路径**（省一次无谓的线程启动），不是闸——「先查后启」
-    # 本身就是 A07 的竞争窗口。真正的闸在 engine.run 开头的原子领取
-    # （_claim_run 条件 UPDATE）：双请求同时过快路径，也只有一个能领到
-    # 执行权；输家线程会拿到 already_running 并安静退出。
-    engine.run_experiment_background(exp_id, stages)
+    # A07 四轮：**领取即闸**——在请求内做原子领取（旧「先查后启」是竞争
+    # 窗口；旧快路径还把 running+NULL-owner 的存量行直接挡回，自动对账
+    # 永远走不到）。领到 → 带凭据启动后台线程，响应如实 started；没领到
+    # → 409 already_running（不发「已启动」的假响应；卡死排查
+    # CLI --list-stuck / --release）。
+    token = new_id("RUN")
+    if not engine._claim_run(exp_id, token):
+        raise HTTPException(409, "already_running：执行权被持有（存量卡死排查用 "
+                                 "run_experiment.py --list-stuck / --release）")
+    engine.run_experiment_background(exp_id, stages, token=token)
     return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
 
 

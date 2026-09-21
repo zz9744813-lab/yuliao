@@ -38,10 +38,17 @@ CALLS: list = []
 
 @pytest.fixture(autouse=True)
 def _clean_calls():
-    """CALLS 是模块级计数器——每个用例前清零，不许跨用例累积。"""
+    """CALLS 是模块级计数器——每个用例前清零，不许跨用例累积；
+    EXP-A07* 用例数据随之清掉（四轮：共享库不许留 running/假 owner
+    的残行——那是「挡住一切新 run」的形状，会让 --list-stuck 长期噪音）。"""
     CALLS.clear()
     yield
     CALLS.clear()
+    with db.session() as s:
+        for r in (s.query(Experiment)
+                  .filter(Experiment.id.like("EXP-A07%")).all()):
+            s.delete(r)
+        s.commit()
 
 
 def _seed(exp_id, *, status="created", config=None, stats=None, frozen=False):
@@ -157,13 +164,21 @@ def test_release_stuck_then_reclaim(monkeypatch):
     assert blocked.get("status") == "already_running", "卡死的 running 必须挡住新 run"
     out = engine.release_run("EXP-A07C4")
     assert out["released"] is True and out["run_owner"] == "RUN-ghost"
+    # 四轮：running --release--> releasing（不可领取），没有活 runner 收尾的
+    # 行要二次 release 兜底翻 failed
+    assert out["status"] == "releasing"
+    again = engine.run("EXP-A07C4", ["plan"])
+    assert again.get("status") == "already_running", "releasing 不许被领取"
+    out2 = engine.release_run("EXP-A07C4")
+    assert out2["released"] is True and out2["status"] == "failed", \
+        "死透的 releasing 由二次 release 兜底"
     _fake_execute_factory(monkeypatch)
     result = engine.run("EXP-A07C4", ["plan"])
     assert result.get("stages"), "release 后可重新领取并执行"
     assert CALLS.count("plan") == 1
     with db.session() as s:
         assert s.get(Experiment, "EXP-A07C4").status == "done"
-    # 非 running 态 release：无操作（幂等）
+    # 非 running/releasing 态 release：无操作（幂等）
     assert engine.release_run("EXP-A07C4")["released"] is False
 
 
@@ -206,15 +221,21 @@ def test_release_hits_live_runner_stops_it(monkeypatch):
     assert started.wait(timeout=10)
     out = engine.release_run("EXP-A07C7")     # 误判卡死、其实还活着
     assert out["released"] is True and out["run_owner"] is not None
+    assert out["status"] == "releasing"
+    # 四轮主案：releasing 不可领取——活 runner 还在阶段体里时，新 run
+    # 立刻放行=A/B 双跑双计费+stats 互踩（本修复要消灭的事故形态）
+    assert engine.run("EXP-A07C7", ["plan"]).get("status") == "already_running"
     block.set()                               # 阶段体继续走完 plan
     t.join()
     assert CALLS == ["plan"], "被夺权的活 runner 不许再执行 source_check"
     assert any("失去运行持有权" in str(e) for e in errs if e), \
-        "活 runner 必须在下一道校验被停（status=failed 兜底）"
+        "活 runner 必须在下一道校验被停（status=releasing≠running 兜底）"
     with db.session() as s:
         exp = s.get(Experiment, "EXP-A07C7")
         assert exp.status == "failed" and exp.run_owner is None, \
-            "release 立即夺权：owner 清空，status 翻 failed"
+            "release 夺权后由原 runner 的收尾让位：releasing→failed、owner 清空"
+        assert "执行权被显式释放" in (exp.error or ""), \
+            "释放是打掉别人长跑的生产操作，error 必须留痕（四轮一般项）"
 
 
 def _capture(fn, *a, **kw):
@@ -282,3 +303,65 @@ def test_list_stuck_finds_running_rows(monkeypatch):
     rows = engine.list_stuck()
     hit = [r for r in rows if r["id"] == "EXP-A07C11"]
     assert hit and hit[0]["run_owner"] == "RUN-ghost", "卡死实验必须可被发现"
+
+
+# ── 会审四轮：领取即闸（API 409）+ releasing 语义 + CAS 单元 ──
+
+def test_api_claim_gate_409_and_legacy_heal(monkeypatch):
+    """四轮严重项①：API 领取即闸——领不到 409（不再发 started 假响应）；
+    存量 running+NULL-owner 行在 API 路径也能自动对账（旧快路径永远挡回）。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    spawned: list = []
+    monkeypatch.setattr(engine, "run_experiment_background",
+                        lambda eid, stages=None, token=None:
+                        spawned.append((eid, token)) or _noop_thread())
+    # 持有中 → 409
+    _seed("EXP-A07D1", status="running")
+    with db.session() as s:
+        s.get(Experiment, "EXP-A07D1").run_owner = "RUN-holder"
+        s.commit()
+    r = client.post("/experiments/EXP-A07D1/run", json={})
+    assert r.status_code == 409 and "already_running" in r.text, \
+        "领不到执行权必须 409，不许发 started 假响应"
+    assert not any(e == "EXP-A07D1" for e, _ in spawned)
+    # 存量 NULL-owner 卡死行 → 自动对账后 200 started（旧快路径永远 already_running）
+    _seed("EXP-A07D3", status="running")
+    with db.session() as s:
+        assert s.get(Experiment, "EXP-A07D3").run_owner is None
+    r3 = client.post("/experiments/EXP-A07D3/run", json={})
+    assert r3.status_code == 200 and r3.json()["status"] == "started"
+    with db.session() as s:
+        exp = s.get(Experiment, "EXP-A07D3")
+        assert exp.run_owner, "API 侧领取已落凭据（存量行自动对账）"
+    # 正常行 → 200 + 带凭据启动
+    _seed("EXP-A07D2")
+    r2 = client.post("/experiments/EXP-A07D2/run", json={})
+    assert r2.status_code == 200 and r2.json()["status"] == "started"
+    hit = [(e, t) for e, t in spawned if e == "EXP-A07D2"]
+    assert hit and hit[0][1], "后台线程必须收到端点代领的凭据 token"
+
+
+class _noop_thread:
+    def start(self):
+        return None
+
+
+def test_cas_predicate_matches_is_null_owner():
+    """CAS 谓词单元：run_owner == None 由 SQLAlchemy 渲染成 IS NULL——
+    存量 running+NULL 行 release 得动（这条隐式行为值得显式钉住）。"""
+    _seed("EXP-A07D5", status="running")     # owner NULL
+    out = engine.release_run("EXP-A07D5")
+    assert out["released"] is True and out["run_owner"] is None
+    with db.session() as s:
+        exp = s.get(Experiment, "EXP-A07D5")
+        assert exp.status == "releasing" and exp.run_owner is None
+
+
+def test_report_already_running_prints(capsys):
+    """四轮：后台线程输家回显独立成函数——「线程连 note 都不看」的
+    假象必须可测。"""
+    engine._report_already_running("EXP-X", "note 内容")
+    out = capsys.readouterr().out
+    assert "EXP-X" in out and "note 内容" in out

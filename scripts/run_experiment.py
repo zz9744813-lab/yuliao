@@ -62,6 +62,10 @@ def main() -> None:
     if args.release:
         out = engine.release_run(args.exp)
         print(json.dumps({"experiment": args.exp, **out}, ensure_ascii=False))
+        if not out.get("released"):
+            # 四轮：没释放（不在 running/releasing、或观察期易主）按非零退
+            # ——与本 CLI「already_running 不按 0 退」同一口径
+            raise SystemExit(3)
         return
 
     if args.dry_run:
