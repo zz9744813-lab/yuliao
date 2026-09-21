@@ -136,7 +136,20 @@ def register(dry_run: bool = False, only: set[str] | None = None,
                 if root is None:
                     raise SystemExit(f"镜像 {w.id} 的 v2_of 指向不存在的作品 "
                                      f"{w.v2_of}——先登记根作品")
-                rmeta = root_meta_cache.get(w.v2_of) or {}
+                # 继承源：本轮已处理的根行优先，否则回读根的**已登记行**
+                # （--only 圈镜像不圈根时，静默拿 {} 抹空继承是会审三轮
+                # 一般项——必须回库或响亮失败，不许产出继承字段被抹空的行）
+                rmeta = root_meta_cache.get(w.v2_of)
+                if rmeta is None:
+                    root_src = s.query(WorkSource).filter_by(
+                        work_id=w.v2_of).first()
+                    if root_src is None:
+                        raise SystemExit(
+                            f"镜像 {w.id} 的根作品 {w.v2_of} 未登记——"
+                            "--only 局部补登必须先圈入根（或全量重跑），"
+                            "不许静默抹空继承字段")
+                    rmeta = {"author_id": root_src.author_id,
+                             "genre_ids": list(root_src.genre_ids or [])}
                 row = dict(
                     work_id=w.id, canonical_work_id=w.v2_of,
                     # 继承是登记数据（会审二轮：不许留指向不存在检查的说明）
@@ -178,7 +191,12 @@ def register(dry_run: bool = False, only: set[str] | None = None,
             for row in rows:
                 sha, n = _work_sha256(s, row["work_id"])
                 out.append({**row, "text_sha256": sha, "n_segments": n})
-            return out                       # 词表 flush 随 close 回滚，不落
+            # 只读承诺的机制依据（会审三轮一般项）：db.session() 返回
+            # SessionLocal()，`with` 退出调用 close()——Session close
+            # **不提交**，未 commit 的 flush（词表行）随之回滚；
+            # tests/test_work_registry.py::test_dry_run_shape_matches_
+            # real_and_reads_only 用真实词表写入前后对比钉死这一语义。
+            return out
 
         for row in rows:
             sha, n_segs = _work_sha256(s, row["work_id"])
@@ -190,12 +208,19 @@ def register(dry_run: bool = False, only: set[str] | None = None,
                     f"（登记 {src.text_sha256[:12]}… vs 现算 {sha[:12]}…）——"
                     "锚是登记时的事实，不许静默重写；确认漂移无害用 "
                     "--reset-anchor 显式重锚")
-            payload = {**row, "text_sha256": sha}
+            # 会审三轮严重项：license_purposes/license_basis 由 register
+            # 之外（集霸授权位）写入——幂等重登**只许在新建行时**携带，
+            # 更新分支整体剔除，否则重登把外部授予的授权静默擦空
+            # （basis 不在 row 里被留、purposes 被擦=孤儿态，且擦空后
+            # verify 的授权闸静默失效——不可逆授权丢失）。
             if src is None:
-                s.add(WorkSource(**payload))
+                s.add(WorkSource(**{**row, "text_sha256": sha}))
             else:
-                for k, v in payload.items():
+                for k, v in row.items():
+                    if k in ("license_purposes", "license_basis"):
+                        continue        # 授权面字段：只由外部授权位修改
                     setattr(src, k, v)
+                src.text_sha256 = sha
             row["text_sha256"] = sha
             row["n_segments"] = n_segs
         s.commit()

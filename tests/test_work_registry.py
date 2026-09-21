@@ -439,3 +439,106 @@ def test_register_idempotent_unknown_title_and_vocab_cleanup(tmp_path, monkeypat
             s.query(Author).filter_by(name="猫腻").delete()
             s.query(Genre).filter_by(name="玄幻").delete()
             s.commit()
+
+
+# ── 会审三轮：授权保留 / 局部镜像 / 词表回滚锁 / 组合口径 ──────────
+
+def test_license_survives_idempotent_rerun(clean_tree, monkeypatch):
+    """三轮严重项：license_purposes/license_basis 由集霸授权位在外部写入
+    ——幂等重登**不许擦**（旧实现 setattr 全量覆写，授权静默丢失）。"""
+    REG.register(only={"WK-troot"})               # 先按 register 路径立行
+    with db.session() as s:
+        r = s.query(WorkSource).filter_by(work_id="WK-troot").first()
+        r.license_purposes = ["training_source"]
+        r.license_basis = "集霸 2026-09-21 授权（三轮测试形态）"
+        s.commit()
+    REG.register(only={"WK-troot"})               # 重登：授权必须原样幸存
+    with db.session() as s:
+        r = s.query(WorkSource).filter_by(work_id="WK-troot").first()
+        assert r.license_purposes == ["training_source"], \
+            "幂等重登把外部授予的授权擦空——不可逆授权丢失（三轮严重项）"
+        assert r.license_basis == "集霸 2026-09-21 授权（三轮测试形态）"
+    rep = VRW.verify()
+    assert not any("license" in m["kind"] and m.get("work") == "WK-troot"
+                   for m in rep["mismatch"]), "保留的授权+依据必须过授权闸"
+
+
+def test_only_mirror_reads_root_from_db_or_fails(clean_tree, monkeypatch):
+    """三轮一般项：--only 只圈镜像不圈根——根已登记→回读根的登记行
+    （继承不许抹空）；根未登记→响亮失败。"""
+    # 根已登记（fixture 里 _reg 立过）→ 局部补登镜像继承必须来自根行
+    rows = REG.register(only={"WK-tmirror"})
+    with db.session() as s:
+        r = s.query(WorkSource).filter_by(work_id="WK-tmirror").first()
+        assert r.canonical_work_id == "WK-troot"
+    # 根未登记 → 响亮失败，不许静默抹空继承
+    _mk("WK-r9", "孤根（测试）", n_segs=1)
+    _mk("WK-r9m", "孤根（测试）（corpus v2）", v2_of="WK-r9", n_segs=1)
+    try:
+        with pytest.raises(SystemExit, match="根作品.*未登记"):
+            REG.register(only={"WK-r9m"})
+    finally:
+        with db.session() as s:
+            for wid in ("WK-r9", "WK-r9m"):
+                s.query(Segment).filter_by(work_id=wid).delete()
+                s.query(WorkSource).filter_by(work_id=wid).delete()
+                s.query(Work).filter_by(id=wid).delete()
+            s.commit()
+
+
+def test_dry_run_rolls_back_vocabulary_writes(tmp_path):
+    """三轮一般项：dry-run 只读承诺的机制依据 = Session close 不提交、
+    未 commit 的词表 flush 随之回滚——用**真实词表写入**锁死该语义，
+    不许靠『恰好没写』的侥幸。"""
+    db.init_db()
+    _mk("WK-dry", "干燥跑作品（测试）", n_segs=1)
+    uniq_author = "干燥跑专用作者X9"
+    try:
+        import register_work_sources as R2
+        old_authors = dict(R2._AUTHORS)
+        old_meta = dict(R2._ROOT_META)
+        old_genres = set(R2._GENRES)
+        R2._AUTHORS = {uniq_author: "测试依据"}
+        R2._ROOT_META = {"干燥跑作品（测试）": {"author": uniq_author,
+                                           "genres": set(), "basis": "测试"}}
+        R2._GENRES = set()
+        try:
+            rows = R2.register(dry_run=True, only={"WK-dry"})
+            assert rows and rows[0]["text_sha256"] is not None
+            with db.session() as s:
+                assert s.query(Author).filter_by(name=uniq_author).first() \
+                    is None, "dry-run 的词表 flush 必须随 close 回滚（只读承诺）"
+                assert s.query(WorkSource).filter_by(work_id="WK-dry").first() \
+                    is None, "dry-run 不落登记行"
+        finally:
+            R2._AUTHORS = old_authors
+            R2._ROOT_META = old_meta
+            R2._GENRES = old_genres
+    finally:
+        with db.session() as s:
+            s.query(Segment).filter_by(work_id="WK-dry").delete()
+            s.query(WorkSource).filter_by(work_id="WK-dry").delete()
+            s.query(Work).filter_by(id="WK-dry").delete()
+            s.query(Author).filter_by(name=uniq_author).delete()
+            s.commit()
+
+
+def test_fixture_mirror_combo_fixture_wins(clean_tree, monkeypatch):
+    """三轮建议：既是 fixture 又是 v2_of 镜像的组合口径——fixture 分类
+    胜出（register 的 fixture 分支先于镜像分支，verify 的镜像检查跳过
+    fixture 行），两脚本口径一致，不许互相打架。"""
+    _mk("WK-fm", "fixture_镜像组合", source="inbox:fixture_combo.txt",
+        v2_of="WK-troot", n_segs=1)
+    try:
+        rows = REG.register(only={"WK-fm"})
+        assert rows[0]["source_type"] == "fixture", "组合口径：fixture 胜出"
+        assert rows[0]["canonical_work_id"] == "WK-fm"
+        rep = VRW.verify()
+        assert not any(m.get("work") == "WK-fm" for m in rep["mismatch"]), \
+            "fixture+镜像组合不许被 verify 的镜像检查误报"
+    finally:
+        with db.session() as s:
+            s.query(Segment).filter_by(work_id="WK-fm").delete()
+            s.query(WorkSource).filter_by(work_id="WK-fm").delete()
+            s.query(Work).filter_by(id="WK-fm").delete()
+            s.commit()

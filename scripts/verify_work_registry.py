@@ -57,20 +57,10 @@ from app.models import Author, Genre, Segment, Work, WorkSource  # noqa: E402
 
 V2_MAP = ROOT / "data" / "exports" / "corpus_v2_map.jsonl"
 
-
-def _work_sha256(s, work_id: str) -> tuple[str | None, int]:
-    """与 register_work_sources._work_sha256 同一口径（锚复核用）。"""
-    import hashlib
-    h = hashlib.sha256()
-    n = 0
-    q = (s.query(Segment.text_clean, Segment.text)
-         .filter(Segment.work_id == work_id)
-         .order_by(Segment.ordinal)
-         .yield_per(500))
-    for text_clean, text in q:
-        h.update(((text_clean or text or "") + "\n").encode("utf-8"))
-        n += 1
-    return (h.hexdigest() if n else None), n
+# 会审三轮一般项：内容锚哈希**单一口径**——verify 复用 register 的实现，
+# 不许各写一份（分隔符/text_clean 回退/ordinal 序任一处漂移都会让
+# 锚复核与登记口径悄悄错位——假 PASS 或假漂移）
+_work_sha256 = REG._work_sha256
 
 
 def verify(write_json: str = "", check_anchors: bool = True) -> dict:
@@ -121,12 +111,17 @@ def verify(write_json: str = "", check_anchors: bool = True) -> dict:
             if r.canonical_work_id not in works:
                 mismatches.append({"work": wid, "kind": "canonical_dangling",
                                    "canonical": r.canonical_work_id})
-        # 镜像回连到真根（链走 + 环检测）+ 继承一致 + 自指
+        # 镜像回连到真根（链走 + 环检测）+ 继承一致 + 自指。
+        # 组合口径（会审三轮建议）：fixture 分类**胜出**——「既是 fixture
+        # 又是 v2_of 镜像」的作品按 fixture 处理（register 的 fixture 分支
+        # 先于镜像分支），verify 的镜像检查同样跳过 fixture 行，两侧一致。
         for row in per_work:
             wid = row["work_id"]
             r = regs[wid]
             w = works[wid]
-            if w.v2_of:
+            # 守卫只包镜像块——fixture 行不走镜像检查（组合口径），
+            # 但 fixture 分型与授权闸对 fixture 行照常检查
+            if w.v2_of and not REG._is_fixture(w):
                 if w.v2_of == wid:
                     mismatches.append({"work": wid, "kind": "self_mirror"})
                 elif r.canonical_work_id != w.v2_of:
@@ -230,7 +225,10 @@ def verify(write_json: str = "", check_anchors: bool = True) -> dict:
                              for p in mirrors],
             "per_work": per_work,
             "corpus_v2_map": map_report,
+            # 会审三轮建议：mismatch 清单截断（50 条采样，map_orphan 只
+            # 采 10 条）——n_mismatch 是**真实总数**，清单只是样本
             "n_mismatch": len(mismatches), "mismatch": mismatches[:50],
+            "mismatch_list_truncated": len(mismatches) > len(mismatches[:50]),
             "isolation_contract": {
                 "rule": "发现/复现样本隔离三查：源身份+文本版本+目标与上下文区间",
                 "division": "①源身份②文本版本由本登记与对账承担；③区间比对由"

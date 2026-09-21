@@ -60,6 +60,10 @@ def _migrate(engine) -> None:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
                 (table,)).fetchone()
             if hit is None:
+                # 会审三轮建议：缺表不是失败（建表归 create_all）但**不许
+                # 静默**——表名拼错时增列永远不生效，必须可见
+                print(f"[_migrate] 表 {table} 不存在，跳过增列"
+                      f"（新表由 create_all 带全量列建立）", flush=True)
                 continue
             existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
             for col, ddl in cols.items():
