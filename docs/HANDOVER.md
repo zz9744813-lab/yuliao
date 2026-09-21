@@ -571,6 +571,22 @@ benchmark 段计数）。**验证命令**：
 登记幂等+不可考据留空）；共享库现实（他文件遗留 Work/镜像）由
 synthetic 占位登记处理且 teardown 只删自建行。全量 **683 例全绿**
 （674→683 只增不减，退出码 0）。
+**K1-A 会审三轮修复后终态（d24cc83，qwen 席三轮 BLOCK 后 PASS）**：
+①身份≠授权拆分——purpose_basis 只证署名可核对；identity_purposes
+（研究侧）与 license_purposes（训练/基准授权面）+license_basis 分开；
+**全部源授权面留空，训练/基准用途授权是集霸决策位**（授权闸：
+license 非空必须带依据且只认 training_source/benchmark_source）；
+②内容锚漂移守卫——register 重跑漂移即 SystemExit、--reset-anchor
+显式重锚、verify 锚复核（复用 REG._work_sha256 单一口径）、0 段锚
+=NULL；③悬空三查（author/genre/canonical 无 FK 列由对账承担）+
+镜像链回溯防环（A↔B 报 mirror_root_chain）+ 自指镜像拒绝；
+④**license 字段幂等重登不擦**（更新分支剔除授权字段——外部授予的
+授权不可逆丢失是三轮严重项，回归钉死幸存）；⑤--only 镜像回读根
+登记行或响亮失败；⑥dry-run 只读（Session close 回滚语义注记+真实
+词表写入锁死）；⑦fixture+镜像组合口径统一（fixture 胜出）；
+⑧_migrate 缺表可见跳过；n_mismatch 真实总数+截断标注。回归 17 测；
+全量 **694 例全绿**（674→694 只增不减，退出码 0；lastfailed 清空后
+重跑不存在=无失败记录）。真库对账 PASS（含锚复核+授权闸）。
 
 ## 0.6 接手者第一天照这个做
 
