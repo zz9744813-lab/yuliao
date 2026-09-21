@@ -395,6 +395,83 @@ class Store:
                 db.execute("UPDATE outbox SET processed=1 WHERE commit_id=?", (r["id"],))
         return len(rows)
 
+    def _audit_commit_consistency(self, db, r) -> list[str]:
+        """A09（审查 20260920-1810）：事件/收据/上下文/投影的逐项交叉核验。
+
+        旧审计只查正文哈希、补丁证据与状态重放——把事件引文换成不存在的
+        文字、把收据 text_hash 改成全零，audit 仍 ok=true（审查在三场运行
+        库副本上隔离复现）。本检查又被用作代码升级前的正史检查，漏过损坏
+        的收据或事件等于给坏账盖章。故逐项校验：
+        · 事件：quote 必须在正文里逐字存在（event_quote）；event_id 必须
+          出自冻结计划且计划事件全覆盖（event_plan_ref / event_plan_coverage）；
+        · 补丁：每条的 event_id 必须出自冻结计划（patch_event_ref）；
+        · 收据：与权威提交行逐字段对齐（receipt_fields），text_hash /
+          context_hash 与提交行一致（receipt_hash——审查改全零复现）；
+        · 上下文：提交行 context_hash 必须仍是该 job 冻结上下文的指纹
+          （context_hash）；
+        · 投影：outbox 必在（outbox_missing）；已处理则 memories 载荷必须
+          与提交行投影一致（projection_payload / projection_missing），
+          记忆已写而 outbox 未标是半写态（projection_state）。"""
+        out: list[str] = []
+        job = db.execute("SELECT * FROM jobs WHERE id=?", (r["job"],)).fetchone()
+        if job is None:
+            return ["job_missing"]
+        try:
+            req = json.loads(job["request"])
+            plan = ScenePlan.model_validate(req["plan"])
+        except Exception:
+            return ["plan_unreadable"]
+        plan_ids = {e.event_id for e in plan.events}
+        events = json.loads(r["events"])
+        for ev in events:
+            if ev.get("event_id") not in plan_ids:
+                out.append("event_plan_ref")
+            if (ev.get("quote") or "") not in r["text"]:
+                out.append("event_quote")
+        if {ev.get("event_id") for ev in events} != plan_ids:
+            out.append("event_plan_coverage")
+        for c in json.loads(r["patch"]):
+            if c.get("event_id") not in plan_ids:
+                out.append("patch_event_ref")
+        try:
+            receipt = json.loads(r["receipt"])
+        except Exception:
+            return out + ["receipt_unreadable"]
+        if (receipt.get("commit_id") != r["id"] or receipt.get("job_id") != r["job"]
+                or receipt.get("book_id") != r["book"]
+                or receipt.get("branch_id") != r["branch"]
+                or receipt.get("scene_id") != r["scene"]
+                or receipt.get("base_revision") != r["base_revision"]
+                or receipt.get("revision") != r["revision"]
+                or receipt.get("status") != "committed"):
+            out.append("receipt_fields")
+        if receipt.get("text_hash") != r["text_hash"] \
+                or receipt.get("context_hash") != r["context_hash"]:
+            out.append("receipt_hash")
+        try:
+            ctx = json.loads(job["context"])
+        except Exception:
+            return out + ["context_unreadable"]
+        if digest(ctx) != r["context_hash"]:
+            out.append("context_hash")
+        ob = db.execute("SELECT processed FROM outbox WHERE commit_id=?", (r["id"],)).fetchone()
+        if ob is None:
+            out.append("outbox_missing")
+        else:
+            m = db.execute("SELECT revision,payload FROM memories WHERE commit_id=?",
+                            (r["id"],)).fetchone()
+            if ob["processed"] == 1 and m is None:
+                out.append("projection_missing")
+            elif m is not None:
+                if ob["processed"] == 0:
+                    out.append("projection_state")
+                payload = {"events": json.loads(r["events"]),
+                           "changes": json.loads(r["patch"]),
+                           "text_hash": r["text_hash"]}
+                if canonical(payload) != m["payload"] or m["revision"] != r["revision"]:
+                    out.append("projection_payload")
+        return out
+
     def audit(self, book, branch="main"):
         with self.connection(transaction=True) as db:
             b = db.execute("SELECT * FROM branches WHERE book=? AND branch=?", (book, branch)).fetchone()
@@ -413,6 +490,7 @@ class Store:
                         errors.append("patch_evidence")
                     world.facts[c["fact"]].value = c["after"]
                 world.revision = r["revision"]
+                errors.extend(self._audit_commit_consistency(db, r))
             if canonical(world) != b["world"] or world.revision != b["revision"]:
                 errors.append("world_replay")
             pending = db.execute("SELECT COUNT(*) FROM outbox o JOIN commits c ON c.id=o.commit_id WHERE c.book=? AND c.branch=? AND o.processed=0", (book, branch)).fetchone()[0]

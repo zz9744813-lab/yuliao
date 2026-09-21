@@ -478,6 +478,24 @@ running+token 的卡死形状；④releasing→failed 让位加 **held 门**：
 真件复验收数字不变（n_bench_hashes 1971、重合 0——现场 1429 条基准
 无多段拼接 context，空隙属已复现的扩展路径）。审查剩余：1 项 P1
 （A08，novel-distiller 仓）/ 2 项 P2（A09/A10 scene_runtime）。
+**审查 A09 已修（2026-09-21 午后，P2）**：Runtime 恢复审计补齐事件/
+收据/上下文/投影一致性。事故（审查在三场运行库副本隔离复现）：把
+第一场事件引文换成不存在的文字、把收据 text_hash 改成全零——audit
+仍 ok=true；而该检查又被用作代码升级前的正史检查，漏过损坏收据/事件
+= 给坏账盖章。修复：store.audit 增 _audit_commit_consistency 逐项
+交叉核验——事件 quote 必须在正文逐字存在（event_quote）、event_id
+必须出自冻结计划且全覆盖（event_plan_ref/event_plan_coverage）、
+补丁 event_id 必须出自计划（patch_event_ref）、收据与权威提交行逐
+字段对齐（receipt_fields）且 text_hash/context_hash 一致
+（receipt_hash）、提交行 context_hash 必须仍是 job 冻结上下文指纹
+（context_hash）、outbox 必在（outbox_missing）且已处理则投影记忆
+载荷与提交行一致（projection_payload/projection_missing）、记忆
+已写而 outbox 未标=半写态（projection_state）。验收按审查口径
+「逐字段损坏注入必须报错」：回归 10 测（事件引文/事件 id/补丁引用/
+收据哈希/收据字段/上下文哈希/投影载荷/outbox 缺失/投影缺失逐项
+注入 + 干净跑零误伤含精确形状断言）。全量 671 例全绿（661→671
+只增不减，退出码 0）。审查剩余：1 项 P1（A08，novel-distiller 仓）
+/ 1 项 P2（A10）。
 
 ## 0.6 接手者第一天照这个做
 
