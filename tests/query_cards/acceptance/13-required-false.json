@@ -1,0 +1,4 @@
+{"card_id": "acc-13-required-false", "kind": "badwhen_unknown", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"视角": "全知"}},
+ "expected": {"must_reject_reason": {"A-短句加速": "excluded_required_false"}}}

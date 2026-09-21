@@ -1,0 +1,8 @@
+{"card_id": "dev-02-author-scope", "kind": "match", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-β",
+   "semantic_requirements": {"节奏": "长句"}},
+ "expected": {"status": "matched", "must_select": ["B-作者习惯"],
+   "must_not_select": ["A-短句加速", "L-镜像", "M-授权用途"],
+   "must_reject_reason": {"G-未知必需": "excluded_required_unknown",
+     "A-短句加速": "excluded_scope", "L-镜像": "excluded_scope",
+     "M-授权用途": "excluded_scope"}}}

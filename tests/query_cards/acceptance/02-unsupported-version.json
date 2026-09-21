@@ -1,0 +1,5 @@
+{"card_id": "acc-02-unsupported-version", "kind": "empty_error", "entry": "service",
+ "policy": {"contract_version": 9, "book_id": "WK-α",
+   "semantic_requirements": {}},
+ "expected": {"status": "unsupported",
+   "reason_contains": "unsupported"}}

@@ -1,0 +1,51 @@
+{
+ "card_id": "dev-01-match-basic",
+ "kind": "match",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-α",
+  "semantic_requirements": {
+   "节奏": "短句",
+   "场景": "追逃",
+   "视角": "限知"
+  }
+ },
+ "expected": {
+  "status": "matched",
+  "must_select": [
+   "A-短句加速",
+   "B-作者习惯",
+   "L-镜像"
+  ],
+  "must_not_select": [
+   "C-泛用",
+   "D-全局",
+   "E-假设",
+   "F-冲突",
+   "G-未知必需",
+   "H-无证据",
+   "M-授权用途"
+  ],
+  "must_reject_reason": {
+   "F-冲突": "excluded_bad_when",
+   "G-未知必需": "excluded_required_unknown",
+   "H-无证据": "excluded_no_evidence",
+   "C-泛用": "excluded_scope_uncertain",
+   "D-全局": "excluded_scope_global_reserved",
+   "M-授权用途": "excluded_scope"
+  },
+  "score_component": [
+   {
+    "strategy_key": "A-短句加速",
+    "component": "good_when_matches",
+    "equals": 1
+   },
+   {
+    "strategy_key": "L-镜像",
+    "component": "evidence_count",
+    "equals": 1
+   }
+  ]
+ }
+}

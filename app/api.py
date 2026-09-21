@@ -708,6 +708,38 @@ def verdict(review_id: str, body: Verdict):
                 "tags": tags}
 
 
+# ── 知识查询（K3-A，知识化方案 §6.1–6.2/§7.1）────────────────
+
+@app.post("/knowledge/query")
+def knowledge_query(body: dict):
+    """K3-A：POST /knowledge/query——语义需求显式输入，策略经固定过滤顺序；
+    只读（不写包；冻结归 K3-B）。旧名 /genome/query 只做文档统一，绝不
+    新建第二套查询服务（本端点即唯一入口）。"""
+    from . import knowledge_query as kq
+    try:
+        with db.session() as s:
+            return kq.query_knowledge(body or {}, s)
+    except kq.PolicyError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/knowledge/capabilities")
+def knowledge_capabilities():
+    from . import knowledge_query as kq
+    with db.session() as s:
+        return kq.capabilities(s)
+
+
+@app.get("/knowledge/packages/{package_id}")
+def knowledge_package(package_id: str):
+    from . import knowledge_query as kq
+    with db.session() as s:
+        pkg = kq.get_package(package_id, s)
+        if pkg is None:
+            raise HTTPException(404, f"知识包不存在：{package_id}")
+        return pkg
+
+
 # ── 观测 ────────────────────────────────────────────────────
 
 @app.get("/llm/stats")

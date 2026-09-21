@@ -1,0 +1,5 @@
+{"card_id": "dev-08-required-unknown", "kind": "badwhen_unknown", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"节奏": "短句"}},
+ "expected": {"status": "matched",
+   "must_reject_reason": {"G-未知必需": "excluded_required_unknown"}}}

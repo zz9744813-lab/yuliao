@@ -1,0 +1,26 @@
+{
+ "card_id": "dev-05-ordering",
+ "kind": "match",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-α",
+  "semantic_requirements": {
+   "节奏": "短句",
+   "场景": "追逃",
+   "视角": "限知"
+  },
+  "limits": {
+   "context_items": 2
+  }
+ },
+ "expected": {
+  "status": "matched",
+  "selected_order_head": [
+   "A-短句加速",
+   "L-镜像",
+   "B-作者习惯"
+  ],
+  "context_count": 2
+ }
+}

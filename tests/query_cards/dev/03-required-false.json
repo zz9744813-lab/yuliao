@@ -1,0 +1,6 @@
+{"card_id": "dev-03-required-false", "kind": "badwhen_unknown", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"视角": "全知", "节奏": "短句"}},
+ "expected": {"status": "matched",
+   "must_reject_reason": {"A-短句加速": "excluded_required_false"},
+   "must_select": ["L-镜像"]}}

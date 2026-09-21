@@ -1,0 +1,4 @@
+{"card_id": "acc-09-no-evidence-h", "kind": "empty_error", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {}},
+ "expected": {"must_reject_reason": {"H-无证据": "excluded_no_evidence"}}}

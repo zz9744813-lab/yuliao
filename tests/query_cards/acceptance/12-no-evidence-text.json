@@ -1,0 +1,5 @@
+{"card_id": "acc-12-no-evidence-text", "kind": "match", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"节奏": "短句"}},
+ "expected": {"status": "matched",
+   "response_json_not_contains": ["evidence_text", "夜里起了风"]}}

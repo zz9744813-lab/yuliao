@@ -1,0 +1,5 @@
+{"card_id": "dev-12-context-zero", "kind": "match", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"节奏": "短句"},
+   "limits": {"context_items": 0}},
+ "expected": {"status": "matched", "context_count": 0}}

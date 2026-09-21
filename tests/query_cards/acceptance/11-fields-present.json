@@ -1,0 +1,9 @@
+{"card_id": "acc-11-fields-present", "kind": "match", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"节奏": "短句"}},
+ "expected": {"status": "matched",
+   "first_selected_has_keys": ["strategy_id", "version", "scope",
+     "observation_status", "effect_status", "score_components",
+     "uncertain_items", "evidence"],
+   "response_has_keys": ["status", "snapshot_fingerprint", "package_sha256",
+     "policy_sha256", "selected", "rejected", "budget"]}}

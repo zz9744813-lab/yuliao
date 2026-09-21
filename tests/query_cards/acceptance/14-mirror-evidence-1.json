@@ -1,0 +1,5 @@
+{"card_id": "acc-14-mirror-evidence-1", "kind": "match", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"节奏": "短句"}},
+ "expected": {"score_component": [{"strategy_key": "L-镜像",
+   "component": "evidence_count", "equals": 1}]}}

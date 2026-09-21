@@ -1,0 +1,4 @@
+{"card_id": "acc-04-cap-11", "kind": "empty_error", "entry": "http",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {}, "limits": {"candidate_cap": 11}},
+ "expected": {"http_status_code": 400}}

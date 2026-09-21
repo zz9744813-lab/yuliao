@@ -1,0 +1,7 @@
+{"card_id": "dev-04-neutral-no-support", "kind": "badwhen_unknown", "entry": "service",
+ "policy": {"contract_version": 2, "book_id": "WK-α",
+   "semantic_requirements": {"时长": "短篇"}},
+ "expected": {"status": "matched",
+   "must_select": ["A-短句加速"],
+   "score_component": [{"strategy_key": "A-短句加速", "component": "good_when_matches", "equals": 0}],
+   "uncertain_dimension_includes": {"strategy_key": "A-短句加速", "dimension": "节奏"}}}

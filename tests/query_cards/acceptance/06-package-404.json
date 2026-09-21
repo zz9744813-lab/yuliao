@@ -1,0 +1,3 @@
+{"card_id": "acc-06-package-404", "kind": "empty_error", "entry": "http_package",
+ "package_id": "KPKG-nope",
+ "expected": {"http_status_code": 404}}

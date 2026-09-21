@@ -1,0 +1,19 @@
+{
+ "card_id": "dev-11-dedup-version",
+ "kind": "match",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-α",
+  "semantic_requirements": {
+   "节奏": "短句",
+   "视角": "限知"
+  }
+ },
+ "expected": {
+  "status": "matched",
+  "must_reject_reason": {
+   "A-短句加速": "excluded_duplicate_lower_version"
+  }
+ }
+}
