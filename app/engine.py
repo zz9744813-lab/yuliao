@@ -40,6 +40,7 @@ from sqlalchemy.orm import Session
 
 from . import config, experiments
 from .db import session
+from .ids import new_id
 from .models import (Candidate, Experiment, Frame, JudgeRun, LlmCall,
                      ReportFile, ResidualDet, ResidualSem, Segment)
 
@@ -494,13 +495,56 @@ def _stage_record(exp_id: str, name: str) -> dict:
             .get(name) or {}
 
 
+def _claim_run(exp_id: str, token: str) -> bool:
+    """A07：**原子领取执行权**——条件 UPDATE，只有把 status 从非 running
+    翻成 running 的那一个赢；owner/lease（领取凭据）随领取一次写入。
+
+    为什么必须是领取事务：「检查 running 再启动」不是原子操作——API 先查
+    后启线程、CLI 与 API 同时启动、双请求竞争，都读到「阶段尚未完成」
+    （审查实测：屏障控制顺序后，阶段体执行 2 次、两边都返回成功；真实
+    阶段则重复生成与计费）。UI 禁用按钮、单纯读 status，都不能替代本事务。
+    无自动 TTL 接管：合法实验一跑数小时（PROD 290 变体），固定 TTL 会在
+    长跑中途被误抢——A07 换姿势重演。卡死恢复走 release_run 显式释放。"""
+    with session() as s:
+        n = (s.query(Experiment)
+             .filter(Experiment.id == exp_id,
+                     Experiment.status != "running")
+             .update({Experiment.status: "running",
+                      Experiment.run_owner: token,
+                      Experiment.run_claimed_at: _now()},
+                     synchronize_session=False))
+        s.commit()
+        return bool(n)
+
+
+def release_run(exp_id: str) -> dict:
+    """显式释放卡死的执行权（A07 运维口径，CLI --release）。
+
+    只对 running 态生效：release 后 status=failed，下次 run 可重新领取。"""
+    with session() as s:
+        exp = _exp(s, exp_id)
+        if exp.status != "running":
+            return {"released": False, "status": exp.status,
+                    "note": "不在 running 态，无需释放"}
+        owner = exp.run_owner
+        exp.status = "failed"
+        exp.error = ((exp.error or "") + "；执行权被显式释放（release_run）").lstrip("；")
+        exp.updated_at = _now()
+        s.commit()
+        return {"released": True, "run_owner": owner}
+
+
 def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
     """主驱动：按状态机顺序执行 --stages 子集，返回 stats["engine"] 块。
 
+    - **A07 执行权**：开头原子领取（_claim_run）；竞争失败方直接返回
+      already_running，绝不触碰阶段体——阶段执行 2 次=重复生成重复计费。
+      每个阶段提交前校验持有权（run_owner 仍是自己的 token）：中途失去
+      执行权的 runner 立即停止提交——它手里的结果可能已过期。
     - 阶段级幂等：stats 里 status=done 的阶段直接跳过（force=True 可强制重跑，
       产品级幂等保证不重复计数）。
     - 失败：_execute 已把失败落库并上抛，这里 finally 只负责把还停在 running 的
-      实验状态收尾（前置报错走这条路）。
+      实验状态收尾——且仅当持有权还在自己手里（别人的 run 不许被我收尾）。
     - status 语义与旧管线一致：done = 本趟请求的阶段全部成功；精确进度看 /stages。
     """
     names = _resolve(stages)
@@ -508,9 +552,13 @@ def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
         exp = _exp(s, exp_id)
         if (exp.config or {}).get("frozen"):
             raise EngineError(f"{exp_id} 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
-        exp.status = "running"
-        exp.error = None
-        s.commit()
+    token = new_id("RUN")
+    if not _claim_run(exp_id, token):
+        with session() as s:
+            exp = _exp(s, exp_id)
+            return {"status": "already_running", "run_owner": exp.run_owner,
+                    "stages": {},
+                    "note": "执行权已被领取（原子 UPDATE 竞争失败）——阶段体不重复执行"}
 
     clean = True
     try:
@@ -520,6 +568,11 @@ def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
             try:
                 with session() as s:
                     exp = _exp(s, exp_id)
+                    if exp.run_owner != token:
+                        # A07：持有权被显式 release 后被别人领走——本 runner
+                        # 的结果可能已过期，停止提交，绝不覆盖新主的进度
+                        raise EngineError(f"失去运行持有权（owner={exp.run_owner}≠{token}）"
+                                          "——停止提交阶段结果")
                     miss = _prereq_missing(s, exp.id, name)
                     if miss:
                         raise EngineError(f"阶段 {name} 前置未满足：{miss}")
@@ -530,7 +583,7 @@ def run(exp_id: str, stages=None, *, force: bool = False) -> dict:
     finally:
         with session() as s:
             exp = _exp(s, exp_id)
-            if exp.status == "running":
+            if exp.status == "running" and exp.run_owner == token:
                 exp.status = "done" if clean else "failed"
                 if not clean:
                     exp.error = "引擎中断（各阶段 error 见 stats.engine.stages）"

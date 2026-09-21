@@ -91,6 +91,14 @@ class Experiment(Base):
     config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     stats: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # A07（审查 20260920-1810）：执行权领取凭据。「检查 running 再启动」
+    # 不是原子操作（API 先查后启线程、CLI 与 API 并发、双请求竞争都读到
+    # 阶段未完成）→ 阶段体执行 2 次、真实阶段重复生成重复计费。修复：
+    # 条件 UPDATE 原子领取（只有把 status 翻成 running 的那一个赢），
+    # owner/claimed_at 随领取写入；提交阶段结果前校验持有权。无自动
+    # TTL 接管——数小时级长跑会被误抢，卡死用 release_run 显式释放。
+    run_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    run_claimed_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
     updated_at: Mapped[str] = mapped_column(String(32), default=_now, onupdate=_now)
 

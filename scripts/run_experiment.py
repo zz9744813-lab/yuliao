@@ -30,6 +30,9 @@ def main() -> None:
     ap.add_argument("--mock", action="store_true", help="LG_LLM_MODE=mock，端到端跑通不花额度")
     ap.add_argument("--force", action="store_true",
                     help="stats 里已 done 的阶段也强制重跑（产品级幂等，不会重复计数）")
+    ap.add_argument("--release", action="store_true",
+                    help="显式释放卡死的执行权（A07：status=running 但 runner 已死；"
+                         "无自动 TTL 接管——长跑中途不许被误抢）")
     ap.add_argument("--json", dest="as_json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
@@ -43,6 +46,11 @@ def main() -> None:
         config.LLM_MODE = "mock"          # 双保险：环境变量没生效就直接改运行时配置
 
     db.init_db()
+
+    if args.release:
+        out = engine.release_run(args.exp)
+        print(json.dumps({"experiment": args.exp, **out}, ensure_ascii=False))
+        return
 
     if args.dry_run:
         plan = engine.plan_run(args.exp, args.stages)

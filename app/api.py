@@ -172,6 +172,10 @@ def run_exp(exp_id: str, body: RunIn | None = None):
             raise HTTPException(404, "experiment 不存在")
         if e.status == "running":
             return {"status": "already_running", "id": exp_id}
+    # 上面这条只是**快路径**（省一次无谓的线程启动），不是闸——「先查后启」
+    # 本身就是 A07 的竞争窗口。真正的闸在 engine.run 开头的原子领取
+    # （_claim_run 条件 UPDATE）：双请求同时过快路径，也只有一个能领到
+    # 执行权；输家线程会拿到 already_running 并安静退出。
     engine.run_experiment_background(exp_id, stages)
     return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
 
