@@ -24,7 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import SQLAlchemyError
 
 from . import knowledge as K
 from .models import (ExpressionStrategyV2, Segment, StrategyCondition,
@@ -34,6 +34,9 @@ from .models import (ExpressionStrategyV2, Segment, StrategyCondition,
 # 查询结果；K3 行「K1/K2 合格知识可用」）
 ELIGIBLE_STATUS = frozenset({"verified"})
 ELIGIBLE_OBSERVATION = frozenset({"observed", "replicated"})
+# 证据侧同口径（会审四轮：硬编码 status="verified" 与策略层常量两处口径，
+# 放宽 replicated 时只改一处会静默漏掉另一处）
+ELIGIBLE_INSTANCE_STATUS = frozenset({"verified"})
 # 默认排除的来源类型（fixture/synthetic/commentary 不给人类证据加分——
 # K1-A 契约：fixture 只验契约）与合格文本版本
 DEFAULT_EXCLUDED_SOURCE_TYPES = frozenset(
@@ -47,6 +50,17 @@ SCOPE_SPECIFICITY = {"WORK": 4, "AUTHOR": 3, "GENRE": 2, "GLOBAL": 1,
                      "UNCERTAIN": 0}
 CANDIDATE_CAP_MAX = 10
 CONTEXT_ITEMS_MAX = 3
+# 默认 0：进正文上下文是调用方显式选择（监督「默认 0–3」取下界——
+# 自动带 3 条进 Writer 上下文不是保守默认）
+DEFAULT_CONTEXT_ITEMS = 0
+
+
+def _as_int(v, name: str) -> int:
+    """policy 数值解析：非数值/None → PolicyError（HTTP 400，不许 500）。"""
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        raise PolicyError(f"limits.{name} 必须是整数，实得 {v!r}")
 
 
 class PolicyError(ValueError):
@@ -104,9 +118,16 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     excluded_source_types（fixture/synthetic/commentary 冒充）、
     license 禁用用途、不合格文本版本；镜像按 canonical 根作品聚合去重
     ——evidence_count=唯一 (根作品, span) 区间数，重跑不加置信度。"""
-    seg_role = {sid: role for sid, role in s.query(
-        Segment.id, Segment.role).all()}
-    reg = {r.work_id: r for r in s.query(WorkSource).all()}
+    instances = (s.query(StrategyInstance)
+                 .filter(StrategyInstance.strategy_id == strategy_id,
+                         StrategyInstance.status.in_(
+                             ELIGIBLE_INSTANCE_STATUS)).all())
+    seg_ids = {i.segment_id for i in instances}
+    work_ids = {i.work_id for i in instances}
+    seg_role = {sid: role for sid, role in s.query(Segment.id, Segment.role)
+                .filter(Segment.id.in_(seg_ids)).all()} if seg_ids else {}
+    reg = {r.work_id: r for r in s.query(WorkSource)
+           .filter(WorkSource.work_id.in_(work_ids)).all()} if work_ids else {}
     sp = policy.get("source_policy") or {}
     excluded_types = frozenset(sp.get(
         "excluded_source_types") or DEFAULT_EXCLUDED_SOURCE_TYPES)
@@ -116,9 +137,7 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     stripped: list[str] = []
     intervals: set[tuple[str, int, int]] = set()
     refs: list[dict] = []
-    for ins in (s.query(StrategyInstance)
-                .filter_by(strategy_id=strategy_id, status="verified")
-                .all()):
+    for ins in instances:
         r = reg.get(ins.work_id)
         if r is None:
             stripped.append(f"{ins.id}:no_registry"); continue
@@ -189,7 +208,10 @@ def _condition_pipeline(s, strategy_id: int, requirements: dict
             comps["good_when_matches" if not c.required
                     else "required_matches"] += 1
         else:
-            uncertain.append({"dimension": c.dimension, "state": state})
+            uncertain.append({"dimension": c.dimension, "state": state,
+                              # 审计注记：知识侧记录的谓词态（只对照，
+                              # 不驱动决策——真值只由显式 requirements 决定）
+                              "recorded_state": c.predicate_state})
     return None, comps, uncertain
 
 
@@ -198,8 +220,10 @@ def query_knowledge(policy: dict, s) -> dict:
 
     只读：不 commit/add——写入归 K3-B 冻结流程（freeze_package）。"""
     limits = policy.get("limits") or {}
-    cap = int(limits.get("candidate_cap", CANDIDATE_CAP_MAX))
-    ctx_n = int(limits.get("context_items", 3))
+    cap = _as_int(limits.get("candidate_cap", CANDIDATE_CAP_MAX),
+                   "candidate_cap")
+    ctx_n = _as_int(limits.get("context_items", DEFAULT_CONTEXT_ITEMS),
+                    "context_items")
     max_chars = int(limits.get("max_context_chars", 1200))
     if cap > CANDIDATE_CAP_MAX:
         raise PolicyError(f"candidate_cap 越界：{cap}>{CANDIDATE_CAP_MAX}"
@@ -231,9 +255,10 @@ def query_knowledge(policy: dict, s) -> dict:
             if reason:
                 rejected.append({"strategy_key": st.strategy_key,
                                  "reason": reason}); continue
-            if _scope_matches(s, st, policy) != "pass":
+            scope_verdict = _scope_matches(s, st, policy)
+            if scope_verdict != "pass":
                 rejected.append({"strategy_key": st.strategy_key,
-                                 "reason": _scope_matches(s, st, policy)})
+                                 "reason": scope_verdict})
                 continue
             comps["evidence_count"] = ev_count
             comps["scope_specificity"] = SCOPE_SPECIFICITY.get(st.scope, 0)
@@ -297,9 +322,11 @@ def query_knowledge(policy: dict, s) -> dict:
                            "selected": len(selected),
                            "context": sum(1 for e in selected if e["for_context"]),
                            "chars": chars}}
-    except OperationalError as e:
+    except SQLAlchemyError as e:
+        # 不回显异常原文（SQL/绝对路径会外泄）——只报错误类名，细节进日志
         return {**base, "status": "unavailable",
-                "reason": f"knowledge store unavailable: {e}"[:200],
+                "reason": f"knowledge store unavailable"
+                          f" ({type(e).__name__})",
                 "selected": [], "rejected": []}
 
 
@@ -347,14 +374,20 @@ def freeze_package(response: dict, s):
     row = s.query(KnowledgePackage).filter_by(package_sha256=sha).first()
     if row:
         return row.id
+    pol = response.get("policy_sha256")
+    if not pol:
+        raise ValueError("response 缺 policy_sha256，不可冻结")
+    served = (response.get("contract_negotiation") or {}).get("served") or 2
+    if response.get("snapshot_fingerprint") and             response["snapshot_fingerprint"] != fingerprint_knowledge(s):
+        raise ValueError("库知识快照已变化（包过期）——重新查询后再冻结")
     row = KnowledgePackage(
         id="KPKG-" + sha[:24], package_sha256=sha,
-        policy_sha256=response["policy_sha256"],
+        policy_sha256=pol,
         policy=response.get("policy_echo") or {},
+        contract_version=served,
         selected=response.get("selected", []),
         rejected_summary=response.get("rejected", []),
-        snapshot_fingerprint=response.get("snapshot_fingerprint", ""),
-        contract_version=2)
+        snapshot_fingerprint=response.get("snapshot_fingerprint", ""))
     s.add(row)
     s.commit()
     return row.id

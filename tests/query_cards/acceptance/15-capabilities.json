@@ -1,4 +1,15 @@
-{"card_id": "acc-15-capabilities", "kind": "empty_error", "entry": "http_capabilities",
- "expected": {"http_status_code": 200,
-   "has_keys": ["contract_version", "mapping_version", "scopes",
-     "candidate_cap_max", "strategy_counts_by_status"]}}
+{
+ "card_id": "acc-15-capabilities",
+ "kind": "capabilities",
+ "entry": "http_capabilities",
+ "expected": {
+  "http_status_code": 200,
+  "has_keys": [
+   "contract_version",
+   "mapping_version",
+   "scopes",
+   "candidate_cap_max",
+   "strategy_counts_by_status"
+  ]
+ }
+}

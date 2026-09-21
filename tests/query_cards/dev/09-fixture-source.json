@@ -1,4 +1,15 @@
-{"card_id": "dev-09-fixture-source", "kind": "empty_error", "entry": "service",
- "policy": {"contract_version": 2, "book_id": "WK-FIX",
-   "semantic_requirements": {}},
- "expected": {"must_reject_reason": {"J-夹具来源": "excluded_no_evidence"}}}
+{
+ "card_id": "dev-09-fixture-source",
+ "kind": "hard_exclusion",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-FIX",
+  "semantic_requirements": {}
+ },
+ "expected": {
+  "must_reject_reason": {
+   "J-夹具来源": "excluded_no_evidence"
+  }
+ }
+}

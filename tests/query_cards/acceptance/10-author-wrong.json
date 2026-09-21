@@ -1,5 +1,18 @@
-{"card_id": "acc-10-author-wrong", "kind": "empty_error", "entry": "service",
- "policy": {"contract_version": 2, "book_id": "WK-γ",
-   "semantic_requirements": {"节奏": "长句"}},
- "expected": {"status": "empty",
-   "must_reject_reason": {"B-作者习惯": "excluded_scope"}}}
+{
+ "card_id": "acc-10-author-wrong",
+ "kind": "empty",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-γ",
+  "semantic_requirements": {
+   "节奏": "长句"
+  }
+ },
+ "expected": {
+  "status": "empty",
+  "must_reject_reason": {
+   "B-作者习惯": "excluded_scope"
+  }
+ }
+}

@@ -8,6 +8,9 @@ K 基准段证据；L 镜像重复（聚合=1）；M 授权禁用用途。
 """
 from __future__ import annotations
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "scripts"))
 from app import db
 from app.models import (Author, ExpressionStrategyV2, Genre, KnowledgePackage,
                          Segment, StrategyCondition, StrategyInstance, Work,
@@ -105,7 +108,6 @@ def seed_knowledge():
         seg_mir = _work(s, "WK-αM", "书甲（corpus v2）", v2_of="WK-α",
                         canonical="WK-α", author_id="AUTH-1",
                         genre_ids=["GEN-1"])   # 继承根——verify 逐行比对
-        seg_bench = _work(s, "WK-α", "x", role="benchmark") if False else None
         seg_bench = _work(s, "WK-BENCH", "基准书", role="benchmark")
         seg_fix = _work(s, "WK-FIX", "fixture_x",
                         source="inbox:fixture_x.txt", reg_type="fixture")

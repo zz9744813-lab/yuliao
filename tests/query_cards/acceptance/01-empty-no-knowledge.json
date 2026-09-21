@@ -1,4 +1,14 @@
-{"card_id": "acc-01-empty-no-knowledge", "kind": "empty_error", "entry": "service",
- "policy": {"contract_version": 2, "book_id": "WK-NONE",
-   "semantic_requirements": {}},
- "expected": {"status": "empty", "selected_count": 0}}
+{
+ "card_id": "acc-01-empty-no-knowledge",
+ "kind": "empty",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-NONE",
+  "semantic_requirements": {}
+ },
+ "expected": {
+  "status": "empty",
+  "selected_count": 0
+ }
+}

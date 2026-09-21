@@ -1,5 +1,20 @@
-{"card_id": "acc-07-license-use", "kind": "empty_error", "entry": "service",
- "policy": {"contract_version": 2, "book_id": "WK-α",
-   "semantic_requirements": {},
-   "source_policy": {"excluded_uses": ["benchmark_source"]}},
- "expected": {"must_reject_reason": {"M-授权用途": "excluded_no_evidence"}}}
+{
+ "card_id": "acc-07-license-use",
+ "kind": "hard_exclusion",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-α",
+  "semantic_requirements": {},
+  "source_policy": {
+   "excluded_uses": [
+    "benchmark_source"
+   ]
+  }
+ },
+ "expected": {
+  "must_reject_reason": {
+   "M-授权用途": "excluded_no_evidence"
+  }
+ }
+}

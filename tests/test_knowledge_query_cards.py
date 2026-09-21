@@ -164,3 +164,29 @@ def test_package_roundtrip(tmp_path):
         assert got["contract_version"] == 2
         # 幂等：再冻同包不翻倍
         assert kq.freeze_package(resp, s) == pid
+
+
+def test_unavailable_on_store_error(monkeypatch):
+    """库异常 → unavailable（不用旧缓存/静默回退掩盖服务故障）。"""
+    def _boom(*a, **k):
+        from sqlalchemy.exc import OperationalError
+        raise OperationalError("stmt", {}, Exception("boom"))
+    monkeypatch.setattr(kq, "fingerprint_knowledge", _boom)
+    with db.session() as s:
+        resp = kq.query_knowledge(
+            {"contract_version": 2, "book_id": "WK-α"}, s)
+    assert resp["status"] == "unavailable"
+    assert "OperationalError" in resp["reason"]
+    assert "boom" not in resp["reason"], "异常原文不许回显（信息外泄）"
+
+
+def test_freeze_rejects_stale_snapshot(monkeypatch):
+    """快照过期（库知识变了）→ 冻结响亮拒绝，不许落一个过期包。"""
+    with db.session() as s:
+        resp = kq.query_knowledge(
+            {"contract_version": 2, "book_id": "WK-α",
+             "semantic_requirements": {"时长": "独特-快照测"}}, s)
+    resp["snapshot_fingerprint"] = "0" * 64          # 伪造过期快照
+    with db.session() as s:
+        with pytest.raises(ValueError, match="快照已变化"):
+            kq.freeze_package(resp, s)

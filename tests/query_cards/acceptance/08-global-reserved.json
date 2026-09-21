@@ -1,4 +1,15 @@
-{"card_id": "acc-08-global-reserved", "kind": "empty_error", "entry": "service",
- "policy": {"contract_version": 2, "book_id": "WK-α",
-   "semantic_requirements": {}},
- "expected": {"must_reject_reason": {"D-全局": "excluded_scope_global_reserved"}}}
+{
+ "card_id": "acc-08-global-reserved",
+ "kind": "hard_exclusion",
+ "entry": "service",
+ "policy": {
+  "contract_version": 2,
+  "book_id": "WK-α",
+  "semantic_requirements": {}
+ },
+ "expected": {
+  "must_reject_reason": {
+   "D-全局": "excluded_scope_global_reserved"
+  }
+ }
+}
