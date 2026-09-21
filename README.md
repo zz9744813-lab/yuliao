@@ -1,6 +1,6 @@
 # Language Genome — SemanticFrame Calibration Lab
 
-> 下一阶段建设以 [知识化调整方案（2026-09-20）](docs/Language_Genome_知识化调整方案_20260920.md) 为入口：保留实验基础，推进带条件与证据的表达知识及 Runtime 自动消费。v2 仍属待实施计划；下文保留现有实验台的说明和命令。
+> 下一阶段建设以 [知识化调整方案（2026-09-20）](docs/Language_Genome_知识化调整方案_20260920.md) 为入口：保留实验基础，推进带条件与证据的表达知识及 Runtime 自动消费。**定位更新（2026-09-21，K1-A/K1-B 落地）**：v2 契约层已进库——来源登记（work_sources/authors/genres + 一键对账 verify_work_registry.py）与五核心结构（expression_strategies_v2 / strategy_instances / strategy_conditions / strategy_stats / knowledge_links）+ 知识包版本协商契约（app/knowledge.py）；v1 八条聚类策略已按保守口径转为**待验证假设**（success_rate 不复制不重解释，scripts/migrate_strategies_v2.py）。实例抽取与自动消费（K2/K3）依赖外部模型通道——当前卡 deepseek 402 资金墙，待拍板（docs/HANDOVER.md）。下文保留现有实验台的说明和命令。
 
 > 不是完整系统，是**第一个关键科学实验**：
 > 证明"语义可以被压缩成一个既足够约束意义、又不过度约束表达的中间表示"。

@@ -400,8 +400,152 @@ class ExpressionStrategy(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     source: Mapped[str] = mapped_column(String(120), default="")     # provenance
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
-    updated_at: Mapped[str] = mapped_column(String(32), default=_now)
+    updated_at: Mapped[str] = mapped_column(String(32), default=_now, onupdate=_now)
 
+
+# ══════════════════════════════════════════════════════════════════
+# K1-B：v2 知识契约五核心结构（知识化调整方案 §4.2/§4.3，2026-09-21）
+#
+# 与 v1（expression_strategies，偏好聚类产物）的关系：v1 只是 legacy
+# 假设来源，默认不作为 v2 已验证查询结果——旧 8 条经
+# scripts/migrate_strategies_v2.py 转成待验证假设（status=hypothesis），
+# success_rate 不复制、不覆盖、不重解释（迁移纪律 §4.4）。
+# 迁移只增不删：v2 五张表全部为新增，回滚 = DROP 这五张表，
+# v1 表与旧 API 不受任何影响（回归 tests/test_knowledge_v2.py 钉死）。
+# ══════════════════════════════════════════════════════════════════
+
+class ExpressionStrategyV2(Base):
+    """表达策略 v2（§4.2）：抽象操作 + 保持不变项 + 目标效果假设 + 失败模式。
+
+    与 v1 的本质差异：无 cand_won 质量门（v1 的 success_rate 是偏好胜率，
+    不是表达效果证明，不进 v2 身份字段）；三类证据层次**分开记录**
+    （§4.3）：scope（范围）/ observation_status（观察）/ effect_status
+    （效果）——单部作品只支持该作品的观察，不自动升级（WORK→AUTHOR→
+    GENRE→GLOBAL 每级都要独立依据；GLOBAL 本阶段只预留契约不自动授予）。
+    版本身份：strategy_key（跨版本稳定自然键）+ version；错误版本经
+    retired/superseded 处理，不删除。"""
+    __tablename__ = "expression_strategies_v2"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("ESV2"))
+    strategy_key: Mapped[str] = mapped_column(String(120), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    abstract_operation: Mapped[str] = mapped_column(Text)      # 抽象操作
+    invariants: Mapped[list] = mapped_column(JSON, default=list)  # 保持不变项
+    effect_hypothesis: Mapped[str] = mapped_column(Text)       # 目标效果假设
+    failure_modes: Mapped[list] = mapped_column(JSON, default=list)  # 失败模式
+    status: Mapped[str] = mapped_column(String(20), default="hypothesis")
+    source: Mapped[str] = mapped_column(String(120), default="")   # 来源/方法版本
+    # v1 血缘（迁移表记录 old ID → 新版本及采用依据，§4.4）
+    legacy_strategy_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # §4.3 三分：范围（带具体范围 ID 与依据）
+    scope: Mapped[str] = mapped_column(String(12), default="UNCERTAIN")
+    scope_ids: Mapped[list] = mapped_column(JSON, default=list)
+    scope_basis: Mapped[str] = mapped_column(Text, default="")
+    # 观察支持：hypothesis=尚无合格实例 / observed=有已核对实例 /
+    # replicated=冻结假设后在独立来源复现（并记反例/缺失）
+    observation_status: Mapped[str] = mapped_column(String(12), default="hypothesis")
+    # 效果证据：untested / pilot_verified / quality_supported——必须绑定
+    # 具体任务、对照、样本单位和适用条件；v1 旧枚举只有这三值，映射保守
+    effect_status: Mapped[str] = mapped_column(String(20), default="untested")
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class StrategyInstance(Base):
+    """策略实例证据（§4.2）：必须能机械核对
+    text_version[span_start:span_end] == 存证文本——核对函数在
+    app/knowledge.py::verify_instance_span（入库与测试共用同一实现；
+    schema 合格不代表推断成立，语义归纳须单独审查）。
+
+    Frame 必须属于同一来源版本；缺失时显式为 null，不伪造关联。
+    重复抽取/多模型对同一区间的观察分别保留——统计独立证据时按
+    来源区间/根作品聚合（strategy_stats 的职责），不靠重跑加置信度。"""
+    __tablename__ = "strategy_instances"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("SI"))
+    strategy_id: Mapped[str] = mapped_column(String(32), index=True)
+    strategy_version: Mapped[int] = mapped_column(Integer, default=1)
+    work_id: Mapped[str] = mapped_column(String(32))
+    segment_id: Mapped[str] = mapped_column(String(32))
+    frame_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    text_version: Mapped[str] = mapped_column(String(40))
+    span_start: Mapped[int] = mapped_column(Integer)
+    span_end: Mapped[int] = mapped_column(Integer)
+    evidence_text: Mapped[str] = mapped_column(Text)
+    evidence_sha256: Mapped[str] = mapped_column(String(64))
+    conditions_observed: Mapped[dict] = mapped_column(JSON, default=dict)
+    observed_content: Mapped[str] = mapped_column(Text)
+    effect_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extractor_model: Mapped[str] = mapped_column(String(80))
+    reviewer_version: Mapped[str] = mapped_column(String(40), default="")
+    status: Mapped[str] = mapped_column(String(12), default="proposed")
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class StrategyCondition(Base):
+    """策略条件谓词（§4.2）：good_when/bad_when/neutral_when 三态清单。
+
+    谓词允许 true/false/**unknown**（§4.3：缺证据不是假——unknown 显式
+    三值，不许把未知折叠成 false）。"""
+    __tablename__ = "strategy_conditions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("SC"))
+    strategy_id: Mapped[str] = mapped_column(String(32), index=True)
+    strategy_version: Mapped[int] = mapped_column(Integer, default=1)
+    kind: Mapped[str] = mapped_column(String(12))
+    dimension: Mapped[str] = mapped_column(String(60))
+    operator: Mapped[str] = mapped_column(String(20))
+    value: Mapped[dict] = mapped_column(JSON)
+    required: Mapped[bool] = mapped_column(Boolean, default=False)
+    predicate_state: Mapped[str] = mapped_column(String(8), default="unknown")
+    evidence_refs: Mapped[list] = mapped_column(JSON, default=list)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+
+
+class StrategyStats(Base):
+    """策略统计（§4.2）：按数据快照生成的**可重建投影**——不是第二份真值；
+    独立证据按来源区间/根作品聚合（镜像/重切段/重复抽取不计独立复现）。"""
+    __tablename__ = "strategy_stats"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("SS"))
+    strategy_id: Mapped[str] = mapped_column(String(32), index=True)
+    strategy_version: Mapped[int] = mapped_column(Integer, default=1)
+    snapshot_at: Mapped[str] = mapped_column(String(32))
+    data_fingerprint: Mapped[str] = mapped_column(String(64))
+    unique_source_intervals: Mapped[int] = mapped_column(Integer, default=0)
+    root_works: Mapped[int] = mapped_column(Integer, default=0)
+    known_authors: Mapped[int] = mapped_column(Integer, default=0)
+    genres: Mapped[int] = mapped_column(Integer, default=0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    valid: Mapped[int] = mapped_column(Integer, default=0)
+    rejected: Mapped[int] = mapped_column(Integer, default=0)
+    missing: Mapped[int] = mapped_column(Integer, default=0)
+    counter_examples: Mapped[int] = mapped_column(Integer, default=0)
+    extras: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class KnowledgeLink(Base):
+    """知识边（§4.2）：supports / contradicts / refines / alternative_of——
+    绑定双方 ID、版本、证据与创建依据；可指向 Distiller 机制
+    （to_kind='distiller_mechanism'），**不复制机制原文**（引用其 id）。"""
+    __tablename__ = "knowledge_links"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                   default=lambda: new_id("KL"))
+    link_kind: Mapped[str] = mapped_column(String(16))
+    from_kind: Mapped[str] = mapped_column(String(24))
+    from_id: Mapped[str] = mapped_column(String(32))
+    from_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    to_kind: Mapped[str] = mapped_column(String(24))
+    to_id: Mapped[str] = mapped_column(String(32))
+    to_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    evidence_refs: Mapped[list] = mapped_column(JSON, default=list)
+    basis: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
 
 
 class ControlledCorruption(Base):

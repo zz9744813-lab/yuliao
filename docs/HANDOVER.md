@@ -587,6 +587,28 @@ license 非空必须带依据且只认 training_source/benchmark_source）；
 ⑧_migrate 缺表可见跳过；n_mismatch 真实总数+截断标注。回归 17 测；
 全量 **694 例全绿**（674→694 只增不减，退出码 0；lastfailed 清空后
 重跑不存在=无失败记录）。真库对账 PASS（含锚复核+授权闸）。
+**K1-B 收口（2026-09-21，v2 Schema + 契约 + v1 兼容 + 定位更新）**：
+①五核心结构按方案 §4.2 字段约束落地（expression_strategies_v2 /
+strategy_instances / strategy_conditions / strategy_stats /
+knowledge_links——scope/observation_status/effect_status 三分分开
+记录、无 cand_won 质量门、frame 缺失显式 null、stats 为可重建投影、
+知识边可引用 Distiller 机制不复制原文）；②契约模块 app/knowledge.py：
+span 机械核对（text[span_start:span_end]==存证，入库与测试同一实现）、
+保守枚举映射（v1 效果三值恒等到 v2 效果层，观察层永不从 v1 推出）、
+三值谓词（unknown 不折叠成 false）、知识包版本协商（legacy 无版本包
+→保守只出 hypothesis；请求超服务端→拒绝不静默降级）、scope 形式闸
+（非 UNCERTAIN 必须带范围 ID 与依据；GLOBAL 只预留）；③v1 兼容：
+scripts/migrate_strategies_v2.py 保守迁移——**真库 8 条 v1 聚类策略
+已转 v2 待验证假设**（status=observation_status=hypothesis、
+effect_status=untested、scope=UNCERTAIN、effect_hypothesis=未定、
+legacy_strategy_id 记血缘、**success_rate 不复制不覆盖不重解释**），
+幂等（已迁移跳过）；④迁移/回滚：五张 v2 表纯新增，回滚=DROP 五表
+（回归在副本库 DROP 后验证 v1 表与数据零改动——§4.4 只增不删）；
+⑤README/HANDOVER 正式定位更新（v2 契约层已进库；K2/K3 实例抽取与
+自动消费依赖外部模型通道，**卡 deepseek 402 资金墙待集霸拍板**）。
+回归 9 测（span 核对含篡改必红/迁移保守+幂等+v1 零改动/枚举保守映射/
+三值谓词/版本协商/scope 闸/回滚/机制引用/实例往返）。全量 **703 例
+全绿**（694→703 只增不减，退出码 0）。
 
 ## 0.6 接手者第一天照这个做
 

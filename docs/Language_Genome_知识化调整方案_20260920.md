@@ -257,7 +257,13 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   独立人类源=4、corpus_v2_map 106,489 条回连 0 悬空、对账 PASS；隔离三查契约（源身份+
   文本版本+目标与上下文区间，区间检查归 K2 运行时）随证据冻结；验证命令与证据见
   docs/HANDOVER.md §K1-A。
-- [ ] K1-B：v2 Schema、迁移/回滚、v1 兼容、知识包版本与接口契约；更新 README/HANDOVER 的正式定位。
+- [x] K1-B：v2 Schema、迁移/回滚、v1 兼容、知识包版本与接口契约；更新 README/HANDOVER 的正式定位。
+  【2026-09-21 收口】五核心结构（expression_strategies_v2/strategy_instances/
+  strategy_conditions/strategy_stats/knowledge_links）+ app/knowledge.py 契约
+  （span 机械核对/保守枚举映射/三值谓词/版本协商/scope 形式闸）落地；
+  scripts/migrate_strategies_v2.py 保守迁移真库 8 条 v1 → 待验证假设
+  （success_rate 不复制不重解释）；回滚=DROP 五张纯新增表（回归钉死 v1
+  零改动）；README/HANDOVER 定位已更新。全量 703 例全绿。
 - [ ] K2-A：实现逐次调用与总预算、完整输出门；完成有边界的实例抽取、证据核查、候选冻结和跨作品复现。
 - [ ] K3-A：实现 `/knowledge/query` 共用服务与薄 API；完成条件过滤、证据排序、查询卡及来源隔离。
 - [ ] K3-B：Runtime 每场查询/冻结/恢复适配；保持手选兼容和全部 canon 权限。
