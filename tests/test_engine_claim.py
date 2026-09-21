@@ -365,3 +365,77 @@ def test_report_already_running_prints(capsys):
     engine._report_already_running("EXP-X", "note 内容")
     out = capsys.readouterr().out
     assert "EXP-X" in out and "note 内容" in out
+
+
+# ── 会审五轮：冻结走 API 不领取 + 迁移回归 ──────────────────────
+
+def test_api_frozen_rejected_before_claim(monkeypatch):
+    """五轮：冻结必须在领取前拒——先领再拒会把行卡在 running+token
+    （engine.run 的冻结检查晚于 API 领取），那种行谁也领不动。"""
+    from fastapi.testclient import TestClient
+    from app.main import app
+    client = TestClient(app)
+    spawned: list = []
+    monkeypatch.setattr(engine, "run_experiment_background",
+                        lambda eid, stages=None, token=None:
+                        spawned.append(eid))
+    _seed("EXP-A07F1", frozen=True)
+    r = client.post("/experiments/EXP-A07F1/run", json={})
+    assert r.status_code == 400, "冻结实验经 API 必须在领取前被拒"
+    with db.session() as s:
+        exp = s.get(Experiment, "EXP-A07F1")
+        assert exp.status == "created" and exp.run_owner is None, \
+            "冻结拒收不许留下 running+token 的卡死形状"
+    assert not spawned
+
+
+def test_migrate_adds_owner_columns_to_old_db(tmp_path):
+    """五轮：迁移回归——旧库（无 run_owner/run_claimed_at 两列）跑 _migrate
+    后两列存在且可写；_claim_run 只对 locked/busy 退避，迁移未命中会以
+    OperationalError 全域炸，值得专门的测。"""
+    import sqlite3
+    from sqlalchemy import create_engine
+    p = tmp_path / "old.db"
+    con = sqlite3.connect(str(p))
+    con.execute("""CREATE TABLE experiments (
+        id TEXT PRIMARY KEY, name TEXT, status TEXT, config TEXT,
+        stats TEXT, error TEXT, created_at TEXT, updated_at TEXT)""")
+    # _migrate 的 additions 覆盖多张表——旧库必须都在（缺表时 PRAGMA
+    # 返回空集、ALTER 直接炸，这也是本测要钉的口径之一）
+    con.execute("""CREATE TABLE llm_calls (id TEXT PRIMARY KEY, purpose TEXT,
+        model TEXT, prompt_version TEXT, tokens_in INTEGER, tokens_out INTEGER,
+        latency_ms INTEGER, cost REAL, status TEXT, error TEXT, created_at TEXT)""")
+    con.execute("""CREATE TABLE segments (id TEXT PRIMARY KEY, work_id TEXT,
+        ordinal INTEGER, text TEXT, n_sentences INTEGER, n_chars INTEGER)""")
+    con.execute("""CREATE TABLE works (id TEXT PRIMARY KEY, title TEXT,
+        source TEXT, note TEXT, created_at TEXT)""")
+    con.execute("INSERT INTO experiments VALUES ('EXP-OLD','n','running',"
+                "'{}','{}',NULL,'t','t')")
+    con.commit()
+    con.close()
+    eng = create_engine(f"sqlite:///{p.as_posix()}")
+    from app import db as app_db
+    app_db._migrate(eng)                    # 只增列迁移
+    con = sqlite3.connect(str(p))
+    cols = {row[1] for row in con.execute("PRAGMA table_info(experiments)")}
+    assert {"run_owner", "run_claimed_at"} <= cols, \
+        "旧库迁移后必须带执行权两列——缺列时 _claim_run 会 OperationalError 全域炸"
+    con.execute("UPDATE experiments SET run_owner='RUN-x', "
+                "run_claimed_at='t2' WHERE id='EXP-OLD'")   # 领取形状可写
+    con.commit()
+    con.close()
+
+
+def test_release_mark_uses_owner_prefix_only():
+    """五轮安全口径：留痕只记 owner 前缀——token 是写权限凭据，全串落
+    用户可见的 error 字段=给未来带凭据接口留劫持面。"""
+    _seed("EXP-A07F2", status="running")
+    long_owner = "RUN-abcdef0123456789"
+    with db.session() as s:
+        s.get(Experiment, "EXP-A07F2").run_owner = long_owner
+        s.commit()
+    engine.release_run("EXP-A07F2")
+    with db.session() as s:
+        err = s.get(Experiment, "EXP-A07F2").error or ""
+    assert long_owner not in err, "全串 token 不许落入用户可见字段"
+    assert long_owner[:12] in err, "前缀保留可对账性"

@@ -451,6 +451,21 @@ started；没领到→**409 already_running**（不再发「已启动」假响�
 （API 409/存量行 API 自愈/带 token 启动、CAS 的 IS NULL 渲染、
 _report 回显、releasing 挡领、二次 release 兜底、留痕断言）。
 全量 657 例全绿（643→657 只增不减，退出码 0）。
+**会审五轮加固（release 留痕竞态 + 语义补漏）**：①release 留痕折进
+CAS **同一条 UPDATE**（case 表达式）——第三段 session 的读改写在
+「原 runner 火速让位 → 新主领取清空 error」与留痕提交之间有张冠李戴
+窗口；②留痕只记 owner **前缀**（token 是写权限凭据，全串落用户可见
+的 error 字段=给未来带凭据接口留劫持面）；③run() 领取/冻结/预领
+校验全部移入 try——领取后任何抛错由 finally 自动收尾，不再留
+running+token 的卡死形状；④releasing→failed 让位加 **held 门**：
+只有持过执行权的 runner 才能翻（竞争输家的 finally 也会路过该分支，
+不许替别人让位——实测输家会把二次 release 的兜底提前吞掉）；⑤API
+冻结检查前置（领取前 400，先领再拒会卡行）；claim 失败先重核存在性
+（404 与 409 不再张冠李戴）；⑥claim_run 公开门面（api 不摸下划线）；
+⑦CLI --list-stuck 措辞含 releasing；前端 run 调用接住 409 如实
+提示（旧 runExp 不接错——并发点击吞成无响应）。回归 14→17
+（冻结走 API 不领取不翻、旧库四表迁移后可写可领、留痕前缀安全）。
+全量 660 例全绿（643→660 只增不减，退出码 0）。
 审查剩余：1 项 P1 / 3 项 P2 排队中。
 
 ## 0.6 接手者第一天照这个做

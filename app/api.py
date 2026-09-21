@@ -171,13 +171,20 @@ def run_exp(exp_id: str, body: RunIn | None = None):
         e = s.get(Experiment, exp_id)
         if not e:
             raise HTTPException(404, "experiment 不存在")
+        if (e.config or {}).get("frozen"):
+            # 冻结必须在领取**之前**拒（五轮：先领再拒会把行卡在
+            # running+token——engine.run 的冻结检查晚于 API 领取）
+            raise HTTPException(400, "experiment 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
     # A07 四轮：**领取即闸**——在请求内做原子领取（旧「先查后启」是竞争
     # 窗口；旧快路径还把 running+NULL-owner 的存量行直接挡回，自动对账
     # 永远走不到）。领到 → 带凭据启动后台线程，响应如实 started；没领到
-    # → 409 already_running（不发「已启动」的假响应；卡死排查
-    # CLI --list-stuck / --release）。
+    # → 409 already_running（不发「已启动」的假响应；五轮：claim 失败先
+    # 重核存在性——两步之间被删的实验应报 404 而不是 409）。
     token = new_id("RUN")
-    if not engine._claim_run(exp_id, token):
+    if not engine.claim_run(exp_id, token):
+        with db.session() as s:
+            if not s.get(Experiment, exp_id):
+                raise HTTPException(404, "experiment 不存在")
         raise HTTPException(409, "already_running：执行权被持有（存量卡死排查用 "
                                  "run_experiment.py --list-stuck / --release）")
     engine.run_experiment_background(exp_id, stages, token=token)

@@ -35,7 +35,7 @@ import threading
 import time
 from datetime import datetime
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, case, or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -496,7 +496,7 @@ def _stage_record(exp_id: str, name: str) -> dict:
             .get(name) or {}
 
 
-def _claim_run(exp_id: str, token: str) -> bool:
+def claim_run(exp_id: str, token: str) -> bool:
     """A07：**原子领取执行权**——条件 UPDATE，只有赢得条件竞争的那一个能跑。
 
     领取条件（命中即可翻 running）：
@@ -564,6 +564,13 @@ def release_run(exp_id: str) -> dict:
                     "note": "不在 running/releasing 态，无需释放"}
         observed_status, observed_owner = exp.status, exp.run_owner
     with session() as s:
+        # 五轮：留痕折进 CAS 同一条 UPDATE——第三段 session 的读改写在
+        # 「原 runner 火速让位 → 新主领取清空 error」与留痕提交之间有
+        # 张冠李戴窗口（审计文本落到新主的行上）。owner 只留前缀：token
+        # 是写权限凭据，全串落用户可见字段=给未来的带凭据接口留劫持面。
+        owner_ref = (observed_owner or "?")
+        owner_ref = owner_ref[:12] + ("…" if len(owner_ref) > 12 else "")
+        mark = f"执行权被显式释放（原 owner={owner_ref}, at={_now()}）"
         n = (s.query(Experiment)
              .filter(Experiment.id == exp_id,
                      Experiment.status == observed_status,
@@ -571,6 +578,9 @@ def release_run(exp_id: str) -> dict:
              .update({Experiment.status: "releasing" if observed_status == "running"
                       else "failed",
                       Experiment.run_owner: None,
+                      Experiment.error: case(
+                          (Experiment.error.is_(None), mark),
+                          else_=Experiment.error + "；" + mark),
                       Experiment.updated_at: _now()},
                      synchronize_session=False))
         s.commit()
@@ -580,13 +590,6 @@ def release_run(exp_id: str) -> dict:
             return {"released": False, "status": exp.status,
                     "run_owner": exp.run_owner,
                     "note": "观察期间状态已变，本次未释放"}
-    # 留痕（CAS 赢家是唯一写者，不与领取并发）
-    with session() as s:
-        exp = _exp(s, exp_id)
-        mark = f"执行权被显式释放（原 owner={observed_owner}, at={_now()}）"
-        exp.error = mark if not (exp.error or "").strip() \
-            else f"{exp.error}；{mark}"
-        s.commit()
     return {"released": True, "status": "releasing" if observed_status == "running"
             else "failed", "run_owner": observed_owner}
 
@@ -615,12 +618,15 @@ def _report_already_running(exp_id: str, note: str) -> None:
 def run(exp_id: str, stages=None, *, force: bool = False, token: str | None = None) -> dict:
     """主驱动：按状态机顺序执行 --stages 子集，返回 stats["engine"] 块。
 
-    - **A07 执行权**：开头原子领取（_claim_run）；竞争失败方直接返回
+    - **A07 执行权**：开头原子领取（claim_run）；竞争失败方直接返回
       already_running，绝不触碰阶段体——阶段执行 2 次=重复生成重复计费。
       每个阶段提交前校验持有权（run_owner 仍是自己的 token）：中途失去
       执行权的 runner 立即停止提交——它手里的结果可能已过期。
     - token：API 侧在请求里**代领**后传入（响应才能如实回 409/started，
       不发「已启动」的假响应）；自领路径（CLI/直调）不传即自动领取。
+      冻结/领取/预领校验都在 try 内：**领取之后任何一步抛错，finally
+      都会把自己的行收尾掉**（五轮：API 领取后 engine 抛错会把行卡在
+      running+token——那种行谁也领不动，只能靠二次 release 救）。
     - 阶段级幂等：stats 里 status=done 的阶段直接跳过（force=True 可强制重跑，
       产品级幂等保证不重复计数）。
     - 失败：_execute 已把失败落库并上抛，这里 finally 只负责把还停在
@@ -630,28 +636,36 @@ def run(exp_id: str, stages=None, *, force: bool = False, token: str | None = No
     - status 语义与旧管线一致：done = 本趟请求的阶段全部成功；精确进度看 /stages。
     """
     names = _resolve(stages)
-    with session() as s:
-        exp = _exp(s, exp_id)
-        if (exp.config or {}).get("frozen"):
-            raise EngineError(f"{exp_id} 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
-    if token is None:
-        token = new_id("RUN")
-        if not _claim_run(exp_id, token):
-            # 输家不再回读 owner（会审三轮：赢家可能已跑完，回显陈旧/None
-            # 只会误导）——note 说清是领取竞争失败即可。
-            return {"status": "already_running",
-                    "stages": {},
-                    "note": "执行权已被领取（原子 UPDATE 竞争失败）——阶段体不重复执行；"
-                            "卡死排查用 engine.list_stuck() / CLI --list-stuck"}
-    else:
-        # 外部（API）已代领：校验凭据确属自己，防错传/过期
+    clean = False       # 领取与校验全过、阶段全部走完才置 True
+    held = False        # 本 runner 是否真正持有过执行权——只有持过权的，
+                        # finally 才有资格翻 releasing（五轮：竞争输家的
+                        # finally 也会路过 elif，不许替别人让位）
+    try:
         with session() as s:
             exp = _exp(s, exp_id)
-            if exp.run_owner != token or exp.status != "running":
-                raise EngineError("预领凭据无效（owner/status 不匹配）——拒绝执行")
-
-    clean = True
-    try:
+            if (exp.config or {}).get("frozen"):
+                # API 侧已在领取前拒（五轮）；自领路径到这里=还没领，
+                # finally 的持有权校验天然不碰别人的行
+                raise EngineError(f"{exp_id} 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
+        if token is None:
+            token = new_id("RUN")
+            if not claim_run(exp_id, token):
+                # 输家不再回读 owner（会审三轮：赢家可能已跑完，回显陈旧/None
+                # 只会误导）——note 说清是领取竞争失败即可。finally 的持有权
+                # 校验对输家天然 no-op（行不是我们的）。
+                return {"status": "already_running",
+                        "stages": {},
+                        "note": "执行权已被领取（原子 UPDATE 竞争失败）——阶段体不重复执行；"
+                                "卡死排查用 engine.list_stuck() / CLI --list-stuck"}
+            held = True
+        else:
+            # 外部（API）已代领：校验凭据确属自己，防错传/过期
+            with session() as s:
+                exp = _exp(s, exp_id)
+                if exp.run_owner != token or exp.status != "running":
+                    raise EngineError("预领凭据无效（owner/status 不匹配）——拒绝执行")
+            held = True
+        clean = True
         for name in names:
             if _stage_record(exp_id, name).get("status") == "done" and not force:
                 continue                # 从 stats 续跑：已 done 的阶段不再执行
@@ -682,10 +696,11 @@ def run(exp_id: str, stages=None, *, force: bool = False, token: str | None = No
                     exp.error = "引擎中断（各阶段 error 见 stats.engine.stages）"
                 exp.updated_at = _now()
                 s.commit()
-            elif exp.status == "releasing":
+            elif exp.status == "releasing" and held:
                 # 四轮：被 release 的原 runner 在这里让位——releasing 不可
                 # 领取，翻 failed 后新主才可领；本分支是「释放→让位」的
-                # 最后一格（原 runner 死透则由二次 release 兜底）
+                # 最后一格（原 runner 死透则由二次 release 兜底）。
+                # 五轮 held 门：竞争输家没持过权，不许替别人让位。
                 exp.status = "failed"
                 exp.updated_at = _now()
                 s.commit()

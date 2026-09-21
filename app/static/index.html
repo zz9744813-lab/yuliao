@@ -1360,12 +1360,22 @@ async function createExp(){
   try{
     const exp = await api('/experiments', {body});
     toast('已创建 '+exp.id+'，启动中…');
-    await api('/experiments/'+exp.id+'/run', {body:{}});
+    // A07：run 是领取即闸——409=执行权被持有（旧 200 already_running 改 409），
+    // 实验已创建，不许把 409 吞成「创建失败」
+    try{ await api('/experiments/'+exp.id+'/run', {body:{}}); }
+    catch(e){ toast('启动被拒：'+e.message+'（执行权被持有/卡死排查 --list-stuck）'); }
     loadExps(); showExp(exp.id); autoRefresh(exp.id);
   }catch(e){ toast('创建失败: '+e.message); }
 }
 
-async function runExp(id){ await api('/experiments/'+id+'/run',{body:{}}); toast('已启动'); }
+// A07：runExp 原来不接错误——并发点击/持有中点运行会吞成无响应；
+// 409（执行权被持有）必须如实提示
+async function runExp(id){
+  try{
+    await api('/experiments/'+id+'/run',{body:{}});
+    toast('已启动');
+  }catch(e){ toast('启动被拒：'+(e.message||e)); }
+}
 function autoRefresh(id){ clearInterval(autoTimer);
   autoTimer = setInterval(()=>{ if(curExp) showExp(curExp, true); }, 5000); }
 

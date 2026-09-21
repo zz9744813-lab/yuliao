@@ -34,7 +34,8 @@ def main() -> None:
                     help="显式释放卡死的执行权（A07：status=running 但 runner 已死；"
                          "无自动 TTL 接管——长跑中途不许被误抢）")
     ap.add_argument("--list-stuck", action="store_true",
-                    help="列出卡在 running 的实验（A07 存量对账/卡死排查的发现手段）")
+                    help="列出卡在 running/releasing 的实验（A07 存量对账/卡死排查；"
+                         "releasing=已夺权等原 runner 让位，死透时需二次 --release 兜底）")
     ap.add_argument("--json", dest="as_json", action="store_true", help="输出 JSON")
     args = ap.parse_args()
 
@@ -52,8 +53,9 @@ def main() -> None:
     if args.list_stuck:
         rows = engine.list_stuck()
         print(json.dumps(rows, ensure_ascii=False, indent=1) if args.as_json
-              else (f"卡在 running 的实验 {len(rows)} 个：" +
-                    "；".join(f"{r['id']}(owner={r['run_owner']})" for r in rows)))
+              else (f"卡在 running/releasing 的实验 {len(rows)} 个：" +
+                    "；".join(f"{r['id']}({r['status']}, owner={r['run_owner']})"
+                              for r in rows)))
         return
 
     if not args.exp:
