@@ -1613,7 +1613,7 @@ ADVERB_INFLATION 初版指令是"尽量让每个动作都被副词修饰"，产�
 | # | 事项 | 谁来做 | 说明 |
 |---|---|---|---|
 | 1 | **定正面标准**（gold standard） | **集霸拍板** | 三条路见 §8 修订版；他未定之前，(c) 负面库路线可独立推进 |
-| 2 | 语料扩产继续推 | 接手 agent | `scale_corpus.py --run N`，**零人工**；目标 L 帧几千 |
+| 2 | 语料扩产继续推 | 接手 agent | `scale_corpus.py --run N`，**零人工**；目标 L 帧几千。**【2026-09-21 撞墙：deepseek 通道 HTTP 402「Insufficient account funds」】**——--run 60 实测：源校勘 59/59 ok（integrity 留存、后续免重查）但抽帧 45 尝试全 402，0 新帧（L 帧仍 3483，实验累计 134 旧帧勿混淆）。kimi 通道探针正常=402 属 deepseek 单通道。**待拍板：①deepseek 通道充值 ②授权抽帧模型切换（帧带 extractor_model 溯源；kimi 兼任评委配额，切换属政策位）** |
 | 3 | corr24 的 24 条裁定灌进训练导出 | 接手 agent | 已加 `--strict`；目前只有 1 对被他背书 → 数据规模取决于第 1 项 |
 | 4 | 训练通道（本机无 GPU / 无微调管线） | **集霸决定** | §53 六条成功标准**一条都测不了**，卡在这里 |
 | 5 | 基准扩到其余 11 项子基准 | 接手 agent | 【T5 部分完成 2026-09-19】corruption_type（19 集合）+ naturalness_pair（nat-v1）已建；其余待解锁（human_vs_ai 缺基准段重建候选等，见 `benchmark_build.py` docstring 状态表与 `docs/benchmark-subs-20260919.md`） |
