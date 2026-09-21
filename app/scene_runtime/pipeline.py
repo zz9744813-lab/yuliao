@@ -140,6 +140,31 @@ class SceneRunner:
                     if any(e in {"evidence_not_in_text", "duplicate_event_evidence"}
                            for e in validate_review(plan, draft.text, review)):
                         raise RuntimeFault("verifier_contract_repair_exhausted")
+                # A10（审查 20260920-1810）：正文零缺陷信号 + 只有补丁清单失配
+                # = 核验**工件**缺陷（未变化事实误列 change / 抽取值类型错）。
+                # 旧实现把它当正文缺陷烧 Writer 修稿额度——隔离复现：正文与
+                # 计划事件一字未动，仅核验器多列 lamp.lit=false，就触发
+                # 3 Writer + 3 Verifier 耗尽额度。这里走**有上限的核验返修**：
+                # 正文一字不动；返修不了就如实失败——绝不静默吞掉未经确认的
+                # 状态变化，也绝不为核验器的错改正文。
+                pre_errors = validate_review(plan, draft.text, review)
+                if "state_patch_not_authorized_by_plan" in pre_errors \
+                        and "unresolved_hard_issue" not in pre_errors \
+                        and "text_length_outside_plan" not in pre_errors:
+                    repair_input = {**verify_input, "previous_review": answer["text"],
+                        "contract_errors": ["state_patch_not_authorized_by_plan"],
+                        "repair_instruction": "只修复核验 JSON 的 changes 清单：changes 必须且只须"
+                        "覆盖批准计划里的事件变化（fact 与 after 与计划逐字一致）；没有发生变化"
+                        "的事实一律不许列进 changes。正文与 evidence 引用原封不动。"}
+                    review_stage = f"verifier.{round_index}.state1"
+                    answer = self._call(job_id, review_stage, "verifier",
+                                        VERIFIER_SYSTEM, repair_input, budget)
+                    try:
+                        review = align_quotes(draft.text, parse_result(answer["text"], Review))
+                    except RuntimeFault:
+                        raise RuntimeFault("verifier_state_repair_exhausted")
+                    if "state_patch_not_authorized_by_plan" in validate_review(plan, draft.text, review):
+                        raise RuntimeFault("verifier_state_repair_exhausted")
                 review = self.store.apply_review_decisions(job_id, review_stage, draft.text, review)
                 operator_issues = self.store.confirmed_issues(job_id, digest(draft.text))
                 review.issues.extend(operator_issues)

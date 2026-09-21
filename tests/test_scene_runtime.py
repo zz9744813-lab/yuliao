@@ -170,7 +170,7 @@ def test_idempotency_input_change_including_budget_is_rejected(setup):
                    knowledge.model_copy(update={"book_id": "book-b"}), Budget())
 
 
-@pytest.mark.parametrize("config", [{"hard": True}, {"forged": True}])
+@pytest.mark.parametrize("config", [{"hard": True}])
 def test_bad_review_cannot_grant_permission_and_stops_at_limit(setup, config):
     store, _, plan, knowledge = setup
     client = FixtureClient(**config)
@@ -181,6 +181,25 @@ def test_bad_review_cannot_grant_permission_and_stops_at_limit(setup, config):
     with pytest.raises(RuntimeFault, match="rewrite_budget_exhausted"):
         runner.run(plan, knowledge, Budget())
     assert client.n == 6  # resume never resets the rewrite/call budget
+
+
+def test_forged_review_hits_state_repair_and_cannot_grant_permission(setup):
+    """A10 后语义：伪造 after=999 是核验工件缺陷（正文没错）——不再烧
+    3 轮 Writer，走有上限核验返修；fixture 永远回毒 → 如实失败。
+    安全性质不变：零提交、世界零改动、不得授信。"""
+    store, _, plan, knowledge = setup
+    client = FixtureClient(forged=True)
+    runner = SceneRunner(store, client)
+    with pytest.raises(RuntimeFault, match="verifier_state_repair_exhausted"):
+        runner.run(plan, knowledge, Budget())
+    assert client.n == 3 and store.snapshot("book-a").revision == 0
+    assert store.snapshot("book-a").facts["coins"].value == 3
+    with store.connection() as db:
+        stages = [r[0] for r in db.execute("SELECT stage FROM calls ORDER BY rowid")]
+    assert stages == ["writer.0", "verifier.0", "verifier.0.state1"]
+    with pytest.raises(RuntimeFault, match="verifier_state_repair_exhausted"):
+        runner.run(plan, knowledge, Budget())
+    assert client.n == 3  # 恢复按 (job, stage) 缓存回放，不重复计费不重跑
 
 
 def test_broken_verifier_quote_does_not_cause_prose_rewrite(setup):
