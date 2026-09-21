@@ -110,23 +110,31 @@ def test_pid_mismatch_and_unknown_rejected(monkeypatch):
     assert resp.status_code == 404
 
 
-def test_legacy_no_pid_falls_back_latest_db_presentation(monkeypatch):
-    """旧客户端/重启：进程内映射清空后，按最近一次持久化呈现解读。"""
-    import time
+def test_legacy_no_pid_rejected_not_guessed(monkeypatch):
+    """A01 二轮（知识化方案 §1.1）：旧客户端不带 pid——禁止按最近呈现
+    猜含义（23:14 复现：旧页面提交被按新映射误译成 candidate）。
+    该题有呈现行而无 pid → 409 拒收，判定不落库，客户端重取题重提。"""
     rid = _seed("EXP-PR3", "pr3")[0]
     _serve_once("EXP-PR3", "pr3", monkeypatch, 0.0)                 # A=人类
-    time.sleep(1.05)   # created_at 秒级精度——同秒双呈现无法定序，隔开才可测「最近」
-    page2, hf2 = _serve_once("EXP-PR3", "pr3", monkeypatch, 1.0)   # B=人类（最新）
+    page2, _ = _serve_once("EXP-PR3", "pr3", monkeypatch, 1.0)      # B=人类（最新）
     api_mod._BLIND_MAP.clear()   # 模拟重启：进程内映射全丢
     resp = client.post(f"/review/{rid}/verdict", json={
         "winner": "A", "reasons": [], "annotations": []})           # 不带 pid
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 409, \
+        f"无绑定+有呈现行必须拒收（禁止猜最近一条），实得 {resp.status_code}"
+    assert "呈现绑定" in resp.text
+    with db.session() as s:
+        r = s.get(ReviewItem, rid)
+        assert r.status == "pending", "拒收的判定不许落库"
+        assert r.human_verdict is None
+    # 对照：带上 pid 的提交照常按该呈现解读（绑定即真相，不受重出题影响）
+    resp2 = client.post(f"/review/{rid}/verdict", json={
+        "winner": "A", "reasons": [], "annotations": [],
+        "presentation_id": page2["presentation_id"]})
+    assert resp2.status_code == 200
     with db.session() as s:
         hv = s.get(ReviewItem, rid).human_verdict
-    assert hv["winner_resolved"] == ("human" if hf2 else "candidate"), \
-        "回退必须按最近一次持久化呈现（page2: B=人类 → A=candidate）"
-    assert hv["presentation_id"] == page2["presentation_id"], \
-        "回退解读也要留呈现审计指针"
+    assert hv["winner_resolved"] == "candidate", "page2: B=人类 → A=candidate"
 
 
 def test_annotations_follow_bound_presentation(monkeypatch):

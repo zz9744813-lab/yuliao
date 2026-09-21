@@ -77,8 +77,10 @@ def _human_side(item) -> str:
 
 
 def _judge(item, winner, annotations=None):
+    # A01：与真实前端一致——item 来自端题响应，自带 presentation_id
     return client.post(f"/review/{item['review_id']}/verdict",
-                       json={"winner": winner, "reasons": [], "annotations": annotations or []})
+                       json={"winner": winner, "reasons": [], "annotations": annotations or [],
+                             "presentation_id": item.get("presentation_id", "")})
 
 
 def test_empty_queue_returns_404_not_500():
@@ -134,7 +136,9 @@ def test_rejudge_refused_when_presentation_gone():
         s.commit()
     api_mod._BLIND_MAP.clear()          # 模拟进程重启：进程内映射全丢
     r = _judge(item, "B")
-    assert r.status_code == 409, f"无呈现的历史题改判应拒绝，实得 {r.status_code}: {r.text[:200]}"
+    # A01 二轮：item 自带 pid——呈现行已删 → 绑定失效 404（不再有猜义路径）
+    assert r.status_code == 404, f"呈现行已删的改判应按绑定失效拒绝，实得 {r.status_code}: {r.text[:200]}"
+    assert "呈现" in r.text
     # 且原判定没被污染
     with db.session() as s:
         hv = s.get(ReviewItem, item["review_id"]).human_verdict
@@ -142,37 +146,47 @@ def test_rejudge_refused_when_presentation_gone():
 
 
 def test_rejudge_after_restart_uses_persisted_presentation():
-    """A01：重启（进程内映射清空）后改判——按持久化呈现解读，不再 409。"""
+    """A01 二轮：重启（进程内映射清空）后改判——**pid 绑定在 DB 呈现行上
+    存活**，带原 pid 提交照常解读；进程内缓存无关紧要。"""
     _reset()
     _seed("EXP-RJ3B", "rj3b")
     item = client.get("/experiments/EXP-RJ3B/review/next?batch=rj3b").json()
     hs = _human_side(item)
     human_vote = "A" if hs == "A" else "B"
     assert _judge(item, human_vote).status_code == 200
-    api_mod._BLIND_MAP.clear()
-    r = _judge(item, human_vote)        # 改判仍投人类侧
+    api_mod._BLIND_MAP.clear()   # 模拟重启：进程内映射全丢
+    r = _judge(item, human_vote)  # 改判仍带原 pid 投人类侧
     assert r.status_code == 200, r.text[:200]
-    assert r.json()["resolved"] == "human", "持久化呈现兜底必须翻对 human/candidate"
+    assert r.json()["resolved"] == "human", "pid 绑定跨重启存活，必须翻对"
     with db.session() as s:
         hv = s.get(ReviewItem, item["review_id"]).human_verdict
-    assert hv["rejudged"] is True and hv["presentation_id"]
+    assert hv["rejudged"] is True and hv["presentation_id"] == item["presentation_id"]
 
 
-def test_pending_restart_falls_back_to_db_presentation():
-    """A01：待判题+重启——回退最近持久化呈现照常翻译，不再 mapping_lost。"""
+def test_pending_restart_rejects_unbound_ab():
+    """A01 二轮（知识化方案 §1.1）：待判题有呈现行但提交无 pid → 409
+    拒收（禁止猜最近一条，23:14 复现的误译路径堵死）；重取题带 pid
+    提交照常翻译。"""
     _reset()
     _seed("EXP-RJ4", "rj4")
     item = client.get("/experiments/EXP-RJ4/review/next?batch=rj4").json()
-    api_mod._BLIND_MAP.clear()
-    r = _judge(item, "A", [{"side": "A", "start": 0, "end": 2, "text": "xx", "kind": "用词"}])
-    assert r.status_code == 200
+    api_mod._BLIND_MAP.clear()   # 模拟重启
+    r = client.post(f"/review/{item['review_id']}/verdict",
+                    json={"winner": "A", "reasons": [], "annotations": []})
+    assert r.status_code == 409 and "呈现绑定" in r.text, \
+        "无绑定+有呈现行必须拒收，不许按最近呈现猜"
     with db.session() as s:
-        hv = s.get(ReviewItem, item["review_id"]).human_verdict
-    assert hv["human_was_a"] is not None, "呈现持久化后重启不再丢映射"
+        assert s.get(ReviewItem, item["review_id"]).human_verdict is None, \
+            "拒收的判定不许落库"
+    # 重取题（带回新 pid）→ 提交照常
+    item2 = client.get("/experiments/EXP-RJ4/review/next?batch=rj4").json()
+    ok = _judge(item2, "A")
+    assert ok.status_code == 200
+    with db.session() as s:
+        hv = s.get(ReviewItem, item2["review_id"]).human_verdict
+    assert hv["human_was_a"] is not None
     assert hv["winner_resolved"] == ("human" if hv["human_was_a"] else "candidate")
-    assert hv["presentation_id"], "回退解读也要留呈现审计指针"
-    # 批注按持久化呈现翻译 target（不再是 None）
-    assert hv["annotations"][0]["target"] in ("human", "candidate")
+    assert hv["presentation_id"]
 
 
 def test_pending_never_served_records_raw():

@@ -596,7 +596,8 @@ class Verdict(BaseModel):
     winner: str  # A|B|tie|both_bad|cant_judge
     reasons: list[str] = []
     annotations: list[Annotation] = []
-    # A01：本次提交对应哪一次端题呈现（旧客户端不传 → 回退最近一次持久化呈现）
+    # A01：本次提交对应哪一次端题呈现——带 A/B 语义的提交必须绑定
+    # （二轮口径：无 pid 不再回退猜最近呈现，见 verdict 内 409）
     presentation_id: str = ""
 
 
@@ -623,18 +624,24 @@ def verdict(review_id: str, body: Verdict):
             served = {"human_first": pr.human_first, "ctx_mode": pr.ctx_mode,
                       "presentation_id": pr.id}
         else:
-            served = _blind_get(review_id)
+            # A01 二轮（知识化调整方案 §1.1，2026-09-21）：旧客户端不带
+            # pid——禁止按「最近一次呈现」猜含义（23:14 复现：旧页面提交
+            # 被按新映射误译成 candidate，HTTP 200 打到最贵的偏好标签上）。
+            # 凡带 A/B 语义（winner A/B 或有批注）的提交必须呈现绑定：
+            # 该题存在任何呈现行而无 pid → 409 拒收，让客户端重取题重提；
+            # 完全没有呈现行的 pre-A01 历史题保留「存原始值」unresolved
+            # 路径（那是如实存未知，不是猜）。
+            if body.winner in ("A", "B") or body.annotations:
+                has_presentations = s.query(
+                    ReviewPresentation.id).filter_by(
+                    review_id=review_id).first() is not None
+                if has_presentations:
+                    raise HTTPException(
+                        409, "提交未带呈现绑定（页面过期/旧客户端）——"
+                        "A/B 含义无法确定，禁止按最近呈现猜测；"
+                        "请重新取题后再提交")
+            served = None
         human_first = served.get("human_first") if served else None
-        if human_first is None and not presentation_id:
-            # 进程内映射没了（重启/多 worker）：回退到该题最近一次持久化呈现。
-            pr = (s.query(ReviewPresentation).filter_by(review_id=review_id)
-                  .order_by(ReviewPresentation.created_at.desc(),
-                            ReviewPresentation.id.desc()).first())
-            if pr is not None:
-                human_first = pr.human_first
-                served = {"human_first": pr.human_first, "ctx_mode": pr.ctx_mode,
-                          "presentation_id": pr.id,
-                          "fallback": "latest_db_presentation"}
         prev = r.human_verdict if r.status == "done" else None
         # 改判纪律（2026-09-16）：已判题允许覆盖（改判），但只有映射还活着才能把
         # A/B 翻回 human/candidate。映射丢了（A01 落库前的历史题）又要投 A/B 时

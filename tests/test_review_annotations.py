@@ -59,7 +59,8 @@ def _take_and_judge(exp_id, batch, annotations, winner="A"):
     api_mod._SERVE_CURSOR.clear()
     _seed(exp_id, batch)
     item = client.get(f"/experiments/{exp_id}/review/next?batch={batch}").json()
-    body = {"winner": winner, "reasons": [], "annotations": annotations}
+    body = {"winner": winner, "reasons": [], "annotations": annotations,
+            "presentation_id": item.get("presentation_id", "")}
     resp = client.post(f"/review/{item['review_id']}/verdict", json=body)
     assert resp.status_code == 200, resp.text
     with db.session() as s:
