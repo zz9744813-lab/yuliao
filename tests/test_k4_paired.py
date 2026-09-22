@@ -20,8 +20,7 @@ k4 = _u.module_from_spec(_spec); _spec.loader.exec_module(k4)
 
 from knowledge_seed import seed_knowledge          # noqa: E402
 from app import db, knowledge_extract as KE        # noqa: E402
-from app.scene_runtime.contracts import (Budget, KnowledgePackage,  # noqa: E402
-                                          RuntimeFault)
+from app.scene_runtime.contracts import Budget, RuntimeFault  # noqa: E402
 from app.scene_runtime.pipeline import SceneRunner  # noqa: E402
 from app.scene_runtime.store import Store           # noqa: E402
 
@@ -78,19 +77,22 @@ def _run_card_extract(card):
     b = KE.ExtractBudget(max_calls=card["input"]["max_calls"],
                          max_tokens=card["input"].get("max_tokens", 50_000))
     payload = card["input"].get("payload")
-    if card["input"].get("max_tokens") == 25:
-        b.spend(15, 10)                     # 先耗掉大半 token 预算
+    for tin, tout in card["input"].get("pre_spend", []):
+        b.spend(tin, tout)                   # 卡里显式预算（不耦合魔数）
+    fx = _Fx(payload, bad=card["input"].get("bad"))
     try:
-        r = KE.extract_segment(_Fx(payload), strategy_id="A",
+        r = KE.extract_segment(fx, strategy_id="A",
                                strategy_version=1, work_id="W",
                                segment_id="S", text=TEXT,
                                text_version="v", budget=b)
-        # 预算卡（dev-01 max_calls=1）要抽第二次触发闸——第一次会成功
-        if card["input"]["max_calls"] == 1:
-            KE.extract_segment(_Fx(payload), strategy_id="A",
-                              strategy_version=1, work_id="W",
-                              segment_id="S", text=TEXT,
-                              text_version="v", budget=b)
+        # 预算卡（calls=2）：第二次显式抽取必须抛——第一次成功不算数
+        if card["input"].get("calls") == 2:
+            with pytest.raises(KE.ExtractBudgetExceeded) as ei:
+                KE.extract_segment(fx, strategy_id="A",
+                                  strategy_version=1, work_id="W",
+                                  segment_id="S", text=TEXT,
+                                  text_version="v", budget=b)
+            return {"status": "blocked", "error": str(ei.value)}
         return {"status": r.get("status"), "error": None}
     except KE.ExtractBudgetExceeded as e:
         return {"status": "blocked", "error": str(e)}
@@ -139,6 +141,9 @@ def test_card(card, tmp_path):
         assert got["status"] == exp["status"], got
     if exp.get("not_silent"):
         assert got["error"], "冲突不许静默通过"
+    # 严格消费：期望里打了不认识的键=拼写错，必须红（qwen 会审项）
+    handled = {"status", "error_contains", "not_silent"}
+    assert set(exp) <= handled, f"卡期望有未处理键：{set(exp) - handled}"
 
 
 def test_live_guard_requires_real_mode():

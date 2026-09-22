@@ -1,0 +1,11 @@
+{
+ "card_id": "dev-04-bad-json",
+ "kind": "extract",
+ "input": {
+  "max_calls": 10,
+  "bad": "json"
+ },
+ "expected": {
+  "status": "unverified"
+ }
+}

@@ -51,7 +51,8 @@ def _techniques_from_selected(selected: list[dict]) -> list[Technique]:
 
 
 def frozen_package_for_scene(store: Store, lg_session, plan, *,
-                             context_items: int = 3) -> tuple[KnowledgePackage, dict]:
+                             context_items: int = 3,
+                             freeze: bool = True) -> tuple[KnowledgePackage, dict]:
     """首 prepare 前查冻；恢复复用不重查。返回 (包, 对账元数据)。"""
     from .. import knowledge_query as kq   # LG 侧服务层（只读+包写入）
     from ..knowledge import PACKAGE_CONTRACT_VERSION
@@ -81,8 +82,10 @@ def frozen_package_for_scene(store: Store, lg_session, plan, *,
         raise RuntimeFault("knowledge_query_unavailable")
     if resp["status"] == "unsupported":
         raise RuntimeFault("knowledge_query_unsupported")
-    if resp["status"] == "matched":
-        kq.freeze_package(resp, lg_session)   # 冻结在首 prepare 前 ✓
+    if resp["status"] == "matched" and freeze:
+        kq.freeze_package(resp, lg_session)   # 冻结在首 prepare 前 ✓；
+        # freeze=False = 离线驱动/分析模式：只取包内容不写 LG 库
+        # （零配额纪律：离线跑不许改真库）
     techniques = _techniques_from_selected(resp.get("selected", []))
     pkg = KnowledgePackage(
         schema_version="scene-knowledge/2",

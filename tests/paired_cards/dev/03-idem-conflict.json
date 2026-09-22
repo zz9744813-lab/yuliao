@@ -1,4 +1,12 @@
-{"card_id": "dev-03-idem-conflict", "kind": "scene",
- "input": {"scene": "s1", "second_goal": "改了的目标"},
- "expected": {"failure_contains": "idempotency_input_conflict",
-   "not_silent": true}}
+{
+ "card_id": "dev-03-idem-conflict",
+ "kind": "scene",
+ "input": {
+  "scene": "s1",
+  "second_goal": "改了的目标"
+ },
+ "expected": {
+  "not_silent": true,
+  "error_contains": "idempotency_input_conflict"
+ }
+}

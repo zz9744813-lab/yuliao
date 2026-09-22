@@ -1,4 +1,12 @@
-{"card_id": "acc-02-cross-book", "kind": "scene",
- "input": {"scene": "s1", "bad_book": true},
- "expected": {"failure_contains": "knowledge_scope_conflict",
-   "not_silent": true}}
+{
+ "card_id": "acc-02-cross-book",
+ "kind": "scene",
+ "input": {
+  "scene": "s1",
+  "bad_book": true
+ },
+ "expected": {
+  "error_contains": "world_not_found",
+  "not_silent": true
+ }
+}

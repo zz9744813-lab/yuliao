@@ -1,41 +1,51 @@
 """K4-A 离线预置（零配额，2026-09-22）：三场配对比较的驱动与产物骨架。
 
 四类产物（方案 K4 行结构）：
-1. prose——六份正文（3 场 × 2 臂：arm A 用本场冻结 v2 知识包、
-   arm B 用空包对照）；2. packages——每场的冻结包（含 package id/
-   sha/来源与选中清单，不落库——真跑时经 freeze_package 落库）；
-3. receipts——状态与成本收据（每臂的 receipt + usage：调用数/时长/
-   token）；4. failures——失败记录（每臂的 RuntimeFault 原文）。
-配对分析只做**结构性对照**（长度/状态/预算）——「是否有质量收益」
-单独下结论，此处不判质量。
+1. prose——六份正文（3 场 × 2 臂：arm A 用本场 v2 知识包、arm B 空包
+   对照）；2. packages——每场 A 臂的包（package id/sha/来源/选中条数；
+   **离线路径不落 LG 库**——freeze=False，真跑（--live）才 freeze）；
+3. receipts——状态与成本收据（每臂 receipt + usage）；4. failures——
+   失败记录（error_type + 摘要，不吞 traceback 根因）。配对分析只做
+   **结构性对照**（长度/状态/预算）——「是否有质量收益」单独下结论。
 
-纪律：默认全离线（FixtureClient）；--live 显式开关才接
-GatewayClient（LLM_MODE=real + 网关已配，402 资金墙未拍板前不许
-真跑）；新实验目录新 Store（不动旧 3 场收据）。
+离线口径（会审四轮修正）：**零配额离线跑不改真库**——run_paired 默认
+freeze=False（包内容进产物、不写 knowledge_packages）；LG 异常时
+rollback 再记失败，不留半成品会话态。
+
+纪律：默认全离线（FxClient；verifier 是自证式夹具——证据门/负例
+不在此 e2e 触发，由 paired_cards 卡组覆盖，勿把 e2e 绿读成门全过）；
+--live 双闸（CLI flag + 环境变量 K4_ALLOW_LIVE=1）才接 GatewayClient
+（LLM_MODE=real + 网关已配）——402 资金墙未拍板前不许真跑；
+--out 已存在即拒（不静默覆盖上次实验产物）。
 
     python scripts/k4_paired_scenes.py              # 离线端到端（fixture）
-    python scripts/k4_paired_scenes.py --out <dir> --json
-    python scripts/k4_paired_scenes.py --live --writer-model m1 --verifier-model m2   # 拍板后真跑
+    python scripts/k4_paired_scenes.py --out <dir>  # 产物落盘（不覆盖）
+    python scripts/k4_paired_scenes.py --live --writer-model m1 \
+        --verifier-model m2     # 拍板后：K4_ALLOW_LIVE=1 + 本命令即真跑
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
+from app import db                                   # noqa: E402
 from app.scene_runtime.contracts import (Budget, Change, Fact,  # noqa: E402
                                           KnowledgePackage, PlannedEvent,
                                           ScenePlan, World)
 from app.scene_runtime.knowledge_v2 import frozen_package_for_scene  # noqa: E402
-from app.scene_runtime.pipeline import SceneRunner  # noqa: E402
-from app.scene_runtime.store import Store  # noqa: E402
+from app.scene_runtime.pipeline import SceneRunner     # noqa: E402
+from app.scene_runtime.store import Store              # noqa: E402
 
-# 3 场依次消耗一枚钱：每场独立 idem 键，revision 递增
+# 3 场依次消耗一枚钱：rev 按臂内累计口径（每臂独立世界从 0 起）
 SCENES = [("s1", 0, 3, 2, "k4-scene-1"),
           ("s2", 1, 2, 1, "k4-scene-2"),
           ("s3", 2, 1, 0, "k4-scene-3")]
@@ -43,9 +53,9 @@ SCENES = [("s1", 0, 3, 2, "k4-scene-1"),
 
 def build_world() -> World:
     return World(book_id="WK-K4", revision=0, characters={"lin": "林穗"},
-                facts={"coins": Fact(value=3, visible_to=["lin"]),
-                       "received": Fact(value=0, visible_to=["lin"])},
-                rules=[])
+                 facts={"coins": Fact(value=3, visible_to=["lin"]),
+                        "received": Fact(value=0, visible_to=["lin"])},
+                 rules=[])
 
 
 def build_plan(scene_id, revision, before, after, idem) -> ScenePlan:
@@ -60,7 +70,9 @@ def build_plan(scene_id, revision, before, after, idem) -> ScenePlan:
 
 
 class FxClient:
-    """离线夹具（零真实调用）：生成可读伪正文并核验一致。"""
+    """离线夹具（零真实调用）。⚠ verifier 自证式：quote 恒等于 payload
+    文本、issues 恒空——证据门/负例不在此触发（由卡组覆盖）；「e2e
+    全绿」只证结构链路，不证门行为。"""
     models = {"writer": "fx-w", "verifier": "fx-v", "transport": "fixture"}
 
     def invoke(self, *, role, system, payload, max_tokens, timeout):
@@ -69,29 +81,28 @@ class FxClient:
             tag = f"（用了{len(pro)}条策略）" if pro else "（空包对照）"
             body = {"text": f"林穗把一枚钱放在桌上，又收了回去。{tag}"}
         else:
-            after = [c["after"] for ev in payload["plan"]["events"]
-                     for c in ev["changes"]][0]
+            changes = [c for ev in payload["plan"]["events"]
+                       for c in ev["changes"]]
             body = {"issues": [],
                     "events": [{"event_id": ev["event_id"],
                                 "quote": payload["text"]}
                                for ev in payload["plan"]["events"]],
-                    "changes": [{"fact": "coins", "after": after,
+                    "changes": [{"fact": changes[0]["fact"],
+                                 "after": changes[0]["after"],
                                  "quote": payload["text"]}]}
         return {"text": json.dumps(body, ensure_ascii=False),
                 "tokens_in": 10, "tokens_out": 5, "actual_model": "fx",
                 "finish_reason": "stop"}
 
 
-def run_paired(store_factory, client, lg_session, *, live: bool = False) -> dict:
+def run_paired(store_factory, client, lg_session, *, live: bool = False,
+               freeze: bool = False) -> dict:
     """3 场 × 2 臂 + 四类产物 + 结构性配对分析（不判质量）。
 
-    store_factory() 每臂一个独立 Store/世界（配对=平行世界：A 臂提交后
-    revision 前进，同 revision 的 B 臂在同世界会 world_revision_conflict
-    ——那是正确拒绝，不是 bug；独立世界才是配对比较的诚实结构）。
-    同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem 键也各带后缀。"""
+    store_factory() 每臂一次（独立平行世界；臂内 3 场共享该臂世界，
+    revision 逐场递增）。同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem
+    键各带后缀。freeze 只在真跑（--live）时 True——离线零库写。"""
     four = {"prose": [], "packages": [], "receipts": [], "failures": []}
-    # 每臂一个独立世界（不是每场）：臂内 3 场共享该臂世界，revision
-    # 逐场递增（SCENES 的 rev 就是按臂内累计口径写的）
     stores = {arm: store_factory() for arm in ("A", "B")}
     for (scene_id, rev, before, after, idem) in SCENES:
         for arm in ("A", "B"):
@@ -100,7 +111,7 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False) -> dict
             try:
                 if arm == "A":
                     pkg, meta = frozen_package_for_scene(
-                        store, lg_session, plan)
+                        store, lg_session, plan, freeze=freeze)
                     four["packages"].append(
                         {"scene": scene_id, "arm": arm,
                          "package_id": pkg.package_id,
@@ -108,28 +119,33 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False) -> dict
                          "n_techniques": len(pkg.techniques),
                          "reused": meta.get("reused")})
                 else:
-                    pkg = KnowledgePackage(package_id="empty",
-                                           book_id=plan.book_id,
-                                           source_kind="empty",
-                                           techniques=[])
+                    pkg = KnowledgePackage(
+                        package_id=f"empty-{scene_id}", book_id=plan.book_id,
+                        source_kind="empty", techniques=[])
                 runner = SceneRunner(store, client)
                 receipt = runner.run(plan, pkg, Budget())
-                usage = runner.store.usage(receipt["job_id"])
+                usage = store.usage(receipt["job_id"])
+                export = store.export(plan.book_id)
                 four["prose"].append(
                     {"scene": scene_id, "arm": arm,
-                     "text": (store.export(plan.book_id)[-1]["text"]
-                              if store.export(plan.book_id) else ""),
+                     "text": (export[-1]["text"] if export else ""),
                      "status": receipt["status"]})
                 four["receipts"].append(
                     {"scene": scene_id, "arm": arm,
                      "job_id": receipt["job_id"],
                      "usage": {k: usage.get(k) for k in
-                               ("calls", "duration_ms", "tokens") if k in
-                               (usage or {})},
+                               ("calls", "duration_ms", "tokens")
+                               if k in (usage or {})},
                      "live": live})
             except Exception as exc:             # noqa: BLE001
-                four["failures"].append({"scene": scene_id, "arm": arm,
-                                         "error": str(exc)[:300]})
+                try:
+                    lg_session.rollback()        # 会话不留需回滚态（连锁失败）
+                except Exception:               # noqa: BLE001
+                    pass
+                four["failures"].append(
+                    {"scene": scene_id, "arm": arm,
+                     "error_type": type(exc).__name__,
+                     "error": str(exc)[:300]})
     return four
 
 
@@ -155,38 +171,52 @@ def paired_analysis(four: dict) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--out", default="", help="产物 JSON 输出目录")
-    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--out", default="", help="产物 JSON 输出目录（已存在即拒）")
     ap.add_argument("--live", action="store_true",
-                    help="真实调用（拍板后）：GatewayClient，LLM_MODE=real")
+                    help="真实调用（拍板后）：K4_ALLOW_LIVE=1 + LLM_MODE=real")
     ap.add_argument("--writer-model", default="")
     ap.add_argument("--verifier-model", default="")
     a = ap.parse_args()
+    if a.out and Path(a.out).exists():
+        raise SystemExit(f"--out 已存在：{a.out}——不静默覆盖上次实验产物，"
+                         "换新目录（方案「新实验目录」纪律）")
     if a.live:
+        if os.environ.get("K4_ALLOW_LIVE") != "1":
+            raise SystemExit("--live 需要环境变量 K4_ALLOW_LIVE=1（双闸："
+                            "402 资金墙未拍板前防误跑烧钱）")
         from app.scene_runtime.client import GatewayClient
         if not (a.writer_model and a.verifier_model):
             raise SystemExit("--live 需要 --writer-model 与 --verifier-model")
         client = GatewayClient(a.writer_model, a.verifier_model)
     else:
         client = FxClient()
-    import tempfile
-    store = Store(Path(tempfile.mkdtemp(prefix="k4_")) / "k4.sqlite")
-    store.create_world(build_world())
-    from app import db
-    with db.session() as s:
-        four = run_paired(store, client, s, live=a.live)
-    analysis = paired_analysis(four)
-    out = {"artifacts": four, "analysis": analysis, "live": a.live}
-    print(json.dumps(out, ensure_ascii=False, indent=1))
-    if a.out:
-        d = Path(a.out); d.mkdir(parents=True, exist_ok=True)
-        (d / "k4_paired.json").write_text(
-            json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
-        print(f"[k4_paired_scenes] 产物已写 {d / 'k4_paired.json'}")
+    tmp = Path(tempfile.mkdtemp(prefix="k4_worlds_"))
+    try:
+        def factory():
+            factory.n = getattr(factory, "n", 0) + 1
+            store = Store(tmp / f"arm{factory.n}" / "k4.sqlite")
+            store.create_world(build_world())
+            return store
+        with db.session() as s:
+            four = run_paired(factory, client, s, live=a.live,
+                              freeze=a.live)
+        analysis = paired_analysis(four)
+        out = {"artifacts": four, "analysis": analysis, "live": a.live}
+        print(json.dumps(out, ensure_ascii=False, indent=1))
+        if a.out:
+            d = Path(a.out)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "k4_paired.json").write_text(
+                json.dumps(out, ensure_ascii=False, indent=1),
+                encoding="utf-8")
+            print(f"[k4_paired_scenes] 产物已写 {d / 'k4_paired.json'}")
+    finally:
+        if not a.live:                      # 离线 fixture 世界用后即清；
+            shutil.rmtree(tmp, ignore_errors=True)   # --live 留库作收据
     if four["failures"]:
         raise SystemExit(f"有失败臂：{len(four['failures'])} 条（exit 1）")
     print(f"[k4_paired_scenes] PASS：3 场×2 臂全 committed，"
-          f"{analysis['n_packages']} 个冻结包")
+          f"{analysis['n_packages']} 个 A 臂包（freeze={'True' if a.live else 'False'}）")
 
 
 if __name__ == "__main__":
