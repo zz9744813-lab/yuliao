@@ -270,7 +270,8 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
 - [ ] K2-A：实现逐次调用与总预算、完整输出门；完成有边界的实例抽取、证据核查、候选冻结和跨作品复现。
 - [x] K3-A：实现 `/knowledge/query` 共用服务与薄 API；完成条件过滤、证据排序、查询卡及来源隔离。
   【2026-09-22 收口 77f6666】服务层 app/knowledge_query.py（固定过滤顺序：来源版本→必需/bad_when→范围→去重→可解释分量排序）+ HTTP 薄层（query/capabilities/packages，旧名不建第二套）+ 27 张冻结测试卡（dev12/acceptance15 分开，期望手写）；K1-A 契约复用（canonical 聚合/fixture 硬拦/基准剥离/license）；只读纪律（SELECT-only、mode=ro 回归）；会审修复轮（证据口径单一常量、剔除理由可审计、默认上下文 0、非数值 400、异常类名不外泄、freeze 快照过期拒绝）。全量 726 例全绿。
-- [ ] K3-B：Runtime 每场查询/冻结/恢复适配；保持手选兼容和全部 canon 权限。
+- [x] K3-B：Runtime 每场查询/冻结/恢复适配；保持手选兼容和全部 canon 权限。
+  【2026-09-22 收口 8173225】knowledge_v2.py 桥：首 prepare 前查冻（query+freeze_package）、同任务恢复复用 job request 冻结包不重查（回归：query 恰一次）；同幂等键异输入→idempotency_input_conflict；跨书 validate_plan 双闸；unavailable/unsupported→RuntimeFault 不留半成品 job；empty→零技巧包诚实跑；契约版本协商 scene-knowledge/2（v1 收据不动可读）；包内无原文；手选 genome_snapshot 直传兼容、收据不重写。验收点 6 例全测全离线（零模型调用）；全量绿退出码 0。会审 qwen PASS（reviews/language-genome-81732254fc.md）。
 - [ ] K4-A：完成 A09/A10 验收，在新实验中做三场配对比较；交付正文、包、状态/成本收据和失败记录。
 - [ ] K5-A：依据真实收益与复核负担决定是否扩到 10 场、补来源或停止某条策略；之后再评估拆仓。
 
