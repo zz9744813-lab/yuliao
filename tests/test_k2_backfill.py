@@ -69,9 +69,13 @@ def _seed(n_seg=3, *, bad_src=False, no_tv=False, scope="WORK"):
                           text_clean=("" if bad_src else TEXT),
                           role="benchmark", n_chars=len(TEXT), n_sentences=1,
                           integrity=integ))
+        s.flush()                       # Work 先落（FK 顺序），段齐后才算锚
+        import register_work_sources as REG   # 单一哈希口径（锚复核纪律）
+        sha, _ = REG._work_sha256(s, w.id)
         s.add(WorkSource(work_id=w.id, canonical_work_id=w.id,
                          source_type="fixture",
                          text_version="" if no_tv else f"tv-{key}",
+                         text_sha256=sha,
                          purpose_basis="测试夹具：只验管线契约",
                          identity_purposes=["research"], license_purposes=[],
                          license_basis="seed", metadata_status="verified",

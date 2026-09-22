@@ -39,6 +39,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db, knowledge_extract as KE                    # noqa: E402
 from app.config import LLM_MODE                                # noqa: E402
@@ -244,6 +245,8 @@ def main() -> None:
             raise SystemExit("--live 需要 --extractor-model")
         if LLM_MODE != "real":
             raise SystemExit(f"--live 需要 LG_LLM_MODE=real（当前 {LLM_MODE}）")
+        from preflight_models import require_models   # 预检门：池外名字=整批白跑（A01 纪律）
+        require_models((a.extractor_model,), source="k2_extract_backfill")
         client = _GatewayAdapter(a.extractor_model)
     db.init_db()
     with db.session() as s:
