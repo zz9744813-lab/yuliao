@@ -352,3 +352,42 @@ def test_implicitness_main_double_gate(tmp_path, monkeypatch):
     assert (out / "implicitness_items.json").exists()
     with pytest.raises(SystemExit, match="已存在"):
         BB.main()
+
+
+def test_rhythm_whitelist_and_zero_write(tmp_path):
+    """Rhythm 构题器：只收「定义即拉平节奏/句式」两类（RHYTHM_FLATTEN/
+    PARALLELISM_OVERUSE）——干净的轴外类型（EXPLICITIZE 显式化轴）与控制
+    臂不入；共享轴核同一闸门/答案键口径；默认零库写。"""
+    _seed_pair("r1", "RHYTHM_FLATTEN")
+    _seed_pair("r2", "EXPLICITIZE")     # 干净但属隐含度轴，非节奏轴
+    out = BB.build_rhythm_pairs("rhy-gate", version=1, seed=7,
+                                out_dir=str(tmp_path / "rhy_out"))
+    assert out["live"] is False and out["n_items"] >= 1
+    art = json.loads((tmp_path / "rhy_out" / "rhythm_items.json")
+                     .read_text(encoding="utf-8"))
+    got = {it["segment_id"] for it in art["items"]}
+    assert _seg_id_of("r1") in got, "节奏轴白名单内的干净对应入集"
+    assert _seg_id_of("r2") not in got, "轴外类型混进节奏基准——答案键被污染"
+    assert all(it["meta"]["corruption_type"] in BB.RHYTHM_INCLUDED_TYPES
+               for it in art["items"])
+    for it in art["items"]:
+        assert it["answer"] in ("A", "B") and it["text_a"] and it["text_b"]
+    with db.session() as s:
+        assert s.query(BB.BenchmarkSet).filter_by(
+            kind="rhythm_pair").count() == 0, "默认离线零库写被破坏"
+
+
+def test_rhythm_live_refuses_overwrite():
+    """Rhythm 拒覆盖：live 真建集合；同名同 kind 再建 → SystemExit；
+    离线模式只报 name_conflict 不炸（与 implicitness 同一守卫代码路径）。"""
+    o = BB.build_rhythm_pairs("rhy-live", version=1, seed=7, live=True)
+    assert o["live"] is True and o["items"] >= 1
+    with db.session() as s:
+        st = s.get(BB.BenchmarkSet, o["set_id"])
+        assert st.kind == "rhythm_pair"
+        assert s.query(BB.BenchmarkItem).filter_by(set_id=st.id).count() \
+            == o["items"]
+    with pytest.raises(SystemExit, match="拒覆盖"):
+        BB.build_rhythm_pairs("rhy-live", version=1, seed=7, live=True)
+    off = BB.build_rhythm_pairs("rhy-live", version=1, seed=7)
+    assert off["name_conflict"] is not None
