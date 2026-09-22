@@ -87,10 +87,14 @@ class Technique(Contract):
 
 
 class KnowledgePackage(Contract):
-    schema_version: Literal["scene-knowledge/1"] = "scene-knowledge/1"
+    # K3-B（方案 §4.3「新查询和包按版本协商」）：v2 查询包走
+    # scene-knowledge/2——旧包（v1 收据）不动、仍可读；v1 读者拒绝 v2
+    # 是显式校验错，不是静默误读。
+    schema_version: Literal["scene-knowledge/1", "scene-knowledge/2"] = "scene-knowledge/1"
     package_id: Identifier
     book_id: Identifier
-    source_kind: Literal["curated_hypothesis", "genome_snapshot", "distiller_snapshot", "empty"]
+    source_kind: Literal["curated_hypothesis", "genome_snapshot",
+                        "distiller_snapshot", "empty", "knowledge_query_v2"]
     data_split: Literal["runtime_reference"] = "runtime_reference"
     techniques: list[Technique] = Field(max_length=3)
 

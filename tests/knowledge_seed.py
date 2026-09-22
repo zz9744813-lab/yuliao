@@ -75,7 +75,8 @@ def _work(s, wid, title, *, role=None, source="file:seed", v2_of=None,
 def seed_knowledge():
     """在共享测试库建 K3-A 卡驱动用的全部种子（幂等：先清后建）。"""
     db.init_db()
-    _WORKS = ("WK-α", "WK-β", "WK-αM", "WK-BENCH", "WK-FIX", "WK-LIC")
+    _WORKS = ("WK-α", "WK-β", "WK-αM", "WK-BENCH", "WK-FIX", "WK-LIC",
+              "WK-ALPHA")
     with db.session() as s:
         # 只清本种子的行（共享库他文件数据不碰——全表 DELETE 会撞 FK/毁邻测）
         s.query(StrategyInstance).filter(
@@ -105,6 +106,8 @@ def seed_knowledge():
                       genre_ids=["GEN-1"])
         seg_b = _work(s, "WK-β", "书乙", author_id="AUTH-1",
                       genre_ids=["GEN-1"])
+        _work(s, "WK-ALPHA", "书甲ASCII", author_id="AUTH-1",
+              genre_ids=["GEN-1"])   # Runtime book_id 限 ASCII（K3-B 用）
         seg_mir = _work(s, "WK-αM", "书甲（corpus v2）", v2_of="WK-α",
                         canonical="WK-α", author_id="AUTH-1",
                         genre_ids=["GEN-1"])   # 继承根——verify 逐行比对
@@ -115,7 +118,8 @@ def seed_knowledge():
                         license_purposes=["benchmark_source"],
                         license_basis="授权测试")
         s.flush()
-        _strategy(s, "ESV2-A", "A-短句加速", scope_ids=["WK-α"])
+        _strategy(s, "ESV2-A", "A-短句加速",
+                  scope_ids=["WK-α", "WK-ALPHA"])
         _condition(s, "ESV2-A", "good_when", "节奏", "短句")
         _condition(s, "ESV2-A", "good_when", "场景", "追逃")
         _condition(s, "ESV2-A", "good_when", "视角", "限知", required=True)
@@ -123,7 +127,8 @@ def seed_knowledge():
         _condition(s, "ESV2-A", "neutral_when", "时长", "短篇")
         _instance(s, "ESV2-A", "SI-A1", "WK-α", seg_a, (0, 10))
         _instance(s, "ESV2-A", "SI-A2", "WK-α", seg_a, (12, 22))
-        _strategy(s, "ESV2-A2", "A-短句加速", version=2, scope_ids=["WK-α"])
+        _strategy(s, "ESV2-A2", "A-短句加速", version=2,
+                  scope_ids=["WK-α", "WK-ALPHA"])
         _condition(s, "ESV2-A2", "good_when", "节奏", "短句")
         _instance(s, "ESV2-A2", "SI-A3", "WK-α", seg_a, (0, 10))
         _strategy(s, "ESV2-B", "B-作者习惯", scope="AUTHOR",
