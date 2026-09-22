@@ -101,7 +101,11 @@ def _run_card_extract(card):
 def _run_card_scene(card, tmp_path):
     seed_knowledge()
     store = _mk_store(tmp_path)
-    scene_id, rev, before, after, idem = k4.SCENES[0]
+    # 卡可指定场景；不指定才默认 SCENES[0]（会审五轮：卡意图生效）
+    want = card["input"].get("scene", k4.SCENES[0][0])
+    match = [s for s in k4.SCENES if s[0] == want]
+    assert match, f"卡指定的场景不在 SCENES：{want}"
+    scene_id, rev, before, after, idem = match[0]
     plan = k4.build_plan(scene_id, rev, before, after, idem)
     if card["input"].get("bad_book"):
         plan = plan.model_copy(update={"book_id": "WK-OTHER"})
@@ -141,9 +145,16 @@ def test_card(card, tmp_path):
         assert got["status"] == exp["status"], got
     if exp.get("not_silent"):
         assert got["error"], "冲突不许静默通过"
-    # 严格消费：期望里打了不认识的键=拼写错，必须红（qwen 会审项）
-    handled = {"status", "error_contains", "not_silent"}
-    assert set(exp) <= handled, f"卡期望有未处理键：{set(exp) - handled}"
+    # 严格消费（双侧）：期望与输入里打了不认识的键=拼写错，必须红
+    # （会审五轮：input 键拼错曾会被静默忽略）
+    handled_exp = {"status", "error_contains", "not_silent"}
+    assert set(exp) <= handled_exp, f"卡期望有未处理键：{set(exp) - handled_exp}"
+    handled_in = {"extract": {"max_calls", "max_tokens", "pre_spend",
+                            "payload", "bad", "calls"},
+                 "scene": {"scene", "bad_book", "second_goal"}}
+    extra_in = set(card["input"]) - handled_in[card["kind"]]
+    assert not extra_in, (f"卡输入有未处理键：{extra_in}——"
+                         "驱动器没消费它，期望即失去覆盖力")
 
 
 def test_live_guard_requires_real_mode():
@@ -151,3 +162,48 @@ def test_live_guard_requires_real_mode():
                        "module 'app.scene_runtime.client'"):
         from app.scene_runtime.client import GatewayClient
         GatewayClient("a", "b")     # LLM_MODE=mock（测试环境）→ 显式拒
+
+
+def test_freeze_false_writes_nothing_to_lg_db(tmp_path):
+    """离线零库写：freeze=False 跑完，knowledge_packages 行数不变。"""
+    from app.models import KnowledgePackage
+    seed_knowledge()
+    with db.session() as s:
+        before = s.query(KnowledgePackage).count()
+    dirs = {"n": 0}
+
+    def factory():
+        d = tmp_path / f"z{dirs['n']}"; dirs["n"] += 1
+        st = Store(d / "k4.sqlite")
+        st.create_world(k4.build_world())
+        return st
+    with db.session() as s:
+        four = k4.run_paired(factory, k4.FxClient(), s, live=False,
+                              freeze=False)
+    assert not four["failures"], four["failures"]
+    with db.session() as s:
+        after = s.query(KnowledgePackage).count()
+    assert after == before, f"离线跑写了 LG 库：{before}→{after}（纪律违背）"
+
+
+def test_out_existing_refused(tmp_path, monkeypatch):
+    """--out 已存在即拒（脚本实现必须被测试钉住，防静默覆盖）。"""
+    d = tmp_path / "already"
+    d.mkdir()
+    monkeypatch.setattr(sys, "argv",
+                        ["k4", "--out", str(d)])
+    with pytest.raises(SystemExit, match="已存在"):
+        k4.main()
+
+
+def test_live_double_gate(tmp_path, monkeypatch):
+    """--live 双闸：无 K4_ALLOW_LIVE=1 → 拒；有闸但 LLM_MODE=mock → 也拒。"""
+    monkeypatch.delenv("K4_ALLOW_LIVE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["k4", "--live",
+                                     "--writer-model", "a",
+                                     "--verifier-model", "b"])
+    with pytest.raises(SystemExit, match="K4_ALLOW_LIVE"):
+        k4.main()
+    monkeypatch.setenv("K4_ALLOW_LIVE", "1")
+    with pytest.raises(RuntimeFault, match="live_client_requires_real_mode"):
+        k4.main()

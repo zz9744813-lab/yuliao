@@ -101,7 +101,9 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
 
     store_factory() 每臂一次（独立平行世界；臂内 3 场共享该臂世界，
     revision 逐场递增）。同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem
-    键各带后缀。freeze 只在真跑（--live）时 True——离线零库写。"""
+    键各带后缀。freeze 只在真跑（--live）时 True——离线零库写。
+    **回滚口径**：freeze_package 逐臂即时 commit，已提交的冻结写不因
+    另一臂 rollback 回退（rollback 只丢本臂未提交部分，每臂收据独立）。"""
     four = {"prose": [], "packages": [], "receipts": [], "failures": []}
     stores = {arm: store_factory() for arm in ("A", "B")}
     for (scene_id, rev, before, after, idem) in SCENES:
@@ -138,10 +140,20 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                                if k in (usage or {})},
                      "live": live})
             except Exception as exc:             # noqa: BLE001
+                # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
+                # ——已提交的冻结写（含另一臂）不会因本臂 rollback 回退；
+                # rollback 只丢本臂未提交部分。回滚自身失败是「留半成品」
+                # 信号，必须进 failures（rollback_failed），不许 pass 吞。
+                rollback_failed = False
                 try:
-                    lg_session.rollback()        # 会话不留需回滚态（连锁失败）
-                except Exception:               # noqa: BLE001
-                    pass
+                    lg_session.rollback()
+                except Exception as rb:           # noqa: BLE001
+                    rollback_failed = True
+                    four["failures"].append(
+                        {"scene": scene_id, "arm": arm,
+                         "error_type": "rollback_failed",
+                         "error": f"rollback 抛 {type(rb).__name__}——"
+                                  "会话可能留半成品态，人工复核"})
                 four["failures"].append(
                     {"scene": scene_id, "arm": arm,
                      "error_type": type(exc).__name__,
