@@ -18,8 +18,10 @@ rollback 再记失败，不留半成品会话态。
 （LLM_MODE=real + 网关已配）——402 资金墙未拍板前不许真跑；
 --out 已存在即拒（不静默覆盖上次实验产物）。
 
-    python scripts/k4_paired_scenes.py              # 离线端到端（fixture）
+    python scripts/k4_paired_scenes.py              # 离线端到端（fixture，默认 3 场）
     python scripts/k4_paired_scenes.py --out <dir>  # 产物落盘（不覆盖）
+    python scripts/k4_paired_scenes.py --scenes 10 --out <dir>
+                                                   # 10 场离线预演（零配额）
     python scripts/k4_paired_scenes.py --live --writer-model m1 \
         --verifier-model m2     # 拍板后：K4_ALLOW_LIVE=1 + 本命令即真跑
 """
@@ -51,6 +53,25 @@ SCENES = [("s1", 0, 3, 2, "k4-scene-1"),
           ("s3", 2, 1, 0, "k4-scene-3")]
 
 
+def scenes_for(n: int) -> list:
+    """--scenes N 的场景派生（纯函数，可离线核验）。
+    n<=3 恒等于 SCENES 前缀（默认 3 场口径零改动）；n>3 按序扩展：
+    s4 起世界转入 received 逐场 +1（coins 已在 s3 耗尽，received 初始 0），
+    每场 before 与世界实际状态精确匹配——扩展场无虚假前置条件。"""
+    if n < 1:
+        raise ValueError(f"scenes_for: n>=1 required, got {n}")
+    specs = [{"scene_id": s, "rev": r, "before": b, "after": a, "idem": i,
+              "fact": "coins", "goal": f"支付一枚钱（{s}）",
+              "desc": "支付一枚钱"}
+             for (s, r, b, a, i) in SCENES[:min(n, len(SCENES))]]
+    for i in range(len(SCENES) + 1, n + 1):
+        specs.append({"scene_id": f"s{i}", "rev": i - 1,
+                      "before": i - 4, "after": i - 3,
+                      "idem": f"k4-scene-{i}", "fact": "received",
+                      "goal": f"收到一枚钱（s{i}）", "desc": "收到一枚钱"})
+    return specs
+
+
 def build_world() -> World:
     return World(book_id="WK-K4", revision=0, characters={"lin": "林穗"},
                  facts={"coins": Fact(value=3, visible_to=["lin"]),
@@ -58,14 +79,17 @@ def build_world() -> World:
                  rules=[])
 
 
-def build_plan(scene_id, revision, before, after, idem) -> ScenePlan:
+def build_plan(scene_id, revision, before, after, idem, *,
+               fact="coins", goal=None, desc=None) -> ScenePlan:
     return ScenePlan(book_id="WK-K4", scene_id=scene_id,
                      idempotency_key=idem, expected_revision=revision,
-                     pov="lin", goal=f"支付一枚钱（{scene_id}）", style="简洁",
+                     pov="lin",
+                     goal=goal if goal is not None else f"支付一枚钱（{scene_id}）",
+                     style="简洁",
                      min_chars=1, max_chars=500,
                      events=[PlannedEvent(event_id="pay",
-                              description="支付一枚钱",
-                              changes=[Change(fact="coins", before=before,
+                              description=desc if desc is not None else "支付一枚钱",
+                              changes=[Change(fact=fact, before=before,
                                              after=after)])])
 
 
@@ -96,20 +120,24 @@ class FxClient:
 
 
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
-               freeze: bool = False) -> dict:
-    """3 场 × 2 臂 + 四类产物 + 结构性配对分析（不判质量）。
+               freeze: bool = False, n_scenes: int = 3) -> dict:
+    """N 场（默认 3=SCENES；扩展场派生见 scenes_for）× 2 臂 + 四类产物
+    + 结构性配对分析（不判质量）。
 
-    store_factory() 每臂一次（独立平行世界；臂内 3 场共享该臂世界，
+    store_factory() 每臂一次（独立平行世界；臂内各场共享该臂世界，
     revision 逐场递增）。同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem
     键各带后缀。freeze 只在真跑（--live）时 True——离线零库写。
     **回滚口径**：freeze_package 逐臂即时 commit，已提交的冻结写不因
     另一臂 rollback 回退（rollback 只丢本臂未提交部分，每臂收据独立）。"""
     four = {"prose": [], "packages": [], "receipts": [], "failures": []}
     stores = {arm: store_factory() for arm in ("A", "B")}
-    for (scene_id, rev, before, after, idem) in SCENES:
+    for sp in scenes_for(n_scenes):
+        scene_id = sp["scene_id"]
         for arm in ("A", "B"):
             store = stores[arm]
-            plan = build_plan(scene_id, rev, before, after, idem + f"-{arm}")
+            plan = build_plan(scene_id, sp["rev"], sp["before"], sp["after"],
+                              sp["idem"] + f"-{arm}", fact=sp["fact"],
+                              goal=sp["goal"], desc=sp["desc"])
             try:
                 if arm == "A":
                     pkg, meta = frozen_package_for_scene(
@@ -132,12 +160,15 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                     {"scene": scene_id, "arm": arm,
                      "text": (export[-1]["text"] if export else ""),
                      "status": receipt["status"]})
+                # usage 三键恒在（tokens 缺记=0：fixture 零真实消耗如实
+                # 记 0；live 走网关实账）——K5-A §6 止损命令不因缺键空转
+                u = usage or {}
                 four["receipts"].append(
                     {"scene": scene_id, "arm": arm,
                      "job_id": receipt["job_id"],
-                     "usage": {k: usage.get(k) for k in
-                               ("calls", "duration_ms", "tokens")
-                               if k in (usage or {})},
+                     "usage": {"calls": u.get("calls", 0),
+                               "duration_ms": u.get("duration_ms", 0),
+                               "tokens": u.get("tokens", 0)},
                      "live": live})
             except Exception as exc:             # noqa: BLE001
                 # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
@@ -163,11 +194,14 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
     return four
 
 
-def paired_analysis(four: dict) -> dict:
-    """结构性配对对照（只列事实——质量收益按方案 K4 单独下结论）。"""
+def paired_analysis(four: dict, specs=None) -> dict:
+    """结构性配对对照（只列事实——质量收益按方案 K4 单独下结论）。
+    specs 缺省=SCENES（三场既有口径）；10 场跑传 scenes_for(10)。"""
+    specs = specs if specs is not None else SCENES
     by = {(p["scene"], p["arm"]): p for p in four["prose"]}
     rows = []
-    for (scene_id, *_rest) in SCENES:
+    for sp in specs:
+        scene_id = sp["scene_id"] if isinstance(sp, dict) else sp[0]
         a, b = by.get((scene_id, "A")), by.get((scene_id, "B"))
         rows.append({
             "scene": scene_id,
@@ -186,11 +220,16 @@ def paired_analysis(four: dict) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default="", help="产物 JSON 输出目录（已存在即拒）")
+    ap.add_argument("--scenes", type=int, default=3,
+                    help="场数（默认 3=既有三场口径不动；10 场扩展用 "
+                         "--scenes 10，派生规则见 scenes_for）")
     ap.add_argument("--live", action="store_true",
                     help="真实调用（拍板后）：K4_ALLOW_LIVE=1 + LLM_MODE=real")
     ap.add_argument("--writer-model", default="")
     ap.add_argument("--verifier-model", default="")
     a = ap.parse_args()
+    if a.scenes < 1:
+        raise SystemExit("--scenes 须为 ≥1 的整数")
     if a.out and Path(a.out).exists():
         raise SystemExit(f"--out 已存在：{a.out}——不静默覆盖上次实验产物，"
                          "换新目录（方案「新实验目录」纪律）")
@@ -213,8 +252,8 @@ def main() -> None:
             return store
         with db.session() as s:
             four = run_paired(factory, client, s, live=a.live,
-                              freeze=a.live)
-        analysis = paired_analysis(four)
+                              freeze=a.live, n_scenes=a.scenes)
+        analysis = paired_analysis(four, scenes_for(a.scenes))
         out = {"artifacts": four, "analysis": analysis, "live": a.live}
         print(json.dumps(out, ensure_ascii=False, indent=1))
         if a.out:
