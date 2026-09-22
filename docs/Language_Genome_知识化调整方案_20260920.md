@@ -269,6 +269,7 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   零改动）；README/HANDOVER 定位已更新。全量 703 例全绿。
 - [~] K2-A：实现逐次调用与总预算、完整输出门；完成有边界的实例抽取、证据核查、候选冻结和跨作品复现。
   【2026-09-22 离线部分预置 93981b7，会审过】app/knowledge_extract.py 三道门（预算闸 check/spend 超限花 token 前拒、完整输出门缺项=unverified、证据门复用 verify_instance_span 单一口径）9 测全绿；client 注入默认离线、live 显式。**实例抽取放量与跨作品复现仍 blocked（deepseek 402 资金墙待拍板）**——拍板后经网关真跑即接通。
+  【2026-09-23 放量驱动就位 3f5db61+cffbc27，主控派工】scripts/k2_extract_backfill.py：三道门的调用方（A 臂空包根因修复）——幂等/预算闸/--dry-run 零库写/--limit 默认 48/来源合格闸（真库实测 8 假设×652 合格段=5216 对待抽）/策略间轮转/双闸 K2_ALLOW_LIVE=1，9 回归全绿；--limit 1 即单段 live 探针。**真跑待通道健康确认**（402 已证伪——主控 00:0x 探针 200，卡点=中转对长文 120s 超时，证据 docs/K4_首轮真跑_证据_20260923.md；mc22 主控实测可用，channel_changed=true 纪律适用并须复核 C1）。
 - [x] K3-A：实现 `/knowledge/query` 共用服务与薄 API；完成条件过滤、证据排序、查询卡及来源隔离。
   【2026-09-22 收口 77f6666】服务层 app/knowledge_query.py（固定过滤顺序：来源版本→必需/bad_when→范围→去重→可解释分量排序）+ HTTP 薄层（query/capabilities/packages，旧名不建第二套）+ 27 张冻结测试卡（dev12/acceptance15 分开，期望手写）；K1-A 契约复用（canonical 聚合/fixture 硬拦/基准剥离/license）；只读纪律（SELECT-only、mode=ro 回归）；会审修复轮（证据口径单一常量、剔除理由可审计、默认上下文 0、非数值 400、异常类名不外泄、freeze 快照过期拒绝）。全量 726 例全绿。
 - [x] K3-B：Runtime 每场查询/冻结/恢复适配；保持手选兼容和全部 canon 权限。
@@ -277,8 +278,12 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   【2026-09-22 离线预置 93981b7，会审过】scripts/k4_paired_scenes.py：3 场×2 臂独立平行世界驱动（A 臂 v2 冻结包/B 臂空包对照、idem 臂后缀）、四类产物（prose/packages/receipts/failures）+ 结构分析不判质量；离线零库写（freeze=False）；--live 双闸（K4_ALLOW_LIVE=1）+ 一条命令真跑；paired_cards 7 张（dev4/acc3 期望手写）。A09/A10 验收前置已修（f467a6/faac7e6）。**三场真跑仍 blocked（402 资金墙待拍板）。**
 - [~] K5-A：依据真实收益与复核负担决定是否扩到 10 场、补来源或停止某条策略；之后再评估拆仓。
   【2026-09-22 评估 v1/2 定稿 940cd1d+5230a7d（A3/A5/A6 + 会审二轮 B1/B2/B4/B8 修正：成本口径改每调用基数——正常 160~240 万/最坏 480~720 万/止损 800 万；术语统一 unique_source_intervals+root_works；停策略 N≥8 下限；C5 未标写死 C1+C5 均不过；判据核验命令/产物落点（out_k4_3 不可覆盖，10 场 out_k4_10）；[~] 图例定义）】docs/K5-A_离线前置评估.md：机械判据表（P0-P3 前提 + C1-C5 扩场判据 + 停策略三条件）+ 成本模型（每臂 2 调用；最坏/臂 = min(结构 8, 预算 6) = 6；10 场 40~120 调用、总量止损 800 万）+ 402 blocked 注记（充值/换通道两选项，换通道须标 channel_changed 并复核 C1）。**判据核验等 K4 真跑数据（blocked 待拍板）。会审二轮 BLOCK 8 条已全清（B3/B5/B6/B7 @07aca60 + B1/B2/B4/B8 @5230a7d），全范围复审 PASS 见 reviews/language-genome-5230a7d497.md。**
-- ⏸ 待拍板清单（全链唯一阻塞点=deepseek 402 资金墙；拍板人：集霸，不自行绕过）：
-  ① 给 deepseek 通道充值；或 ② 授权换通道——换通道必须标 channel_changed 并复核 C1（docs/K5-A_离线前置评估.md §2）。
+- ⏸ 待拍板清单（2026-09-23 更新：**402 资金墙已证伪**——主控 00:0x 探针 deepseek 200，实际卡点=中转 107.172.138.14:3000 对长文生成 120s 超时；原两选项收窄为「通道健康」——充值不再是必要项，换通道纪律（channel_changed=true + 复核 C1）对 mc22 同样适用。拍板人：集霸，证据 docs/K4_首轮真跑_证据_20260923.md）：
+  K2-A 单段 live 探针（一条命令，拍板后）：
+  `K2_ALLOW_LIVE=1 LG_GATEWAY_BASE_URL=<mc22 网关> <PY> scripts/k2_extract_backfill.py --live --extractor-model deepseek-v4.1-flash --limit 1`
+  K2-A 放量（探针过了再跑，预算闸默认 20 调用/5 万 token 可调）：
+  `K2_ALLOW_LIVE=1 LG_GATEWAY_BASE_URL=<mc22 网关> <PY> scripts/k2_extract_backfill.py --live --extractor-model deepseek-v4.1-flash --limit 48`
+  （密钥经 env 安全注入不入命令行——证据文件 §4 整改版口径；LG_LLM_MODE=real 为前置）
   拍板后的一条命令（K4 三场真跑；跑完 K5-A 判据核验按评估 §6 命令表，扩 10 场产物落点 out_k4_10/）：
   `K4_ALLOW_LIVE=1 F:/kelaode/Data/Agents/zqibcc8w9/tools/Python311/python.exe scripts/k4_paired_scenes.py --live --writer-model m1 --verifier-model m2 --out out_k4_3`
   10 场扩展（判据触发后；离线预演 2026-09-22 已通，见评估 §6.1，产物取证后已删、落点留空）：
