@@ -1,6 +1,6 @@
 # K5-A 离线前置评估：扩到 10 场的判据与成本模型（草案）
 
-版本：draft/1 · 2026-09-22 · 零配额（未跑任何真实模型调用；K4 三场真跑仍
+版本：v1/1（2026-09-22 定稿，A3/A5/A6 修正并入）· 零配额（未跑任何真实模型调用；K4 三场真跑仍
 blocked，见文末）· 对应方案 §8 K5 行 + §9 K5-A 任务单。
 
 本文件把「扩到 10 场 / 补源 / 停某策略 / 停扩张」从主观判断改成
@@ -25,16 +25,24 @@ blocked，见文末）· 对应方案 §8 K5 行 + §9 K5-A 任务单。
 | C2 | 零失败臂 | failures=0（含 rollback_failed=0） | 修故障后重跑 K4，不扩 |
 | C3 | A 臂非空包率 ≥2/3 | packages 记录核验 | <2/3 → 先补 K2-A 实例（查得空=知识不足，不是 Writer 问题） |
 | C4 | 复核负担可承受 | 每场差异人工复核 ≤20 分钟（集霸口径） | 超限 → 缩差异清单再判 |
-| C5 | 通道一致性 | 10 场用与 K4 相同的 writer/verifier 通道；若换通道须在收据标 channel_changed 并对 C1 复核一遍 | 未标 → 判据作废 |
+| C5 | 通道一致性 | 10 场用与 K4 相同的 writer/verifier 通道；若换通道须在收据标 channel_changed 并对 C1 复核一遍 | **未标 channel_changed 时，C1 与 C5 均判不过**（A6：写死，不再含糊） |
 
 ## 3. 停某策略的机械条件（在 K4/K5 真跑数据上核）
 
 - 任一策略版本满足任一条 → 该策略 retired（不删除，状态机走 K1-B 契约）：
-  ① verified 实例的**独立源区间 < 2**（跨作品复现失败——strategy_stats
-  口径，镜像/重切段聚合后）；② bad_when 命中率 > 50%（对该策略的
-  condition 求值统计）；③ K4 配对中携带该策略的场 C1 未过。
-- 「补源」触发条件：C3 过但独立根作品数 <2 → 按方案先最多 48 段
-  来源合格试点口径补实例，不直接全库放量。
+  ① **跨作品复现失败**：`strategy_stats.unique_source_intervals < 2`
+  （独立源区间 = canonical 根作品聚合后的 (根作品, span) 区间数，
+  镜像/重切段/重复抽取聚合后）；② **bad_when 命中率 > 50%**（对该策略
+  的 condition 求值统计）；③ K4 配对中携带该策略的场 C1 未过。
+- **样本量下限（A5：防小样误判 retired）**：①② 两条都只在
+  `strategy_stats.valid >= 8`（verified 实例数 N≥8）时才可判 retired；
+  N < 8 → 只标 `insufficient_sample`，不得 retired（2 实例 1 命中 = 50%
+  正是小样误判的形状）。① 还要求 `strategy_stats.attempts >= 2`
+  （至少 2 个独立根作品试过复现），否则同样只标 insufficient_sample。
+- 「补源」触发条件：C3 过但 `strategy_stats.root_works < 2` → 按方案
+  先最多 48 段来源合格试点口径补实例，不直接全库放量。
+  （术语统一：独立源区间/独立根作品数分别取
+  unique_source_intervals / root_works 两字段，不再混用。）
 
 ## 4. 成本模型（每场每臂 → 10 场上限）
 
@@ -42,8 +50,15 @@ blocked，见文末）· 对应方案 §8 K5 行 + §9 K5-A 任务单。
   （writer 1 + verifier 1）；含改稿上限 3 轮 → **最坏 8 调用/臂**
   （A10 修复后核验工件缺陷走有上限返修，不再烧 Writer 额度）。
 - 10 场 × 2 臂 = **正常 40 调用；最坏 160 调用**。
-- Token 口径（校准史实测：每臂约 4~6 万 input token）：
-  正常路径 10 场约 **400 万 token**；最坏路径 **≤1,600 万 token**。
+- Token 口径（A3 修正：口径=**每次调用**约 4~6 万 input token——
+  单场全上下文每次都整段送入；此前把「每臂」当基数多乘了轮数，高 4~5 倍）：
+  - 推导式（机械复核）：`总token = 调用数 × per_call_input`；
+    `per_call_input ≈ 4~6 万`（校准史实测口径）
+  - 正常路径：10 场 × 2 臂 × 2 调用 = 40 次 → **160 ~ 240 万 token**
+  - 最坏路径：10 场 × 2 臂 × 6 调用（Budget.max_calls=6 上限）= 120 次
+    → **480 ~ 720 万 token**（output ≤0.3 万/次，含 10% 余量 ≤800 万）
+- **总量止损线：800 万 token**（按重算最坏上限设；此前 1,600 万由
+  膨胀值推得，防护实际失效偏晚）。超线 → 停扩张，报告实耗。
 - 超预算防护：k4_paired_scenes 逐场跑，`Budget.max_calls`（契约
   20 上限）在 10 场口径下已覆盖最坏 8/臂；任一场超预算 → failures
   记 budget（不静默）；总量超 1,600 万 → 停扩张，报告实耗。
@@ -60,8 +75,31 @@ kimi 探针正常=402 仅 deepseek 单通道）。两个选项：
    模型基线，K4/10 场收据须标 channel_changed，C1 判据须复核。
 
 拍板前不发起任何真实模型调用（现行纪律）；拍板后执行顺序：
-K2-A 实例放量（逐次记账+输出门+证据门已就位）→ K4 三场真跑
-（`python scripts/k4_paired_scenes.py --live --writer-model m1
---verifier-model m2`，需 K4_ALLOW_LIVE=1）→ 本表判据逐项核验 →
-扩/停报告。零配额部分（本文件、三道门、配对驱动、卡组）已全部落地
-（93981b7/ebd0e62，会审过）。
+K2-A 实例放量（逐次记账+输出门+证据门已就位）→ K4 三场真跑（见下方
+一条命令）→ 本表判据逐项核验 → 扩/停报告。
+
+## 6. 判据核验命令（B 定稿：凡可机械核验的给命令与期望输出）
+
+设 10 场真跑产物在 `out10/k4_paired.json`（P3 前提下生成）：
+
+| 判据 | 核验命令（项目解释器） | 期望输出 |
+|---|---|---|
+| P1 | `jq '.artifacts.failures | length' out10/k4_paired.json` | `0` |
+| P2 | `jq '[.artifacts.packages[] | select(.n_techniques>=1)] | length' out10/k4_paired.json` | `>= 2` |
+| C2 | 同 P1 | `0`（含 rollback_failed=true 条目也为 0） |
+| ①（strategies） | strategy_stats 快照查询（`unique_source_intervals`/`valid`） | 逐条按 §3 表核 |
+| 总量止损 | `jq '.artifacts.receipts[].usage.tokens' ... | add` | `<= 8_000_000`（token） |
+
+核验由接手 agent 跑（不自证）；逐项结果落台账，任一不过 → 停止扩张报告。
+
+## 7. 产物落点（B 定稿）
+
+- **K4 三场原始收据（不可覆盖）**：首跑 `--out out_k4_3/`（首拍板后）。
+- **10 场扩展产物**：`--out out_k4_10/`（独立目录）。
+- **严禁覆盖 K4 三场原始收据**（脚本 `--out` 已拒已存在目录；这是第二道
+  保险的书面契约）。
+
+## 8. 任务单进度图例（B 定稿）
+
+- `[~]` = 零配额离线部分已落地过会审，真跑/放量 blocked 于 402 资金墙
+  待拍板（代码+评估就位，拍板后一条命令接通，无额外开发）。
