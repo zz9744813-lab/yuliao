@@ -357,3 +357,41 @@ def test_main_ten_scenes_out_and_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["k4", "--scenes", "0"])
     with pytest.raises(SystemExit, match="1"):
         k4.main()
+
+
+def test_failed_scene_marks_rest_skipped_not_phantom(tmp_path):
+    """会审整改（89f779e BLOCK·设计缺陷真修）：断臂即停——本臂某场失败后
+    后续场**不执行、不烧调用**，单列 skipped（skipped_after 指向首个失败
+    场）；failures 只记真实独立失败（C2/止损台账不被 world_revision_
+    conflict 连锁幻影污染）；另一臂独立世界照常跑完。"""
+    seed_knowledge()
+    dirs = {"n": 0}
+
+    def factory():
+        d = tmp_path / f"sk{dirs['n']}"; dirs["n"] += 1
+        store = Store(d / "k4.sqlite")
+        store.create_world(k4.build_world())
+        return store
+    import unittest.mock as _mock
+    # arm A 首场冻结包即炸 → 断臂；arm B 走空包对照，正常跑完 3 场
+    with _mock.patch.object(k4, "frozen_package_for_scene",
+                             side_effect=RuntimeFault("bridge_boom")):
+        with db.session() as s:
+            four = k4.run_paired(factory, k4.FxClient(), s, live=False)
+    assert len(four["failures"]) == 1, four["failures"]
+    f0 = four["failures"][0]
+    assert (f0["scene"], f0["arm"]) == ("s1", "A")
+    assert f0["error_type"] == "RuntimeFault"
+    assert [(sk["scene"], sk["arm"], sk["skipped_after"])
+            for sk in four["skipped"]] == \
+        [("s2", "A", "s1"), ("s3", "A", "s1")], four["skipped"]
+    assert all("未执行" in sk["reason"] for sk in four["skipped"])
+    # 断臂不跨臂传染：B 臂 3 场正文/收据齐全
+    assert {(p["scene"], p["arm"]) for p in four["prose"]} == \
+        {(f"s{i}", "B") for i in (1, 2, 3)}
+    assert len(four["receipts"]) == 3
+    an = k4.paired_analysis(four)
+    assert an["n_failures"] == 1, "分析必须只计真实失败——幻影不入台账"
+    # C2/P1 口径=failures 计数：skipped 从不混入 failures
+    assert not [f for f in four["failures"]
+                if f.get("error_type") == "skipped_after_failure"]

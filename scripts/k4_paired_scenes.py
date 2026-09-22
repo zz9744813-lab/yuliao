@@ -122,18 +122,34 @@ class FxClient:
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
                freeze: bool = False, n_scenes: int = 3) -> dict:
     """N 场（默认 3=SCENES；扩展场派生见 scenes_for）× 2 臂 + 四类产物
-    + 结构性配对分析（不判质量）。
+    （prose/packages/receipts/failures）+ skipped（断臂后未执行的后续场
+    单列，不进 failures——C2/止损台账不被连锁幻影污染，2026-09-23 会审
+    整改）+ 结构性配对分析（不判质量）。
 
     store_factory() 每臂一次（独立平行世界；臂内各场共享该臂世界，
     revision 逐场递增）。同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem
     键各带后缀。freeze 只在真跑（--live）时 True——离线零库写。
     **回滚口径**：freeze_package 逐臂即时 commit，已提交的冻结写不因
     另一臂 rollback 回退（rollback 只丢本臂未提交部分，每臂收据独立）。"""
-    four = {"prose": [], "packages": [], "receipts": [], "failures": []}
+    four = {"prose": [], "packages": [], "receipts": [], "failures": [],
+            "skipped": []}
     stores = {arm: store_factory() for arm in ("A", "B")}
+    failed_at = {"A": None, "B": None}     # 本臂首个失败场（None=未断）
     for sp in scenes_for(n_scenes):
         scene_id = sp["scene_id"]
         for arm in ("A", "B"):
+            if failed_at[arm] is not None:
+                # 会审整改（89f779e BLOCK）：SCENES 的 revision 阶梯按「前场
+                # 成功推进」硬编码——前场失败后本臂世界停在旧 revision，后续
+                # 场必然 world_revision_conflict（首轮真跑实测：6 条失败里 4
+                # 条是这类连锁幻影）。故断臂即停：后续场**不执行、不烧调用**，
+                # 单列 skipped（failures 只记真实独立失败，C2/止损台账不被
+                # 幻影污染）；另一臂独立世界不受影响。
+                four["skipped"].append(
+                    {"scene": scene_id, "arm": arm,
+                     "skipped_after": failed_at[arm],
+                     "reason": "前场失败，本臂世界未推进，本场景未执行"})
+                continue
             store = stores[arm]
             plan = build_plan(scene_id, sp["rev"], sp["before"], sp["after"],
                               sp["idem"] + f"-{arm}", fact=sp["fact"],
@@ -171,6 +187,7 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                                "tokens": u.get("tokens", 0)},
                      "live": live})
             except Exception as exc:             # noqa: BLE001
+                failed_at[arm] = scene_id       # 断臂标记：本臂后续场 skip
                 # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
                 # ——已提交的冻结写（含另一臂）不因本臂 rollback 回退；
                 # rollback 只丢本臂未提交部分。回滚自身失败是「留半成品」
@@ -267,7 +284,10 @@ def main() -> None:
         if not a.live:                      # 离线 fixture 世界用后即清；
             shutil.rmtree(tmp, ignore_errors=True)   # --live 留库作收据
     if four["failures"]:
-        raise SystemExit(f"有失败臂：{len(four['failures'])} 条（exit 1）")
+        raise SystemExit(
+            f"有失败臂：{len(four['failures'])} 条（另有 "
+            f"{len(four['skipped'])} 条 skipped_after_failure 未执行）"
+            "（exit 1）")
     print(f"[k4_paired_scenes] PASS：3 场×2 臂全 committed，"
           f"{analysis['n_packages']} 个 A 臂包（freeze={'True' if a.live else 'False'}）")
 
