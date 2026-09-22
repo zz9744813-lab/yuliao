@@ -257,3 +257,103 @@ def test_rollback_failure_recorded_not_swallowed(tmp_path):
     # 不重：rollback_failed 只并进本臂记录，无独立重复条目
     assert not [f for f in four["failures"]
                 if f["error_type"] == "rollback_failed"], four["failures"]
+
+
+def test_budget_default_pinned():
+    """K5-A §4 前提钉死：运行口径 Budget.max_calls=6（契约默认值）——
+    10 场最坏 120 调用、止损 800 万的自洽推导全部依赖它，漂移即红。"""
+    assert Budget().max_calls == 6
+
+
+def test_scenes_for_pins_default_and_extension():
+    """--scenes 派生（纯函数）：n<=3 恒等于 SCENES 前缀（默认口径零
+    改动）；n=10 时 10 条、id/幂等键全唯一、rev 逐场递增、扩展场
+    （s4+）转 received 且 before 与世界实际状态精确匹配；n<1 拒。"""
+    base = k4.scenes_for(3)
+    assert [(sp["scene_id"], sp["rev"], sp["before"], sp["after"],
+             sp["idem"], sp["fact"]) for sp in base] == \
+        [(s, r, b, a, i, "coins") for (s, r, b, a, i) in k4.SCENES]
+    assert k4.scenes_for(1) == [base[0]]
+    with pytest.raises(ValueError):
+        k4.scenes_for(0)
+    ten = k4.scenes_for(10)
+    assert len(ten) == 10
+    assert [sp["scene_id"] for sp in ten] == [f"s{i}" for i in range(1, 11)]
+    assert len({sp["idem"] for sp in ten}) == 10
+    assert [sp["rev"] for sp in ten] == list(range(10))
+    for sp in ten[3:]:
+        n = int(sp["scene_id"][1:])
+        assert sp["fact"] == "received"
+        assert sp["before"] == n - 4 and sp["after"] == n - 3
+
+
+def test_run_paired_ten_scenes_offline(tmp_path):
+    """10 场 × 2 臂离线端到端：20 份正文/20 张收据/10 个 A 臂冻结包；
+    收据 usage 三键恒在（tokens 缺记=0——§6 止损命令不因缺键空转）；
+    分析行数=10。默认 3 场口径不受影响（SCENES 常量原样）。"""
+    seed_knowledge()
+    dirs = {"n": 0}
+
+    def factory():
+        d = tmp_path / f"arm{dirs['n']}"; dirs["n"] += 1
+        store = Store(d / "k4.sqlite")
+        store.create_world(k4.build_world())
+        return store
+    with db.session() as s:
+        four = k4.run_paired(factory, k4.FxClient(), s, live=False,
+                             n_scenes=10)
+    assert not four["failures"], four["failures"]
+    assert len(four["prose"]) == 20 and len(four["receipts"]) == 20
+    assert len(four["packages"]) == 10
+    assert {p["scene"] for p in four["prose"]} == \
+        {f"s{i}" for i in range(1, 11)}
+    assert all({"calls", "duration_ms", "tokens"} <= set(r["usage"])
+               and r["usage"]["tokens"] >= 0 for r in four["receipts"]), \
+        four["receipts"]
+    assert all(p["n_techniques"] >= 0 for p in four["packages"])
+    an = k4.paired_analysis(four, k4.scenes_for(10))
+    assert len(an["rows"]) == 10 and an["n_failures"] == 0
+
+
+def test_scene_budget_gate_fires_not_silent(tmp_path):
+    """③ 预算闸：改稿循环烧穿 max_calls → RuntimeFault(call_budget_
+    exhausted) 必抛——预算耗尽不可能静默成功（驱动器 except→failures
+    落账不吞已由 bridge_boom 用例钉住，本用例补「闸真的会触发」）。"""
+    seed_knowledge()
+    store = _mk_store(tmp_path)
+    scene_id, rev, before, after, idem = k4.SCENES[0]
+    plan = k4.build_plan(scene_id, rev, before, after, idem)
+    pkg = k4.KnowledgePackage(package_id="empty-x", book_id=plan.book_id,
+                              source_kind="empty", techniques=[])
+
+    class _NeverPassVerify:
+        models = {"writer": "fx", "verifier": "fx", "transport": "fixture"}
+
+        def invoke(self, *, role, system, payload, max_tokens, timeout):
+            body = ({"text": "林穗把一枚钱放在桌上。"} if role == "writer"
+                    else {"issues": ["事件未在正文发生"]})
+            return {"text": json.dumps(body, ensure_ascii=False),
+                    "tokens_in": 1, "tokens_out": 1, "actual_model": "fx",
+                    "finish_reason": "stop"}
+    with pytest.raises(RuntimeFault,
+                       match="call_budget_exhausted|rewrite_budget_exhausted"):
+        SceneRunner(store, _NeverPassVerify()).run(plan, pkg,
+                                                   Budget(max_calls=2))
+
+
+def test_main_ten_scenes_out_and_refusal(tmp_path, monkeypatch):
+    """main --scenes 10 --out：产物落盘且含 10 场；再次运行同 --out
+    → 拒覆盖（§7 第二道保险对 10 场路径同样生效）；--scenes 0 → 拒。"""
+    out = tmp_path / "out_k4_10"
+    monkeypatch.setattr(sys, "argv",
+                        ["k4", "--scenes", "10", "--out", str(out)])
+    k4.main()
+    art = json.loads((out / "k4_paired.json").read_text(encoding="utf-8"))
+    assert art["live"] is False
+    scenes = {p["scene"] for p in art["artifacts"]["prose"]}
+    assert scenes == {f"s{i}" for i in range(1, 11)}, scenes
+    with pytest.raises(SystemExit, match="已存在"):
+        k4.main()
+    monkeypatch.setattr(sys, "argv", ["k4", "--scenes", "0"])
+    with pytest.raises(SystemExit, match="1"):
+        k4.main()
