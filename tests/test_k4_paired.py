@@ -198,8 +198,11 @@ def test_out_existing_refused(tmp_path, monkeypatch):
 
 def test_live_double_gate(tmp_path, monkeypatch):
     """--live 双闸：无 K4_ALLOW_LIVE=1 → 拒；有闸但 LLM_MODE=mock → 也拒。
-    第二段前提必须显式钉死（A2：不赌测试环境恰好 mock——若环境是 real，
-    本「防真实调用」的守卫自己会放行 main 真发请求）。"""
+    第二段前提显式钉死（A2：不赌环境恰好 mock）。绑定方式已核实：
+    GatewayClient.__init__ 内 `from app import config` 后取
+    `config.LLM_MODE`——调用期模块属性访问，setattr 即确定生效；
+    守卫在构造函数内先于任何网络构造 raise，「RuntimeFault 抛出」
+    本身就是「未发起真实调用」的直接断言。"""
     monkeypatch.delenv("K4_ALLOW_LIVE", raising=False)
     monkeypatch.setattr(sys, "argv", ["k4", "--live",
                                      "--writer-model", "a",
@@ -210,13 +213,15 @@ def test_live_double_gate(tmp_path, monkeypatch):
     monkeypatch.setenv("LG_LLM_MODE", "mock")
     from app import config as _cfg
     monkeypatch.setattr(_cfg, "LLM_MODE", "mock")
+    assert _cfg.LLM_MODE == "mock"      # 前提钉死，不赌环境默认值
     with pytest.raises(RuntimeFault, match="live_client_requires_real_mode"):
         k4.main()
 
 
 def test_rollback_failure_recorded_not_swallowed(tmp_path):
     """A1：lg_session.rollback() 自身抛异常——必须并进本臂 failure 记录
-    （rollback_failed=True）且主异常不被吞、不重复记录。"""
+    （rollback_failed=True + rollback_error=回滚异常类名）且主异常不被吞、
+    不重复记录。"""
     seed_knowledge()
     dirs = {"n": 0}
 
@@ -226,23 +231,6 @@ def test_rollback_failure_recorded_not_swallowed(tmp_path):
         st.create_world(k4.build_world())
         return st
 
-    class _BoomSession:
-        """最小假 lg_session：query_knowledge 走真库，rollback 必抛。"""
-        def __init__(self):
-            self._real = None
-
-        def rollback(self):
-            raise RuntimeError("rollback 也炸了")
-
-    class _FailClient:
-        models = {"writer": "fx", "verifier": "fx", "transport": "fixture"}
-
-        def invoke(self, **kw):
-            raise RuntimeFault("boom_arm_failure")
-
-    # 直接用原版 FxClient 让 bridge 走通到 runner，runner.run 里抛——更简
-    # 单的路径：arm B 的 KnowledgePackage 校验……为最小化，用 monkeypatch
-    # 让 frozen_package_for_scene 抛（arm A 首场即失败）→ except 分支。
     calls = {"rollback": 0}
 
     class _BoomRollbackSession:
@@ -252,15 +240,19 @@ def test_rollback_failure_recorded_not_swallowed(tmp_path):
 
     import unittest.mock as _mock
     # run_paired 是 from-import 绑定——必须钉 k4 模块自己的名字（A1 教训：
-    # 钉源头模块不生效，arm A 实际跑真 bridge 撞 AttributeError）
+    # 钉源头模块不生效，arm A 实际跑真 bridge 撞 AttributeError）。
+    # 失败注入：arm A 首场 frozen_package_for_scene 即抛 → except 分支。
     with _mock.patch.object(k4, "frozen_package_for_scene",
                              side_effect=RuntimeFault("bridge_boom")):
         four = k4.run_paired(factory, k4.FxClient(), _BoomRollbackSession(),
                              live=False, freeze=False)
     assert four["failures"], "主异常必须被记录，不许吞"
     rb = [f for f in four["failures"] if f.get("rollback_failed")]
+    assert rb, "「失败且回滚也炸」必须能从收据非空地区分出来"
     assert all(f["error_type"] == "RuntimeFault"
               for f in rb), four["failures"]
+    assert all(f.get("rollback_error") == "RuntimeError"
+               for f in rb), four["failures"]   # 回滚异常类名随记录携带
     assert calls["rollback"] >= 1, "rollback 确实炸过（前提成立）"
     # 不重：rollback_failed 只并进本臂记录，无独立重复条目
     assert not [f for f in four["failures"]
