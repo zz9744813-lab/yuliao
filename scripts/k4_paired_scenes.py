@@ -141,23 +141,20 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                      "live": live})
             except Exception as exc:             # noqa: BLE001
                 # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
-                # ——已提交的冻结写（含另一臂）不会因本臂 rollback 回退；
+                # ——已提交的冻结写（含另一臂）不因本臂 rollback 回退；
                 # rollback 只丢本臂未提交部分。回滚自身失败是「留半成品」
-                # 信号，必须进 failures（rollback_failed），不许 pass 吞。
+                # 信号，并进本臂记录（rollback_failed=True），不 pass 吞（A4：
+                # 局部标志必须被消费——台账可区分「仅失败」与「失败且回滚也炸」）。
                 rollback_failed = False
                 try:
                     lg_session.rollback()
-                except Exception as rb:           # noqa: BLE001
+                except Exception:               # noqa: BLE001
                     rollback_failed = True
-                    four["failures"].append(
-                        {"scene": scene_id, "arm": arm,
-                         "error_type": "rollback_failed",
-                         "error": f"rollback 抛 {type(rb).__name__}——"
-                                  "会话可能留半成品态，人工复核"})
                 four["failures"].append(
                     {"scene": scene_id, "arm": arm,
                      "error_type": type(exc).__name__,
-                     "error": str(exc)[:300]})
+                     "error": str(exc)[:300],
+                     "rollback_failed": rollback_failed})
     return four
 
 
