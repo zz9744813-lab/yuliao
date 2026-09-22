@@ -20,7 +20,8 @@
 | Naturalness | ✅ nat-v1（控制臂已排除） | kind=naturalness_pair，--task naturalness |
 | Human-vs-AI Discrimination | ✅ hvai-v1（545 题，BS-95651478c6dd）——2026-09-19 已解锁（此前「待解锁」行已过期） | kind=human_vs_ai |
 | Implicitness | ✅ 构题器就位（2026-09-22 离线预置：白名单 9 类「定义即显式化」劣化类型，答案键=构造，零 LLM 判读）；真库构建 --live 双闸（BENCH_ALLOW_LIVE=1）待 402 拍板 | kind=implicitness_pair |
-| Semantic Fidelity / Pragmatics / Dialogue / Rhythm / Style | ⛔ 待解锁：需专门构题器 + 可验证答案键；可建性评估（Pragmatics/Rhythm）见 docs/benchmark-subs-20260919.md |
+| Rhythm | ✅ 构题器就位（2026-09-22 同模式：白名单 2 类「定义即拉平节奏/句式」类型）；真库构建同上双闸 | kind=rhythm_pair |
+| Semantic Fidelity / Pragmatics / Dialogue / Style | ⛔ 待解锁：需专门构题器 + 可验证答案键；Pragmatics 卡点=现有 18 类劣化类型定义无一承诺「语用违规」（详见 docs/benchmark-subs-20260919.md 增补节） |
 | Human Preference Prediction | ⛔ 待解锁：需要基准段上的集霸裁定（他没有判过基准段） |
 | Reconstruction Quality | ⛔ 待解锁：同上，且需要排名口径 |
 | Hard Case | ✅ 不在此建：hard_cases 表 + hard_case_mining.py 已是独立仪器 |
@@ -230,18 +231,26 @@ IMPLICITNESS_INCLUDED_TYPES = frozenset({
     "NARRATOR_JUDGMENT",          # 叙述者直接下评价判断
 })
 
+# Rhythm 收录白名单：只收**按类型定义即「把节奏/句式变化拉平」**的劣化类型
+# （依据同上=controlled_corruption.TYPES 的 variable 原文）。答案键=构造：
+# 原文侧按定义更富长短/句式变化，劣化侧按定义拉平 → answer=人类原文侧。
+RHYTHM_INCLUDED_TYPES = frozenset({
+    "RHYTHM_FLATTEN",       # 把长短交错的节奏拉成匀速长句（去掉短句与停顿）
+    "PARALLELISM_OVERUSE",  # 把并列/递进改写成整齐排比——句式过于整齐
+})
 
-def build_implicitness_pairs(name: str, version: int = 1, seed: int = 20260918,
-                             dry_run: bool = False, *, live: bool = False,
-                             out_dir: str = "") -> dict:
-    """implicitness_pair 子基准（§14 Implicitness，2026-09-22 监管指令离线预置）。
 
-    问的问题：A/B 哪一边**更含蓄**（更少把暗含之意写明）。
-    答案键=构造：人类侧=出版网文原文（按定义含蓄）；劣化侧=白名单类型
-    变体，类型定义即显式化 → 隐含度低于原文 → answer=人类原文侧。
-    **零 LLM 判读参与答案键**（与 naturalness_pair 同一构造性模式）。
+def _build_axis_pairs(name: str, kind: str, included_types: frozenset, *,
+                      answer_semantics: str, note: str, version: int = 1,
+                      seed: int = 20260918, dry_run: bool = False,
+                      live: bool = False, out_dir: str = "") -> dict:
+    """轴成对题共用核（implicitness / rhythm 同一构题模式）。
+
+    问轴问题（不问身份），答案键=构造：answer=人类原文侧，零 LLM 判读。
     闸门与三个既有构建器**同一套**（_eligible_pairs：status=ok + 有候选 +
     role='benchmark' + src_ok + 未判病句）——闸门不一致=子基准不可比。
+    included_types 只收「类型定义即宣称改变本轴」的劣化类型——定义不宣称
+    改本轴的类型混入=往答案键掺噪（控制臂 NEUTRAL_PARAPHRASE 永不入）。
 
     默认离线**零库写**：只读库构造条目，落盘走 out_dir（已存在即拒）；
     live=True 才写 BenchmarkSet+Items 进库——main 层 --live 双闸
@@ -250,14 +259,13 @@ def build_implicitness_pairs(name: str, version: int = 1, seed: int = 20260918,
     同种子重建 → 同位置同答案（与既有构建器同 rng 口径，可跨集核对）。
     """
     with db.session() as s:
-        existed = (s.query(BenchmarkSet)
-                   .filter_by(name=name, kind="implicitness_pair").first())
+        existed = (s.query(BenchmarkSet).filter_by(name=name, kind=kind).first())
         conflict = None if existed is None else {"set_id": existed.id,
                                                  "n_items": existed.n_items}
         rows = [(cc, seg) for cc, seg in _eligible_pairs(s)
-                if cc.corruption_type in IMPLICITNESS_INCLUDED_TYPES]
+                if cc.corruption_type in included_types]
         by_type = {t: sum(1 for cc, _ in rows if cc.corruption_type == t)
-                   for t in sorted(IMPLICITNESS_INCLUDED_TYPES)}
+                   for t in sorted(included_types)}
         if dry_run:
             return {"would_build": len(rows),
                     "segments": len({x[1].id for x in rows}),
@@ -273,21 +281,20 @@ def build_implicitness_pairs(name: str, version: int = 1, seed: int = 20260918,
             else:
                 a, b, ans = cc.text, human, "B"
             ctxs, _ = scene_context(s, seg)
-            items.append({"segment_id": seg.id, "kind": "implicitness_pair",
-                         "context": (ctxs or [""])[-1] if ctxs else "",
-                         "text_a": a, "text_b": b, "answer": ans,
-                         "meta": {"corruption_type": cc.corruption_type,
-                                  "variable": cc.variable,
-                                  "drift": cc.drift_score}})
+            items.append({"segment_id": seg.id, "kind": kind,
+                          "context": (ctxs or [""])[-1] if ctxs else "",
+                          "text_a": a, "text_b": b, "answer": ans,
+                          "meta": {"corruption_type": cc.corruption_type,
+                                   "variable": cc.variable,
+                                   "drift": cc.drift_score}})
         spec = {"source": "controlled_corruptions",
                 "segment_role": "benchmark",
-                "included_types": sorted(IMPLICITNESS_INCLUDED_TYPES),
+                "included_types": sorted(included_types),
                 "require_src_ok": True,
                 "require_not_ungrammatical": True,
                 "position_seed": seed,
                 "ctx": "near1",
-                "answer_semantics": ("answer=人类原文侧（构造性答案：白名单类型"
-                                     "按定义显式化 → 劣化侧隐含度低于原文）")}
+                "answer_semantics": answer_semantics}
         if not live:
             out = {"live": False, "name": name, "n_items": len(items),
                    "by_type": {k: v for k, v in by_type.items() if v},
@@ -300,33 +307,68 @@ def build_implicitness_pairs(name: str, version: int = 1, seed: int = 20260918,
                     raise SystemExit(f"--out 已存在：{out_dir}——不静默覆盖"
                                      "（离线产物也不许覆盖，同 --out 拒既存纪律）")
                 d.mkdir(parents=True)
-                (d / "implicitness_items.json").write_text(
-                    json.dumps({"kind": "implicitness_pair", "name": name,
+                fname = f"{kind.removesuffix('_pair')}_items.json"
+                (d / fname).write_text(
+                    json.dumps({"kind": kind, "name": name,
                                 "version": version, "spec": spec,
                                 "items": items}, ensure_ascii=False, indent=1),
                     encoding="utf-8")
-                out["fixture_path"] = str(d / "implicitness_items.json")
+                out["fixture_path"] = str(d / fname)
             return out
         if existed is not None:
             raise SystemExit(
-                f"同名 implicitness_pair 集已存在：{name}（{existed.id}，"
+                f"同名 {kind} 集已存在：{name}（{existed.id}，"
                 f"{existed.n_items} 题）——拒覆盖（既有集合不可静默重建）。")
         st = BenchmarkSet(id=new_id("BS"), name=name, version=version,
-                          kind="implicitness_pair", n_items=len(rows),
-                          spec=spec,
-                          note="隐含度成对题：A/B 哪一边**更含蓄**（更少把暗含之意写明；"
-                               "answer=原文侧，构造性答案键）")
+                          kind=kind, n_items=len(rows), spec=spec, note=note)
         s.add(st)
         s.flush()
         for it in items:
             s.add(BenchmarkItem(set_id=st.id, segment_id=it["segment_id"],
-                                kind="implicitness_pair",
-                                context=it["context"], text_a=it["text_a"],
-                                text_b=it["text_b"], answer=it["answer"],
-                                meta=it["meta"]))
+                                kind=kind, context=it["context"],
+                                text_a=it["text_a"], text_b=it["text_b"],
+                                answer=it["answer"], meta=it["meta"]))
         s.commit()
         return {"live": True, "set_id": st.id, "name": name,
                 "items": len(rows), "by_type": by_type}
+
+
+def build_implicitness_pairs(name: str, version: int = 1, seed: int = 20260918,
+                             dry_run: bool = False, *, live: bool = False,
+                             out_dir: str = "") -> dict:
+    """implicitness_pair 子基准（§14 Implicitness，2026-09-22 监管指令离线预置）。
+
+    问的问题：A/B 哪一边**更含蓄**（更少把暗含之意写明）。
+    答案键=构造：人类侧=出版网文原文（按定义含蓄）；劣化侧=白名单类型
+    变体，类型定义即显式化 → 隐含度低于原文 → answer=人类原文侧。
+    **零 LLM 判读参与答案键**（与 naturalness_pair 同一构造性模式）。
+    """
+    return _build_axis_pairs(
+        name, "implicitness_pair", IMPLICITNESS_INCLUDED_TYPES,
+        answer_semantics=("answer=人类原文侧（构造性答案：白名单类型"
+                          "按定义显式化 → 劣化侧隐含度低于原文）"),
+        note="隐含度成对题：A/B 哪一边**更含蓄**（更少把暗含之意写明；"
+             "answer=原文侧，构造性答案键）",
+        version=version, seed=seed, dry_run=dry_run, live=live, out_dir=out_dir)
+
+
+def build_rhythm_pairs(name: str, version: int = 1, seed: int = 20260918,
+                       dry_run: bool = False, *, live: bool = False,
+                       out_dir: str = "") -> dict:
+    """rhythm_pair 子基准（§14 Rhythm，2026-09-22 同模式构题）。
+
+    问的问题：A/B 哪一边**节奏更富变化**（长短错落、句式不单调）。
+    答案键=构造：劣化侧=白名单类型变体（RHYTHM_FLATTEN 把长短交错拉成
+    匀速长句 / PARALLELISM_OVERUSE 使句式过于整齐），类型定义即拉平
+    节奏 → 节奏变化低于原文 → answer=人类原文侧。零 LLM 判读。
+    """
+    return _build_axis_pairs(
+        name, "rhythm_pair", RHYTHM_INCLUDED_TYPES,
+        answer_semantics=("answer=人类原文侧（构造性答案：白名单类型"
+                          "按定义把节奏/句式变化拉平 → 劣化侧变化度低于原文）"),
+        note="节奏成对题：A/B 哪一边**节奏更富变化**（answer=原文侧，"
+             "构造性答案键）",
+        version=version, seed=seed, dry_run=dry_run, live=live, out_dir=out_dir)
 
 
 def build_human_vs_ai(name: str, version: int = 1, seed: int = 20260918,
@@ -528,7 +570,8 @@ def main() -> None:
     ap.add_argument("--version", type=int, default=1)
     ap.add_argument("--kind", default="corruption_detection",
                     choices=("corruption_detection", "corruption_type", "naturalness_pair",
-                             "human_vs_ai", "length_balanced", "implicitness_pair"))
+                             "human_vs_ai", "length_balanced", "implicitness_pair",
+                             "rhythm_pair"))
     ap.add_argument("--live", action="store_true",
                     help="implicitness_pair 真库构建（拍板后）：需要环境变量 "
                          "BENCH_ALLOW_LIVE=1（双闸：402 拍板前防真库写）")
@@ -552,13 +595,14 @@ def main() -> None:
         return
     if args.kind == "corruption_type":
         out = build_corruption_type_sets(args.name, args.version, args.seed, args.dry_run)
-    elif args.kind == "implicitness_pair":
+    elif args.kind in ("implicitness_pair", "rhythm_pair"):
         if args.live and os.environ.get("BENCH_ALLOW_LIVE") != "1":
             raise SystemExit("--live 需要环境变量 BENCH_ALLOW_LIVE=1（双闸："
                              "402 拍板前防真库写）")
-        out = build_implicitness_pairs(args.name, args.version, args.seed,
-                                       args.dry_run, live=args.live,
-                                       out_dir=args.out)
+        builder = (build_implicitness_pairs if args.kind == "implicitness_pair"
+                   else build_rhythm_pairs)
+        out = builder(args.name, args.version, args.seed, args.dry_run,
+                      live=args.live, out_dir=args.out)
     elif args.kind == "naturalness_pair":
         out = build_naturalness_pairs(args.name, args.version, args.seed, args.dry_run)
     elif args.kind == "human_vs_ai":
