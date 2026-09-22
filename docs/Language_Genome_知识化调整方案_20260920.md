@@ -277,6 +277,11 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   【2026-09-22 离线预置 93981b7，会审过】scripts/k4_paired_scenes.py：3 场×2 臂独立平行世界驱动（A 臂 v2 冻结包/B 臂空包对照、idem 臂后缀）、四类产物（prose/packages/receipts/failures）+ 结构分析不判质量；离线零库写（freeze=False）；--live 双闸（K4_ALLOW_LIVE=1）+ 一条命令真跑；paired_cards 7 张（dev4/acc3 期望手写）。A09/A10 验收前置已修（f467a6/faac7e6）。**三场真跑仍 blocked（402 资金墙待拍板）。**
 - [~] K5-A：依据真实收益与复核负担决定是否扩到 10 场、补来源或停止某条策略；之后再评估拆仓。
   【2026-09-22 评估 v1 定稿 940cd1d（A3/A5/A6 修正：成本口径改每调用基数——正常 160~240 万/最坏 480~720 万/止损 800 万；术语统一 unique_source_intervals+root_works；停策略 N≥8 下限；C5 未标写死 C1+C5 均不过；判据核验命令/产物落点（out_k4_3 不可覆盖，10 场 out_k4_10）；[~] 图例定义）】docs/K5-A_离线前置评估.md：机械判据表（P0-P3 前提 + C1-C5 扩场判据 + 停策略三条件）+ 成本模型（每臂 2 调用/最坏 8；10 场 40~160 调用、≤1,600 万 token 上限）+ 402 blocked 注记（充值/换通道两选项，换通道须标 channel_changed 并复核 C1）。**判据核验等 K4 真跑数据（blocked 待拍板）。**
+- ⏸ 待拍板清单（全链唯一阻塞点=deepseek 402 资金墙；拍板人：集霸，不自行绕过）：
+  ① 给 deepseek 通道充值；或 ② 授权换通道——换通道必须标 channel_changed 并复核 C1（docs/K5-A_离线前置评估.md §2）。
+  拍板后的一条命令（K4 三场真跑；跑完 K5-A 判据核验按评估 §6 命令表，扩 10 场产物落点 out_k4_10/）：
+  `K4_ALLOW_LIVE=1 F:/kelaode/Data/Agents/zqibcc8w9/tools/Python311/python.exe scripts/k4_paired_scenes.py --live --writer-model m1 --verifier-model m2 --out out_k4_3`
+  K2-A 实例放量同在拍板后经网关真跑（app/knowledge_extract.py 三道门已就位），不在此命令链内。
 
 每项交接固定记录：输入快照和代码版本、允许修改范围、产物路径、验证命令与原始结果、未通过项、请求/用量/未知记录、下一步和停止条件。交付时区分“代码存在”“契约通过”“真实试点完成”“特定质量收益成立”。
 
