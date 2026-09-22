@@ -395,3 +395,25 @@ def test_failed_scene_marks_rest_skipped_not_phantom(tmp_path):
     # C2/P1 口径=failures 计数：skipped 从不混入 failures
     assert not [f for f in four["failures"]
                 if f.get("error_type") == "skipped_after_failure"]
+
+
+def test_channel_changed_marked_on_receipts(tmp_path):
+    """C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed——收据
+    逐条携带；默认 False（同通道基线跑不带），回归钉死两种形态。"""
+    seed_knowledge()
+    dirs = {"n": 0}
+
+    def factory():
+        d = tmp_path / f"cc{dirs['n']}"; dirs["n"] += 1
+        store = Store(d / "k4.sqlite")
+        store.create_world(k4.build_world())
+        return store
+    with db.session() as s:
+        four = k4.run_paired(factory, k4.FxClient(), s, live=False,
+                            channel_changed=True)
+    assert len(four["receipts"]) == 6 and \
+        all(r["channel_changed"] is True for r in four["receipts"])
+    with db.session() as s:
+        four2 = k4.run_paired(factory, k4.FxClient(), s, live=False)
+    assert all(r["channel_changed"] is False for r in four2["receipts"]), \
+        "默认（同通道基线）不得带 channel_changed=true"

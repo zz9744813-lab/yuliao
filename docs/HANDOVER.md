@@ -14,6 +14,8 @@
 
 > **2026-09-23 01:5x K2-A-LIVE 放量驱动就位（主控派工 §3.1，零真实调用）**：scripts/k2_extract_backfill.py——app/knowledge_extract.py 三道门的调用方（首轮真跑 A 臂包全空的根因）。真库 dry-run 实测：**8 条 hypothesis 策略 × 652 来源合格段（benchmark+src_ok+text_clean 非空）= 5216 对待抽，0 缺 text_version**；幂等（verified/rejected 落行者跳）/预算闸（blocked_budget 显式收尾、候选保留）/策略间轮转至 --limit（默认 48 试点口径）/--dry-run 零调用零库写/--live 双闸 （K2_ALLOW_LIVE=1 + LG_LLM_MODE=real，走 app.gateway.chat A05 记账）——--limit 1 即单段 live 探针。9 回归全绿；单段探针/放量命令已入任务单待拍板段（通道=mc22 env 覆盖，channel_changed+复核 C1 纪律适用）。
 
+> **2026-09-23 03:0x K2-A live 探针→放量首轮收官 + 新拍板项（status 语义审查）**：通道 mc22（env 注入密钥；**传输层无 TLS=明文 http**——通道自身限制，TLS 终端待主控侧，如实记）。探针三轮：九字薄 prompt→unverified → 显式 JSON 契约→unverified（offset 数错，模型原文入报告诊断）→ **repair_span 机械重定位（LLM 中文字符计数不可信，以引用在原文首次精确出现重算；非逐字子串不修由门拦）→ verified**。放量 48 对=48 调用 **12,264 tokens**（预算闸未触顶），**44 条 verified 实例落库**（+探针 1=45），4 条 unverified 全为改写引用被输出门拦（零静默）。观察态迁移（scripts/strategy_observe_update.py，事实层工具不碰 status）：8 策略各 4~7 实例，全 hypothesis→observed。**离线预检证明：A 臂包仍全 0——唯一剩余闸=strategy status hypothesis→verified（语义审查拍板项，已入任务单待拍板段）**；K4 复跑 pending 于该拍板（否则空臂对空臂）；channel_changed 收据标记+回归已就位（--channel-changed）。A05 记账：3 探针+48 放量调用全入 llm_calls（purpose=k2_extract_backfill）。
+
 > 2026-09-20 Codex：长篇总方案已定稿，单场景恢复与连续三场 CLI 试点完成（含 Codex 复核，第一场未重跑）；508 项测试通过，调用 / 收据 / 验收边界见 [Runtime 交接](runtime-handover-20260920.md) 与 [执行计划](plan.md)。
 
 > 2026-09-20 18:10 起全面审查：仍有 8 项 P1 / 3 项 P2，含盲评映射、训练分组、调用漏账、租约竞争及测试污染真实游标；另 1 项测试夹具问题审查期间已修复。最新 LG 593 passed / 1 项模型下载连接失败，Distiller 214 passed。原三场收据保留，详见 [全面审查报告](project-audit-20260920-1810.md)，修复前不扩为无人值守长篇或开训。

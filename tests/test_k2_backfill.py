@@ -229,3 +229,29 @@ def test_main_refusal_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["k2b", "--dry-run", "--limit", "0"])
     with pytest.raises(SystemExit, match="1"):
         k2b.main()
+
+
+def test_observe_update_fact_layer_only_and_idempotent():
+    """K2 收尾件（strategy_observe_update）：观察态=hypothesis→observed 需要
+    verified 实例 ≥1（事实层机械判据）；**status（语义审查拍板项）绝不许被
+    碰**；幂等；0 实例不动；dry-run 零库写。"""
+    import strategy_observe_update as SO
+    key = _seed(n_seg=1)
+    rep0 = SO.run(apply=False)                     # 抽取前：无实例不迁
+    assert all(r["strategy_key"] != key for r in rep0["detail"]), \
+        "无 verified 实例的策略不许被迁移"
+    with db.session() as s:
+        k2b.run_backfill(s, _FxOK(), limit=48, strategy_keys=(key,))
+    rep1 = SO.run(apply=False)
+    assert rep1["mode"] == "dry_run" and rep1["would_update"] >= 1
+    assert any(r["strategy_key"] == key and r["verified_instances"] == 1
+               for r in rep1["detail"]), rep1["detail"][:3]
+    rep2 = SO.run(apply=True)
+    assert rep2["applied"] >= 1
+    with db.session() as s:
+        st = (s.query(ExpressionStrategyV2)
+              .filter_by(strategy_key=key).one())
+        assert st.observation_status == "observed"
+        assert st.status == "hypothesis", "status 是拍板项，本工具不许动"
+    rep3 = SO.run(apply=True)
+    assert rep3["would_update"] == 0, "幂等：observed 的不再动"

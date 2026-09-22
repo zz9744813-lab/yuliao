@@ -120,7 +120,8 @@ class FxClient:
 
 
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
-               freeze: bool = False, n_scenes: int = 3) -> dict:
+               freeze: bool = False, n_scenes: int = 3,
+               channel_changed: bool = False) -> dict:
     """N 场（默认 3=SCENES；扩展场派生见 scenes_for）× 2 臂 + 四类产物
     （prose/packages/receipts/failures）+ skipped（断臂后未执行的后续场
     单列，不进 failures——C2/止损台账不被连锁幻影污染，2026-09-23 会审
@@ -185,7 +186,9 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                      "usage": {"calls": u.get("calls", 0),
                                "duration_ms": u.get("duration_ms", 0),
                                "tokens": u.get("tokens", 0)},
-                     "live": live})
+                     "live": live,
+                     # C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed
+                     "channel_changed": channel_changed})
             except Exception as exc:             # noqa: BLE001
                 failed_at[arm] = scene_id       # 断臂标记：本臂后续场 skip
                 # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
@@ -244,6 +247,10 @@ def main() -> None:
                     help="真实调用（拍板后）：K4_ALLOW_LIVE=1 + LLM_MODE=real")
     ap.add_argument("--writer-model", default="")
     ap.add_argument("--verifier-model", default="")
+    ap.add_argument("--channel-changed", action="store_true",
+                    dest="channel_changed",
+                    help="换通道真跑必报（C5 口径，证据 §3.3）：收据与产物"
+                         "标 channel_changed=true；同通道基线跑不带")
     a = ap.parse_args()
     if a.scenes < 1:
         raise SystemExit("--scenes 须为 ≥1 的整数")
@@ -269,9 +276,11 @@ def main() -> None:
             return store
         with db.session() as s:
             four = run_paired(factory, client, s, live=a.live,
-                              freeze=a.live, n_scenes=a.scenes)
+                              freeze=a.live, n_scenes=a.scenes,
+                              channel_changed=a.channel_changed)
         analysis = paired_analysis(four, scenes_for(a.scenes))
-        out = {"artifacts": four, "analysis": analysis, "live": a.live}
+        out = {"artifacts": four, "analysis": analysis, "live": a.live,
+               "channel_changed": a.channel_changed}
         print(json.dumps(out, ensure_ascii=False, indent=1))
         if a.out:
             d = Path(a.out)
