@@ -40,19 +40,23 @@ class ExtractBudget:
     calls: int = 0
     tokens: int = 0
 
-    def spend(self, tokens_in: int, tokens_out: int) -> None:
-        if self.calls >= self.max_calls or \
-                self.tokens + tokens_in + tokens_out > self.max_tokens:
+    def check(self) -> None:
+        """调用前闸（只查+计数，不记 token）：已到限即拒——
+        超限那次不许发起调用（花 token 前拒绝）。"""
+        if self.calls >= self.max_calls or self.tokens >= self.max_tokens:
             raise ExtractBudgetExceeded(
                 f"预算超限：calls {self.calls}/{self.max_calls}，"
-                f"tokens {self.tokens}+{tokens_in + tokens_out}>"
-                f"{self.max_tokens}——显式拒绝，已抽候选照实保留")
+                f"tokens {self.tokens}/{self.max_tokens}——显式拒绝，"
+                "已抽候选照实保留")
         self.calls += 1
+
+    def spend(self, tokens_in: int, tokens_out: int) -> None:
+        """调用后记实际 token（check 已计过调用数）。"""
         self.tokens += tokens_in + tokens_out
 
 
-REQUIRED_INSTANCE_FIELDS = ("strategy_id", "segment_id", "span_start",
-                            "span_end", "evidence_text", "observed_content")
+REQUIRED_MODEL_FIELDS = ("span_start", "span_end", "evidence_text",
+                        "observed_content")
 
 
 def gate_output(raw: dict, text: str, segment_id: str, strategy_id: str,
@@ -61,7 +65,7 @@ def gate_output(raw: dict, text: str, segment_id: str, strategy_id: str,
 
     status ∈ proposed（门全过）/ unverified（缺字段/越界/sha 不符——
     候选保留但绝不入 verified）。evidence sha 在门内重算（不信模型自报）。"""
-    miss = [k for k in REQUIRED_INSTANCE_FIELDS if not raw.get(k) and k != "evidence_text"]
+    miss = [k for k in REQUIRED_MODEL_FIELDS if raw.get(k) is None]   # 0 是合法 span，只查 None
     # span 合法性
     try:
         s0, s1 = int(raw.get("span_start", -1)), int(raw.get("span_end", -1))
@@ -101,12 +105,13 @@ def extract_segment(client, *, strategy_id: str, strategy_version: int,
     FixtureClient——拍板前任何脚本都不许传 True（回归钉死）。"""
     if not client:
         raise RuntimeError("client 未注入（离线骨架需要显式注入测试 client）")
-    budget.spend(0, 0)          # 预调用占位检查（超限在花 token 前拒）
+    budget.check()             # 调用前闸（超限在花 token 前拒）
     reply = client.invoke(role="extractor",
                          system="从文本中抽取策略实例（span+证据+观察）",
                          payload={"strategy_id": strategy_id, "text": text},
                          max_tokens=2000, timeout=60)
-    budget.spend(int(reply.get("tokens_in", 0)), int(reply.get("tokens_out", 0)))
+    budget.spend(int(reply.get("tokens_in", 0)),
+                 int(reply.get("tokens_out", 0)))
     import json
     try:
         raw = json.loads(reply["text"])
