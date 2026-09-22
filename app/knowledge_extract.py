@@ -93,6 +93,27 @@ def gate_evidence(clean: dict, text: str) -> str:
     return "rejected_evidence"
 
 
+def repair_span(raw: dict, text: str) -> dict:
+    """span 机械重定位（2026-09-23 探针实测教训）：中文字符计数是 LLM 的
+    已知弱项——模型能正确引用原文短语，但 span_start/end 常数错。证据纪律
+    不变：**只有 evidence_text 是 text 的逐字子串才可能通过**。本函数以
+    模型引用文本在 text 中的**首次精确出现**机械重算 offset（零猜测、
+    确定性）；引用不是精确子串 → 原样返回（输出门自会拦，不静默放行）。"""
+    ev = raw.get("evidence_text")
+    if not isinstance(ev, str) or not ev:
+        return raw
+    try:
+        s0, s1 = int(raw.get("span_start")), int(raw.get("span_end"))
+        if text[s0:s1] == ev:
+            return raw                      # 本来就精确，无需修
+    except (TypeError, ValueError):
+        pass
+    i = text.find(ev)
+    if i >= 0:
+        return {**raw, "span_start": i, "span_end": i + len(ev)}
+    return raw
+
+
 def extract_segment(client, *, strategy_id: str, strategy_version: int,
                    work_id: str, segment_id: str, text: str,
                    text_version: str, budget: ExtractBudget,
@@ -107,7 +128,14 @@ def extract_segment(client, *, strategy_id: str, strategy_version: int,
         raise RuntimeError("client 未注入（离线骨架需要显式注入测试 client）")
     budget.check()             # 调用前闸（超限在花 token 前拒）
     reply = client.invoke(role="extractor",
-                         system="从文本中抽取策略实例（span+证据+观察）",
+                         system=("从文本中抽取该策略的一个实例。只输出 JSON 对象，"
+                                 "字段与约束：span_start（整数，≥0，text 的字符"
+                                 "偏移）、span_end（整数，>span_start）、"
+                                 "evidence_text（字符串，必须**逐字等于** "
+                                 "text[span_start:span_end]，不得增删改一字）、"
+                                 "observed_content（≤500 字，描述该处如何体现"
+                                 "该策略）。若整段找不到该策略的实例，输出 "
+                                 '{"none": true}——不得虚构 span。'),
                          payload={"strategy_id": strategy_id, "text": text},
                          max_tokens=2000, timeout=60)
     budget.spend(int(reply.get("tokens_in", 0)),
@@ -117,6 +145,7 @@ def extract_segment(client, *, strategy_id: str, strategy_version: int,
         raw = json.loads(reply["text"])
     except (json.JSONDecodeError, KeyError, TypeError):
         return {"status": "unverified", "reason": "invalid_extraction_json"}
+    raw = repair_span(raw, text)     # 模型 offset 不信——以引用原文机械重定位
     clean, st = gate_output(raw, text, segment_id, strategy_id,
                             extractor_model=reply.get("actual_model", "unknown"))
     if st != "proposed":

@@ -125,3 +125,25 @@ def test_gate_evidence_single_caliber():
     clean2 = {"span_start": 0, "span_end": 8, "evidence_text": "别的内容"}
     assert KE.gate_evidence(clean2, TEXT) == "rejected_evidence"
     assert hasattr(K, "verify_instance_span")
+
+
+def test_repair_span_relocates_by_first_exact_occurrence():
+    """offset 不信、引用为准（2026-09-23 live 探针实测形态的回归）：模型
+    数错中文字符偏移时，以 evidence_text 在原文**首次精确出现**机械重算
+    span；本来精确的原样返回；非逐字子串不修（输出门自拦，不静默放行）。"""
+    text = "他站着没说话，灯花跳了一下。半晌他把茶盏搁回去。"
+    good = {"span_start": 0, "span_end": 5, "evidence_text": text[0:5]}
+    assert KE.repair_span(good, text) is good
+    # 探针实测形态：字段全对、引用真短语、偏移数错
+    bad = {"span_start": 19, "span_end": 28, "evidence_text": "灯花跳了一下",
+           "observed_content": "x"}
+    fixed = KE.repair_span(bad, text)
+    i = text.find("灯花跳了一下")
+    assert fixed["span_start"] == i
+    assert fixed["span_end"] == i + len("灯花跳了一下")
+    clean, st = KE.gate_output(fixed, text, "SEG-X", "ESV2-X", "fx")
+    assert st == "proposed" and clean["evidence_text"] == "灯花跳了一下"
+    # 模型改写了引用（非原文子串）→ 不修，输出门必须拦
+    lied = {"span_start": 0, "span_end": 5, "evidence_text": "他站着没说话呀"}
+    assert KE.repair_span(lied, text) == lied
+    assert KE.gate_output(lied, text, "SEG-X", "ESV2-X", "fx")[1] == "unverified"

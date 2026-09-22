@@ -194,8 +194,13 @@ def run_backfill(s, client, *, limit: int = DEFAULT_LIMIT, max_calls: int = 20,
             report["rejected_evidence"] += 1
         else:                           # unverified：只入报告（span 字段不全，无行可落）
             report["unverified"] += 1
+            raw = r.get("raw")
+            raw = raw if isinstance(raw, dict) else {}
+            reason = ("no_instance_claimed" if raw.get("none") is True
+                      else (r.get("reason") or status))
             unv.append({"strategy": st.strategy_key, "segment_id": seg.id,
-                        "reason": r.get("reason") or status})
+                        "reason": reason,
+                        "_raw_head": str(raw)[:200]})   # 模型原文截断入报告，不静默吞
     s.commit()                           # 断点/完成统一提交——候选不丢弃
     report["written"] = report["verified"] + report["rejected_evidence"]
     report["budget"] = {"calls": budget.calls, "tokens": budget.tokens,
