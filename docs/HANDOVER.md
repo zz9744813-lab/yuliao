@@ -6,6 +6,10 @@
 
 > **2026-09-22 20:4x 10 场路径零配额预演**：k4_paired_scenes.py 加 `--scenes N`（默认 3 口径零改动；s4 起派生 received 逐场+1，前置条件全真）；离线真跑 `--scenes 10` 落 out_k4_10/ 结构全过（10 场/20 收据 usage 三键恒在/10 包 n_techniques）、复跑拒覆盖（exit 1）、§6 五条核验命令实跑取证（P1=0/P2=0/C2=0/止损=0/① strategy_stats 只读 0 行=待 K2-A 放量）已钉进评估 §6.1；预演产物取证后已删、真跑落点留空；+5 回归（预算闸烧穿必抛不静默/main --scenes 10 拒覆盖/Budget 默认 6 钉死/scenes_for 派生纯函数/10 场 e2e），全量 761 例 exit 0。
 
+> **2026-09-22 22:55:33 通道复核（监管指令，一次最小真实调用）**：deepseek-v4.1-flash 经网关 107.172.138.14:3000 /chat/completions，max_tokens=1、prompt="1"、temperature=0，**HTTP 502，耗时 2.51s**。原始报错（RAW）：`{"error":{"message":"上游返回 401：<html>…<title>401 Authorization Required</title>…openresty…","type":"upstream_error","code":"upstream_401"}}`。**结论：通道未通，且失败态已从 402（余额不足）变为上游 401（鉴权拒绝）**——待拍板两选项（充值/换通道）之外新增事实：上游凭据本身疑似失效/被轮换，充值未必即通，需 集霸 侧先核中转上游凭据。按纪律未重试、未换通道、未加 channel_changed、未跑 K4 真跑。
+
+> **2026-09-22 23:1x Implicitness/Rhythm 子基准构题器（监管指令②④，全程零真实调用）**：benchmark_build.py 新增 implicitness_pair（白名单 9 类「定义即显式化」类型——EXPLICITIZE/SUBTEXT_ERASE/OVER_EXPLAIN/EMOTION_LABEL/PSYCHOLOGY_LABEL/LOGIC_CONNECTOR_INFLATION/ABSTRACT_SUMMARY/SEMANTIC_OVERCOMPLETION/NARRATOR_JUDGMENT，依据=controlled_corruption.TYPES.variable 原文定义）与 rhythm_pair（白名单 2 类：RHYTHM_FLATTEN/PARALLELISM_OVERUSE，定义即拉平节奏/句式），共享轴核 _build_axis_pairs；答案键=构造（answer=人类原文侧，零 LLM 判读）；闸门与既有构建器同一套 _eligible_pairs；默认离线零库写（--out 落 fixture JSON 拒既存），真库构建 --live 双闸 BENCH_ALLOW_LIVE=1 待拍板。真库取证：implicitness dry-run **126 题/28 段/9 类**（离线全量构造 A/B=72/54，真库集合数 0=零库写实证）；rhythm dry-run **18 题/14 段/2 类**。Pragmatics 不可建（卡点：18 类劣化类型定义无一承诺「语用违规」，三条出路均拍板项，见 docs/benchmark-subs-20260919.md 增补节）。docstring 状态表 human_vs_ai 过期行已更正（hvai-v1 545 题 BS-95651478c6dd）。回归：test_benchmark_subs.py 14 项全绿（implicitness 4 + rhythm 2 新增）。
+
 > 2026-09-20 Codex：长篇总方案已定稿，单场景恢复与连续三场 CLI 试点完成（含 Codex 复核，第一场未重跑）；508 项测试通过，调用 / 收据 / 验收边界见 [Runtime 交接](runtime-handover-20260920.md) 与 [执行计划](plan.md)。
 
 > 2026-09-20 18:10 起全面审查：仍有 8 项 P1 / 3 项 P2，含盲评映射、训练分组、调用漏账、租约竞争及测试污染真实游标；另 1 项测试夹具问题审查期间已修复。最新 LG 593 passed / 1 项模型下载连接失败，Distiller 214 passed。原三场收据保留，详见 [全面审查报告](project-audit-20260920-1810.md)，修复前不扩为无人值守长篇或开训。
