@@ -97,10 +97,29 @@ K2-A 实例放量（逐次记账+输出门+证据门已就位）→ K4 三场真
 | P1 | `$PY -c "import json;print(len(json.load(open('out_k4_10/k4_paired.json',encoding='utf-8'))['artifacts']['failures']))"` | `0` |
 | P2 | `$PY -c "import json;d=json.load(open('out_k4_10/k4_paired.json',encoding='utf-8'));print(sum(1 for p in d['artifacts']['packages'] if p.get('n_techniques',0)>=1))"` | `>= 2` |
 | C2 | 同 P1（failures 总数含 rollback_failed=true 条目） | `0` |
-| ①（strategies） | strategy_stats 快照查询（`unique_source_intervals`/`valid`） | 逐条按 §3 表核 |
+| ①（strategies） | `$PY -c "import sqlite3;con=sqlite3.connect('file:data/language_genome.db?mode=ro',uri=True);[print(r) for r in con.execute('SELECT strategy_id,unique_source_intervals,root_works,valid FROM strategy_stats ORDER BY strategy_id')]"`（mode=ro 只读纪律） | 逐条按 §3 表核（停策略先看 valid=N≥8） |
 | 总量止损 | `$PY -c "import json;d=json.load(open('out_k4_10/k4_paired.json',encoding='utf-8'));print(sum((r.get('usage') or {}).get('tokens') or 0 for r in d['artifacts']['receipts']))"` | `<= 8000000`（token） |
 
 核验由接手 agent 跑（不自证）；逐项结果落台账，任一不过 → 停止扩张报告。
+
+### 6.1 离线预演对照（2026-09-22，零配额，命令机械可跑性实跑证据）
+
+`--scenes 10`（FixtureClient，离线；预演产物取证后**已删**，`out_k4_10/`
+真跑落点仍为空）。期望列为**真跑口径**；离线数值只证命令与结构，不用于判定：
+
+| 判据 | 实跑输出 | 期望（真跑口径） |
+|---|---|---|
+| P1 | `0` | `0` |
+| P2 | `0`（真库现无匹配场景知识→空包；真跑前置=K2-A 放量先行，§5 顺序） | `>= 2` |
+| C2 | `0` | `0` |
+| ① | `0 行`（表/列已在：`strategy_stats` 含 `unique_source_intervals`/`root_works`/`valid`；行数随 K2-A 放量增长） | 按 §3 表逐条核 |
+| 总量止损 | `0`（fixture 零真实消耗；收据 `usage.tokens` 恒在、缺记=0） | `<= 8000000` |
+
+结构证据：场景数 **10**（s1–s10）、正文/收据各 **20**、A 臂包 **10**、
+分析行 10；收据 `usage` 三键恒在（calls/duration_ms/tokens）、包全含
+`n_techniques`；复跑同 `--out` → **拒**（exit 1「已存在」）。回归钉死：
+tests/test_k4_paired.py（scenes_for 派生前置全真 / 10 场 e2e / 预算闸
+烧穿必抛不静默 / main --scenes 10 拒覆盖 / Budget 默认 6）。
 
 ## 7. 产物落点（B 定稿）
 

@@ -281,6 +281,8 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   ① 给 deepseek 通道充值；或 ② 授权换通道——换通道必须标 channel_changed 并复核 C1（docs/K5-A_离线前置评估.md §2）。
   拍板后的一条命令（K4 三场真跑；跑完 K5-A 判据核验按评估 §6 命令表，扩 10 场产物落点 out_k4_10/）：
   `K4_ALLOW_LIVE=1 F:/kelaode/Data/Agents/zqibcc8w9/tools/Python311/python.exe scripts/k4_paired_scenes.py --live --writer-model m1 --verifier-model m2 --out out_k4_3`
+  10 场扩展（判据触发后；离线预演 2026-09-22 已通，见评估 §6.1，产物取证后已删、落点留空）：
+  `K4_ALLOW_LIVE=1 F:/kelaode/Data/Agents/zqibcc8w9/tools/Python311/python.exe scripts/k4_paired_scenes.py --live --scenes 10 --writer-model m1 --verifier-model m2 --out out_k4_10`
   K2-A 实例放量同在拍板后经网关真跑（app/knowledge_extract.py 三道门已就位），不在此命令链内。
 
 每项交接固定记录：输入快照和代码版本、允许修改范围、产物路径、验证命令与原始结果、未通过项、请求/用量/未知记录、下一步和停止条件。交付时区分“代码存在”“契约通过”“真实试点完成”“特定质量收益成立”。
