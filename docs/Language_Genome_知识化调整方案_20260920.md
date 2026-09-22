@@ -275,7 +275,8 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   【2026-09-22 收口 8173225】knowledge_v2.py 桥：首 prepare 前查冻（query+freeze_package）、同任务恢复复用 job request 冻结包不重查（回归：query 恰一次）；同幂等键异输入→idempotency_input_conflict；跨书 validate_plan 双闸；unavailable/unsupported→RuntimeFault 不留半成品 job；empty→零技巧包诚实跑；契约版本协商 scene-knowledge/2（v1 收据不动可读）；包内无原文；手选 genome_snapshot 直传兼容、收据不重写。验收点 6 例全测全离线（零模型调用）；全量绿退出码 0。会审 qwen PASS（reviews/language-genome-81732254fc.md）。
 - [~] K4-A：完成 A09/A10 验收，在新实验中做三场配对比较；交付正文、包、状态/成本收据和失败记录。
   【2026-09-22 离线预置 93981b7，会审过】scripts/k4_paired_scenes.py：3 场×2 臂独立平行世界驱动（A 臂 v2 冻结包/B 臂空包对照、idem 臂后缀）、四类产物（prose/packages/receipts/failures）+ 结构分析不判质量；离线零库写（freeze=False）；--live 双闸（K4_ALLOW_LIVE=1）+ 一条命令真跑；paired_cards 7 张（dev4/acc3 期望手写）。A09/A10 验收前置已修（f467a6/faac7e6）。**三场真跑仍 blocked（402 资金墙待拍板）。**
-- [ ] K5-A：依据真实收益与复核负担决定是否扩到 10 场、补来源或停止某条策略；之后再评估拆仓。
+- [~] K5-A：依据真实收益与复核负担决定是否扩到 10 场、补来源或停止某条策略；之后再评估拆仓。
+  【2026-09-22 离线前置评估落地 ebd0e62】docs/K5-A_离线前置评估.md：机械判据表（P0-P3 前提 + C1-C5 扩场判据 + 停策略三条件）+ 成本模型（每臂 2 调用/最坏 8；10 场 40~160 调用、≤1,600 万 token 上限）+ 402 blocked 注记（充值/换通道两选项，换通道须标 channel_changed 并复核 C1）。**判据核验等 K4 真跑数据（blocked 待拍板）。**
 
 每项交接固定记录：输入快照和代码版本、允许修改范围、产物路径、验证命令与原始结果、未通过项、请求/用量/未知记录、下一步和停止条件。交付时区分“代码存在”“契约通过”“真实试点完成”“特定质量收益成立”。
 
