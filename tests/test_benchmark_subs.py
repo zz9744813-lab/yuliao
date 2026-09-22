@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -245,3 +246,109 @@ def test_length_balanced_build_balances_sides(tmp_path):
     kb = sorted((x.segment_id, x.answer) for x in
                 db.session().query(BenchmarkItem).filter_by(set_id=b["set_id"]).all())
     assert ka == kb
+
+
+# ── implicitness_pair（§14 Implicitness 构题器，2026-09-22 离线预置）──
+def _seg_id_of(seg_key: str):
+    with db.session() as s:
+        seg = (s.query(Segment).join(Work, Work.id == Segment.work_id)
+               .filter(Work.title == f"t-sub-{seg_key}").first())
+        assert seg is not None, f"自建段 t-sub-{seg_key} 没找到"
+        return seg.id
+
+
+def test_implicitness_gate_whitelist_zero_write(tmp_path):
+    """① 闸门一致性 + 白名单 + 默认零库写：与既有构建器**同一套**
+    _eligible_pairs（病句/源坏/非基准段全拒）+ 只收显式化白名单
+    （干净的非白名单类型不入：定义不声称显式化；控制臂永不入）；
+    离线默认不建集合（零库写），--out 拒既存目录。"""
+    _seed_pair("i1", "EXPLICITIZE")
+    _seed_pair("i2", "RHYTHM_FLATTEN")                      # 干净但不在白名单
+    _seed_pair("i3", "SUBTEXT_ERASE", ungrammatical=True)   # 白名单内但病句
+    _seed_pair("i4", "EMOTION_LABEL", src_ok=False)        # 白名单内但源坏
+    _seed_pair("i5", "NEUTRAL_PARAPHRASE")                  # 控制臂
+    out = BB.build_implicitness_pairs("imp-gate", version=1, seed=7,
+                                     out_dir=str(tmp_path / "imp_out"))
+    assert out["live"] is False and out["n_items"] >= 1
+    art = json.loads((tmp_path / "imp_out" / "implicitness_items.json")
+                     .read_text(encoding="utf-8"))
+    got = {it["segment_id"] for it in art["items"]}
+    assert _seg_id_of("i1") in got, "白名单内的干净对应入集"
+    bad = {_seg_id_of(k) for k in ("i2", "i3", "i4", "i5")}
+    assert not (got & bad), f"闸门或白名单失效：{got & bad}"
+    assert all(it["meta"]["corruption_type"] in BB.IMPLICITNESS_INCLUDED_TYPES
+               for it in art["items"])
+    with db.session() as s:
+        assert s.query(BB.BenchmarkSet).filter_by(
+            kind="implicitness_pair").count() == 0, "默认离线零库写被破坏"
+    with pytest.raises(SystemExit, match="已存在"):
+        BB.build_implicitness_pairs("imp-gate2", version=1, seed=7,
+                                   out_dir=str(tmp_path / "imp_out"))
+
+
+def test_implicitness_answer_key_constructive_frozen(tmp_path):
+    """② 答案键构造性 + ③ 冻结原文：answer 恒指人类原文侧（冻结的段文本
+    text_clean），另一侧恒为劣化变体——零 LLM 判读参与；同种子重建同位置
+    同答案（可复现）。"""
+    _seed_pair("i6", "OVER_EXPLAIN")
+    _seed_pair("i7", "NARRATOR_JUDGMENT")
+    BB.build_implicitness_pairs("imp-key", version=1, seed=42,
+                                out_dir=str(tmp_path / "a"))
+    BB.build_implicitness_pairs("imp-key2", version=1, seed=42,
+                                out_dir=str(tmp_path / "b"))
+    a1 = json.loads((tmp_path / "a" / "implicitness_items.json")
+                    .read_text(encoding="utf-8"))
+    a2 = json.loads((tmp_path / "b" / "implicitness_items.json")
+                    .read_text(encoding="utf-8"))
+    assert a1["items"], "题池为空——上游种子或闸门有问题"
+    with db.session() as s:
+        frozen = {seg.id: (seg.text_clean or seg.text)
+                  for seg in s.query(Segment).filter(Segment.role == "benchmark").all()}
+    ids = {it["segment_id"] for it in a1["items"]}
+    assert {_seg_id_of("i6"), _seg_id_of("i7")} <= ids, "本轮白名单种子未入集"
+    for it in a1["items"]:
+        human = it["text_a"] if it["answer"] == "A" else it["text_b"]
+        variant = it["text_b"] if it["answer"] == "A" else it["text_a"]
+        orig = frozen[it["segment_id"]]
+        assert human == orig, "答案侧必须是该段冻结原文全文（text_clean），不是引用"
+        assert variant and variant != orig, "另一侧必须是该段的劣化变体全文"
+    key = [(it["segment_id"], it["answer"], it["text_a"], it["text_b"])
+           for it in a1["items"]]
+    assert key == [(it["segment_id"], it["answer"], it["text_a"], it["text_b"])
+                   for it in a2["items"]], "同种子重建位置/答案不同——可复现被破坏"
+    assert a1["spec"]["answer_semantics"].startswith("answer=人类原文侧")
+
+
+def test_implicitness_live_refuses_overwrite():
+    """④ 拒覆盖：live 构建真建集合；同名同 kind 再建 → SystemExit；
+    离线模式只报 name_conflict 不炸。"""
+    o = BB.build_implicitness_pairs("imp-live", version=1, seed=7, live=True)
+    assert o["live"] is True and o["items"] >= 1
+    with db.session() as s:
+        st = s.get(BB.BenchmarkSet, o["set_id"])
+        assert st.kind == "implicitness_pair"
+        assert s.query(BB.BenchmarkItem).filter_by(set_id=st.id).count() \
+            == o["items"], "live 落库条目数与返回不一致"
+    with pytest.raises(SystemExit, match="拒覆盖"):
+        BB.build_implicitness_pairs("imp-live", version=1, seed=7, live=True)
+    off = BB.build_implicitness_pairs("imp-live", version=1, seed=7)
+    assert off["name_conflict"] is not None, "离线模式必须报告同名冲突（不炸）"
+
+
+def test_implicitness_main_double_gate(tmp_path, monkeypatch):
+    """main 双闸：--live 无 BENCH_ALLOW_LIVE=1 → 拒；有闸无 --live → 离线
+    落 fixture 文件；同 --out 复跑 → 拒既存目录（CLI 第二道保险）。"""
+    out = tmp_path / "imp_cli"
+    monkeypatch.delenv("BENCH_ALLOW_LIVE", raising=False)
+    monkeypatch.setattr(sys, "argv", ["bb", "--kind", "implicitness_pair",
+                                      "--name", "imp-cli", "--live",
+                                      "--out", str(out)])
+    with pytest.raises(SystemExit, match="BENCH_ALLOW_LIVE"):
+        BB.main()
+    monkeypatch.setenv("BENCH_ALLOW_LIVE", "1")
+    monkeypatch.setattr(sys, "argv", ["bb", "--kind", "implicitness_pair",
+                                      "--name", "imp-cli", "--out", str(out)])
+    BB.main()                       # 离线零库写 → 只落 fixture 文件
+    assert (out / "implicitness_items.json").exists()
+    with pytest.raises(SystemExit, match="已存在"):
+        BB.main()
