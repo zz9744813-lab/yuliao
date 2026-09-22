@@ -1,0 +1,3 @@
+{"card_id": "acc-01-budget-token-ceiling", "kind": "extract",
+ "input": {"max_calls": 10, "max_tokens": 25},
+ "expected": {"status": "blocked", "error_contains": "预算超限"}}

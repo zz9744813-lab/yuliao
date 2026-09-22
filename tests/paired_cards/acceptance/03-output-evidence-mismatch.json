@@ -1,0 +1,4 @@
+{"card_id": "acc-03-evidence-mismatch", "kind": "extract",
+ "input": {"max_calls": 10, "payload": {"span_start": 0, "span_end": 8,
+   "evidence_text": "根本不是这句", "observed_content": "x"}},
+ "expected": {"status": "unverified"}}

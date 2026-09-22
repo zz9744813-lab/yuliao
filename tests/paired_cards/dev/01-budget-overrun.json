@@ -1,0 +1,3 @@
+{"card_id": "dev-01-budget-overrun", "kind": "extract",
+ "input": {"max_calls": 1, "bad": null},
+ "expected": {"status": "blocked", "error_contains": "预算超限"}}

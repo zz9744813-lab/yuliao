@@ -82,12 +82,21 @@ class FxClient:
                 "finish_reason": "stop"}
 
 
-def run_paired(store: Store, client, lg_session, *, live: bool = False) -> dict:
-    """3 场 × 2 臂 + 四类产物 + 结构性配对分析（不判质量）。"""
+def run_paired(store_factory, client, lg_session, *, live: bool = False) -> dict:
+    """3 场 × 2 臂 + 四类产物 + 结构性配对分析（不判质量）。
+
+    store_factory() 每臂一个独立 Store/世界（配对=平行世界：A 臂提交后
+    revision 前进，同 revision 的 B 臂在同世界会 world_revision_conflict
+    ——那是正确拒绝，不是 bug；独立世界才是配对比较的诚实结构）。
+    同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem 键也各带后缀。"""
     four = {"prose": [], "packages": [], "receipts": [], "failures": []}
+    # 每臂一个独立世界（不是每场）：臂内 3 场共享该臂世界，revision
+    # 逐场递增（SCENES 的 rev 就是按臂内累计口径写的）
+    stores = {arm: store_factory() for arm in ("A", "B")}
     for (scene_id, rev, before, after, idem) in SCENES:
-        plan = build_plan(scene_id, rev, before, after, idem)
         for arm in ("A", "B"):
+            store = stores[arm]
+            plan = build_plan(scene_id, rev, before, after, idem + f"-{arm}")
             try:
                 if arm == "A":
                     pkg, meta = frozen_package_for_scene(

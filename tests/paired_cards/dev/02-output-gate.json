@@ -1,0 +1,3 @@
+{"card_id": "dev-02-output-gate", "kind": "extract",
+ "input": {"max_calls": 10, "payload": {"span_start": 5, "span_end": 3}},
+ "expected": {"status": "unverified"}}
