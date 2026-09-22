@@ -276,7 +276,9 @@ def test_stats_rebuild_projection_and_mirror_collapse():
                  .join(Work, Work.id == Segment.work_id)
                  .filter(Work.title == f"t-k2b-{key}").one())
         w_a = seg_a.work_id
-        w_m = Work(title=f"t-k2b-mirror-{key}", source="test:k2b")
+        w_m = Work(title=f"t-k2b-mirror-{key}", source="test:k2b",
+                   v2_of=w_a)   # 镜像身份只认 works.v2_of（§4.1 明令；
+                                # 无 v2_of 的注册行 canonical 指他行=清树违规）
         s.add(w_m)
         s.flush()
         seg_m = Segment(work_id=w_m.id, ordinal=0, text=TEXT, text_clean=TEXT,
