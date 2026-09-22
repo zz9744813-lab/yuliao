@@ -16,6 +16,8 @@
 
 > **2026-09-23 03:0x K2-A live 探针→放量首轮收官 + 新拍板项（status 语义审查）**：通道 mc22（env 注入密钥；**传输层无 TLS=明文 http**——通道自身限制，TLS 终端待主控侧，如实记）。探针三轮：九字薄 prompt→unverified → 显式 JSON 契约→unverified（offset 数错，模型原文入报告诊断）→ **repair_span 机械重定位（LLM 中文字符计数不可信，以引用在原文首次精确出现重算；非逐字子串不修由门拦）→ verified**。放量 48 对=48 调用 **12,264 tokens**（预算闸未触顶），**44 条 verified 实例落库**（+探针 1=45），4 条 unverified 全为改写引用被输出门拦（零静默）。观察态迁移（scripts/strategy_observe_update.py，事实层工具不碰 status）：8 策略各 4~7 实例，全 hypothesis→observed。**离线预检证明：A 臂包仍全 0——唯一剩余闸=strategy status hypothesis→verified（语义审查拍板项，已入任务单待拍板段）**；K4 复跑 pending 于该拍板（否则空臂对空臂）；channel_changed 收据标记+回归已就位（--channel-changed）。A05 记账：3 探针+48 放量调用全入 llm_calls（purpose=k2_extract_backfill）。
 
+> **2026-09-23 03:4x K2 二轮放量（跨作品）+ strategy_stats 投影落地**：①段序改 (ordinal, work_id) 跨作品交错（首轮实测教训：work-major 时 48 对全落一部作品、root_works 恒 1）+回归；②第二轮放量 48 对（99 调用累计 / **26,938 tokens**）：+37 verified（**累计 82**），11 条模型诚实 none 逃逸（no_instance_claimed 入报告）；③顺带修驱动 rejected 落库枚举 bug（rejected_evidence 是 gate 词汇，行状态须写库契约枚举 rejected——真跑未触发，测试钉死）；④strategy_stats_rebuild.py 补齐 K1-B 投影缺失写入方（重建即替换，fingerprint 绑实例快照，镜像经 canonical 回连根不重复计）：**8 条策略全 root_works=3 / valid 9~12 / 唯一源区间 9~12——观察层复现判据（≥2 根作品）全部成立**，§6 ① 判据命令现有实数可核。拍板项证据已强化进任务单。
+
 > 2026-09-20 Codex：长篇总方案已定稿，单场景恢复与连续三场 CLI 试点完成（含 Codex 复核，第一场未重跑）；508 项测试通过，调用 / 收据 / 验收边界见 [Runtime 交接](runtime-handover-20260920.md) 与 [执行计划](plan.md)。
 
 > 2026-09-20 18:10 起全面审查：仍有 8 项 P1 / 3 项 P2，含盲评映射、训练分组、调用漏账、租约竞争及测试污染真实游标；另 1 项测试夹具问题审查期间已修复。最新 LG 593 passed / 1 项模型下载连接失败，Distiller 214 passed。原三场收据保留，详见 [全面审查报告](project-audit-20260920-1810.md)，修复前不扩为无人值守长篇或开训。

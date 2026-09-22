@@ -174,7 +174,10 @@ def test_rejected_evidence_branch_persisted_and_idempotent(monkeypatch):
         rep = k2b.run_backfill(s, _FxOK(), limit=48, strategy_keys=(key,))
     assert rep["rejected_evidence"] == 1 and rep["written"] == 1
     rows = _rows(key)
-    assert len(rows) == 1 and rows[0].status == "rejected_evidence"
+    assert len(rows) == 1 and rows[0].status == "rejected", \
+        "行状态必须是库契约枚举值 rejected（gate 词汇 rejected_evidence 只留报告层）"
+    from app import knowledge as _K
+    assert rows[0].status in _K.INSTANCE_STATUS
     with db.session() as s:             # rejected 也算已处理（幂等位占用）
         rep2 = k2b.run_backfill(s, _FxOK(), limit=48, strategy_keys=(key,))
     assert rep2["attempted"] == 0 and rep2["skips"]["skipped_done"] == 1
@@ -255,3 +258,105 @@ def test_observe_update_fact_layer_only_and_idempotent():
         assert st.status == "hypothesis", "status 是拍板项，本工具不许动"
     rep3 = SO.run(apply=True)
     assert rep3["would_update"] == 0, "幂等：observed 的不再动"
+
+
+def test_stats_rebuild_projection_and_mirror_collapse():
+    """K1-B 投影重建（strategy_stats_rebuild，缺失写入方补齐）：verified 才是
+    独立证据；镜像经 canonical 回连同根（root_works 只认根）；
+    unique_source_intervals=去重 (根, evidence_sha256)——重切段/重复抽取
+    不重复计；dry-run 零库写；重建即替换不堆快照；fingerprint 确定性。"""
+    import hashlib as _h
+    import strategy_stats_rebuild as SS
+    from app.models import StrategyStats
+    key = _seed(n_seg=1)                     # 作品 A（根=自身）
+    with db.session() as s:
+        st = (s.query(ExpressionStrategyV2)
+              .filter_by(strategy_key=key).one())
+        seg_a = (s.query(Segment).filter_by(role="benchmark")
+                 .join(Work, Work.id == Segment.work_id)
+                 .filter(Work.title == f"t-k2b-{key}").one())
+        w_a = seg_a.work_id
+        w_m = Work(title=f"t-k2b-mirror-{key}", source="test:k2b")
+        s.add(w_m)
+        s.flush()
+        seg_m = Segment(work_id=w_m.id, ordinal=0, text=TEXT, text_clean=TEXT,
+                        role="benchmark", n_chars=len(TEXT), n_sentences=1,
+                        integrity='{"src_ok": true}')
+        s.add(seg_m)
+        s.flush()
+        import register_work_sources as REG
+        sha_m, _ = REG._work_sha256(s, w_m.id)
+        s.add(WorkSource(work_id=w_m.id, canonical_work_id=w_a,
+                         source_type="fixture", text_version=f"tv-m-{key}",
+                         text_sha256=sha_m, purpose_basis="mirror",
+                         identity_purposes=["research"], license_purposes=[],
+                         license_basis="seed", metadata_status="verified",
+                         metadata_basis="seed"))
+
+        def _inst(seg, s0, s1):
+            ev = TEXT[s0:s1]
+            s.add(StrategyInstance(
+                strategy_id=st.id, strategy_version=st.version,
+                work_id=seg.work_id, segment_id=seg.id, text_version="tv",
+                span_start=s0, span_end=s1, evidence_text=ev,
+                evidence_sha256=_h.sha256(ev.encode()).hexdigest(),
+                observed_content="x", extractor_model="fx", status="verified"))
+        _inst(seg_a, 0, 8)
+        _inst(seg_a, 8, 16)
+        _inst(seg_m, 0, 8)       # 与 seg_a(0,8) 同 sha——镜像重复，不重复计
+        _inst(seg_m, 16, 24)     # 不同段原文——计
+        s.commit()
+    rep = SS.run(apply=False)
+    assert rep["mode"] == "dry_run"
+    mine = [r for r in rep["rows"] if r["strategy_key"] == key][0]
+    assert mine["root_works"] == 1, "镜像经 canonical 回连同根，只认 1 个根"
+    assert mine["unique_source_intervals"] == 3, mine
+    assert mine["valid"] == 4 and mine["attempts"] == 4 and mine["missing"] == 0
+    assert list(mine["by_root_work"].values()) == [4]
+    rep2 = SS.run(apply=True)
+    assert rep2["applied"] >= 1
+    with db.session() as s:
+        row = (s.query(StrategyStats)
+               .filter_by(strategy_id=mine["strategy_id"]).one())
+        assert row.unique_source_intervals == 3 and row.root_works == 1
+        assert row.valid == 4
+    rep3 = SS.run(apply=True)   # 重建即替换：同数、同 fingerprint、不堆快照
+    mine3 = [r for r in rep3["rows"] if r["strategy_key"] == key][0]
+    assert mine3["data_fingerprint"] == mine["data_fingerprint"]
+    with db.session() as s:
+        assert s.query(StrategyStats).filter_by(
+            strategy_id=mine["strategy_id"]).count() == 1
+
+
+def test_queues_interleave_works_not_work_major():
+    """段序 (ordinal, work_id) 跨作品交错（2026-09-23 首轮放量实测教训：
+    work-major 时限量抽取全落一部作品，root_works 恒 1、复现证据出不来）。
+    断言取队列头 4 对：全在 ordinal 0 上（ordinal-major）且跨 ≥2 部作品
+    ——抗共享库残留的确定性口径。"""
+    ka = _seed(n_seg=2, scope="UNCERTAIN")
+    with db.session() as s:
+        w_b = Work(title=f"t-k2b-second-{ka}", source="test:k2b")
+        s.add(w_b)
+        s.flush()
+        for i in range(2):
+            s.add(Segment(work_id=w_b.id, ordinal=i, text=TEXT,
+                          text_clean=TEXT, role="benchmark",
+                          n_chars=len(TEXT), n_sentences=1,
+                          integrity='{"src_ok": true}'))
+        s.flush()
+        import register_work_sources as REG
+        sha, _ = REG._work_sha256(s, w_b.id)
+        s.add(WorkSource(work_id=w_b.id, canonical_work_id=w_b.id,
+                         source_type="fixture", text_version=f"tv-2nd-{ka}",
+                         text_sha256=sha, purpose_basis="second",
+                         identity_purposes=["research"], license_purposes=[],
+                         license_basis="seed", metadata_status="verified",
+                         metadata_basis="seed"))
+        s.commit()
+        queues, _stats = k2b.build_queues(s, strategy_keys=(ka,))
+        st_id = next(iter(queues))
+        head = queues[st_id][:4]
+        assert [it["segment"].ordinal for it in head] == [0, 0, 0, 0], \
+            "ordinal-major：队列头必须先打完各作品的同序段"
+        assert len({it["segment"].work_id for it in head}) >= 2, \
+            "限量头几对必须已跨作品——单作品垄断=复现证据出不来"

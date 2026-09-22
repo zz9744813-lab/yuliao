@@ -50,10 +50,14 @@ DEFAULT_LIMIT = 48
 
 
 def eligible_segments(s) -> list:
-    """试点段宇宙：benchmark + src_ok + text_clean 非空，确定性排序。"""
+    """试点段宇宙：benchmark + src_ok + text_clean 非空。
+    排序=(ordinal, work_id) 跨作品交错——轮转在策略间公平、段序在作品间
+    交错，限量抽取才能尽早覆盖多部作品（跨作品复现证据，2026-09-23 首轮
+    实测教训：按 (work_id, ordinal) 排序时 48 对全落在第一部作品，
+    root_works 恒 1，复现证据出不来）。确定性排序，重跑同序。"""
     rows = []
     for seg in (s.query(Segment).filter(Segment.role == "benchmark")
-                .order_by(Segment.work_id, Segment.ordinal).all()):
+                .order_by(Segment.ordinal, Segment.work_id).all()):
         try:
             integ = json.loads(seg.integrity or "{}")
         except Exception:                                      # noqa: BLE001
@@ -190,7 +194,9 @@ def run_backfill(s, client, *, limit: int = DEFAULT_LIMIT, max_calls: int = 20,
             _persist(s, item, r, "verified")
             report["verified"] += 1
         elif status == "rejected_evidence":
-            _persist(s, item, r, "rejected_evidence")
+            # 落库枚举=INSTANCE_STATUS{proposed,verified,rejected}（K 契约）；
+            # 模块报告口径保留 rejected_evidence（gate 词汇），行状态写枚举值
+            _persist(s, item, r, "rejected")
             report["rejected_evidence"] += 1
         else:                           # unverified：只入报告（span 字段不全，无行可落）
             report["unverified"] += 1

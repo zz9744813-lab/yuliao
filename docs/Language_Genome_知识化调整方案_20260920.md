@@ -285,6 +285,7 @@ A01 修复/迁移是重新依赖偏好标签的前置；A02 历史指标重算�
   `K2_ALLOW_LIVE=1 LG_GATEWAY_BASE_URL=<mc22 网关> <PY> scripts/k2_extract_backfill.py --live --extractor-model deepseek-v4.1-flash --limit 48`
   （密钥经 env 安全注入不入命令行——证据文件 §4 整改版口径；LG_LLM_MODE=real 为前置）
   ⏸ **新拍板项（status 语义审查——C3 现在的唯一剩余闸，放量实测发现）**：查询服务只服务 status=verified + observation_status∈{observed,replicated} 的策略（K3-A 隔离设计）。8 条 legacy 策略 status 全=hypothesis（迁移纪律明令不自动晋升）。放量已证其**在语料中被观察到**（45 条机械可核对 verified 实例，每策略 4~7 条；observation_status 已按事实层机械迁移到 observed，status 未动）；hypothesis→verified 是**语义审查判定**（抽象操作本身是否成立），8 条均为 legacy LLM 聚纳归纳，需 集霸 逐条裁定或授权审查席裁定。**K4 复跑 pending 于此**（离线预检：A 臂包仍全 0，跑了=空臂对空臂 C3 必不过；channel_changed 收据标记+回归已就位，拍板后一条命令接通）。
+  【2026-09-23 拍板证据强化（第二轮放量+投影重建）】第二轮跨作品交错放量（段序改 (ordinal, work_id)）+37 verified（累计 **82**，另有 11 条模型诚实 none 逃逸）；strategy_stats 投影重建（缺失写入方补齐：scripts/strategy_stats_rebuild.py）：**8 条策略全部 root_works=3、valid 9~12、唯一源区间 9~12**——观察层复现判据（同一 strategy_key 在 ≥2 根作品有 verified 实例）对 8 条全部成立；多数已过 N≥8 样本下限。累计 99 调用 / 26,938 tokens（A05 记账 purpose=k2_extract_backfill）。replicated 态需先冻结假设（K1-B 契约），后置。
   拍板后的一条命令（K4 三场真跑；跑完 K5-A 判据核验按评估 §6 命令表，扩 10 场产物落点 out_k4_10/）：
   `K4_ALLOW_LIVE=1 F:/kelaode/Data/Agents/zqibcc8w9/tools/Python311/python.exe scripts/k4_paired_scenes.py --live --writer-model m1 --verifier-model m2 --out out_k4_3`
   10 场扩展（判据触发后；离线预演 2026-09-22 已通，见评估 §6.1，产物取证后已删、落点留空）：
