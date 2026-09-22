@@ -1,6 +1,6 @@
 # K5-A 离线前置评估：扩到 10 场的判据与成本模型（草案）
 
-版本：v1/1（2026-09-22 定稿，A3/A5/A6 修正并入）· 零配额（未跑任何真实模型调用；K4 三场真跑仍
+版本：v1/2（2026-09-22 定稿；A3/A5/A6 + 会审二轮 B1/B2/B4/B8 修正并入）· 零配额（未跑任何真实模型调用；K4 三场真跑仍
 blocked，见文末）· 对应方案 §8 K5 行 + §9 K5-A 任务单。
 
 本文件把「扩到 10 场 / 补源 / 停某策略 / 停扩张」从主观判断改成
@@ -47,21 +47,27 @@ blocked，见文末）· 对应方案 §8 K5 行 + §9 K5-A 任务单。
 ## 4. 成本模型（每场每臂 → 10 场上限）
 
 - 实测基线（离线 FixtureClient 口径，调用次数结构）：每臂 2 次调用
-  （writer 1 + verifier 1）；含改稿上限 3 轮 → **最坏 8 调用/臂**
+  （writer 1 + verifier 1）；含改稿上限 3 轮，**结构性上限 8 调用/臂**；
+  运行期预算闸 `Budget.max_calls=6`（契约默认值，runner 按
+  `count >= budget.max_calls` 触顶）先于结构上限生效。
+  **机械推导：最坏/臂 = min(结构 8, 预算 6) = 6**
   （A10 修复后核验工件缺陷走有上限返修，不再烧 Writer 额度）。
-- 10 场 × 2 臂 = **正常 40 调用；最坏 160 调用**。
+- 10 场 × 2 臂 = **正常 40 调用；最坏 10 × 2 × 6 = 120 调用**。
 - Token 口径（A3 修正：口径=**每次调用**约 4~6 万 input token——
   单场全上下文每次都整段送入；此前把「每臂」当基数多乘了轮数，高 4~5 倍）：
   - 推导式（机械复核）：`总token = 调用数 × per_call_input`；
     `per_call_input ≈ 4~6 万`（校准史实测口径）
   - 正常路径：10 场 × 2 臂 × 2 调用 = 40 次 → **160 ~ 240 万 token**
-  - 最坏路径：10 场 × 2 臂 × 6 调用（Budget.max_calls=6 上限）= 120 次
+  - 最坏路径：10 场 × 2 臂 × 6 调用 = 120 次
     → **480 ~ 720 万 token**（output ≤0.3 万/次，含 10% 余量 ≤800 万）
-- **总量止损线：800 万 token**（按重算最坏上限设；此前 1,600 万由
-  膨胀值推得，防护实际失效偏晚）。超线 → 停扩张，报告实耗。
-- 超预算防护：k4_paired_scenes 逐场跑，`Budget.max_calls`（契约
-  20 上限）在 10 场口径下已覆盖最坏 8/臂；任一场超预算 → failures
-  记 budget（不静默）；总量超 1,600 万 → 停扩张，报告实耗。
+- **总量止损线：800 万 token**，高于合法最坏上限 720 万——合法路径
+  不击穿，命中即成本模型失真信号 → 停扩张，报告实耗（此前 1,600 万
+  由膨胀值推得，防护实际失效偏晚，A3 已废）。
+- 超预算防护（自洽约束，机械可核验）：k4_paired_scenes 逐场跑，
+  **运行口径 Budget.max_calls 固定 6，不许上调**——上调到 7 即
+  最坏 140 次 × 6 万 = 840 万 > 800 万止损线，自洽破坏；契约字段
+  允许域 le=20 只是合法取值域，不作预算口径。任一场超预算 →
+  failures 记 budget（不静默）；总量超 **800 万** → 停扩张，报告实耗。
 - 拆仓评估：**10 场判据过了才启动**（方案 K5：拆仓后置）。
 
 ## 5. blocked 注记（待集霸拍板）
@@ -75,20 +81,24 @@ kimi 探针正常=402 仅 deepseek 单通道）。两个选项：
    模型基线，K4/10 场收据须标 channel_changed，C1 判据须复核。
 
 拍板前不发起任何真实模型调用（现行纪律）；拍板后执行顺序：
-K2-A 实例放量（逐次记账+输出门+证据门已就位）→ K4 三场真跑（见下方
-一条命令）→ 本表判据逐项核验 → 扩/停报告。
+K2-A 实例放量（逐次记账+输出门+证据门已就位）→ K4 三场真跑（一条
+命令已写死于任务单《知识化调整方案_20260920》§9 末「待拍板清单」段）
+→ 本表判据逐项核验 → 扩/停报告。
 
 ## 6. 判据核验命令（B 定稿：凡可机械核验的给命令与期望输出）
 
-设 10 场真跑产物在 `out10/k4_paired.json`（P3 前提下生成）：
+设 10 场真跑产物在 `out_k4_10/k4_paired.json`（P3 前提下生成；3 场真跑
+同结构验于 `out_k4_3/k4_paired.json`）。本机无 jq——核验命令统一用
+项目解释器（Git Bash 口径，先设
+`PY=F:/kelaode/Data/Agents/zqibcc8w9/tools/Python311/python.exe`）：
 
-| 判据 | 核验命令（项目解释器） | 期望输出 |
+| 判据 | 核验命令 | 期望输出 |
 |---|---|---|
-| P1 | `jq '.artifacts.failures | length' out10/k4_paired.json` | `0` |
-| P2 | `jq '[.artifacts.packages[] | select(.n_techniques>=1)] | length' out10/k4_paired.json` | `>= 2` |
-| C2 | 同 P1 | `0`（含 rollback_failed=true 条目也为 0） |
+| P1 | `$PY -c "import json;print(len(json.load(open('out_k4_10/k4_paired.json',encoding='utf-8'))['artifacts']['failures']))"` | `0` |
+| P2 | `$PY -c "import json;d=json.load(open('out_k4_10/k4_paired.json',encoding='utf-8'));print(sum(1 for p in d['artifacts']['packages'] if p.get('n_techniques',0)>=1))"` | `>= 2` |
+| C2 | 同 P1（failures 总数含 rollback_failed=true 条目） | `0` |
 | ①（strategies） | strategy_stats 快照查询（`unique_source_intervals`/`valid`） | 逐条按 §3 表核 |
-| 总量止损 | `jq '.artifacts.receipts[].usage.tokens' ... | add` | `<= 8_000_000`（token） |
+| 总量止损 | `$PY -c "import json;d=json.load(open('out_k4_10/k4_paired.json',encoding='utf-8'));print(sum((r.get('usage') or {}).get('tokens') or 0 for r in d['artifacts']['receipts']))"` | `<= 8000000`（token） |
 
 核验由接手 agent 跑（不自证）；逐项结果落台账，任一不过 → 停止扩张报告。
 
