@@ -130,3 +130,19 @@ def test_normal_and_slow_responses_keep_verdicts(monkeypatch):
         lambda **kw: _Resp(1_000 if kw["model"] == "fast-m" else 60_000))
     rep = PP.run_probe(["fast-m", "slow-m"], slow_ms=30_000)
     assert rep["verdicts"] == {"fast-m": "ok", "slow-m": "slow"}
+
+
+def test_probe_length_capped_counts_alive(monkeypatch):
+    """探针自设 max_tokens=1 会触发 A06 完成原因门（finish=length≠stop 即
+    raise）——生成本身已发生=通道活着（2026-09-23 LiteLLM 实测：deepseek
+    曾被误判 dead）。length_capped → ok；真错误仍 dead。"""
+    def fake_chat(**kw):
+        if kw["model"] == "capped-model":
+            raise PP.gateway.LLMError("incomplete (finish_reason=length, max_tokens=4)")
+        raise PP.gateway.LLMError("HTTP 410 已下架")
+    monkeypatch.setattr(PP.gateway, "chat", fake_chat)
+    rep = PP.run_probe(["capped-model", "dead-model"])
+    assert rep["verdicts"] == {"capped-model": "ok", "dead-model": "dead"}
+    capped = rep["rows"][0]
+    assert capped["ok"] is True and capped["status"] == "length_capped"
+    assert capped["latency_ms"] is None

@@ -61,14 +61,22 @@ def probe_one(model: str) -> dict:
                 "tokens": r.tokens_in + r.tokens_out,
                 "status": r.status, "error": r.error}
     except Exception as exc:                                # noqa: BLE001
-        return {"model": model, "ok": False,
-                "error": f"{type(exc).__name__}: {exc}"[:200]}
+        msg = f"{type(exc).__name__}: {exc}"[:200]
+        # 探针自设 max_tokens=1 会触发 A06 完成原因门（finish_reason=length
+        # ≠ stop 即 raise）——但**生成本身已发生**＝通道活着。这是探针设计
+        # 代价，不是通道故障：记 ok=True（latency 不可得）+ length_capped
+        # 注记（2026-09-23 LiteLLM 实测：deepseek-v4.1-flash 曾被误判 dead）。
+        if "finish_reason=length" in msg:
+            return {"model": model, "ok": True, "latency_ms": None,
+                    "tokens": None, "status": "length_capped", "error": None}
+        return {"model": model, "ok": False, "error": msg}
 
 
 def run_probe(models: list[str], *, slow_ms: int = SLOW_MS_DEFAULT) -> dict:
     rows = [probe_one(m) for m in models]
     for r in rows:
-        r["verdict"] = ("ok" if r["ok"] and r["latency_ms"] <= slow_ms
+        lat = r.get("latency_ms")
+        r["verdict"] = ("ok" if r["ok"] and (lat is None or lat <= slow_ms)
                         else "slow" if r["ok"] else "dead")
     return {"probed": len(rows),
             "verdicts": {r["model"]: r["verdict"] for r in rows},
