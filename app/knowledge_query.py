@@ -43,6 +43,10 @@ DEFAULT_EXCLUDED_SOURCE_TYPES = frozenset(
     {"fixture", "synthetic", "commentary"})
 DEFAULT_ALLOWED_TEXT_VERSIONS = frozenset(
     {"corpus-v1", "corpus-v2-mirror"})
+# 调用方附加禁用用途（服务端无默认项；语义=并集附加，见 _evidence_for——
+# 审计 P1「客户端能放宽来源硬拦」对账：来源类型/用途/文本版本三键全部
+# 由服务端封底，调用方取值只能在此基础上加严，不能替换）
+DEFAULT_EXCLUDED_USES = frozenset()
 # 语义需求→谓词的确定性映射版本（映射规则升级须 bump 并在 capabilities 报出）
 REQUIREMENTS_MAPPING_VERSION = 1
 # scope 特异性分量（越具体越高）
@@ -189,8 +193,10 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     """①来源与版本过滤（固定顺序第一步）：取该策略的合格证据区间。
 
     硬拦（K1-A 契约复用）：基准段实例剔除（基准上下文泄漏）、
-    excluded_source_types（fixture/synthetic/commentary 冒充）、
-    license 禁用用途、不合格文本版本；镜像按 canonical 根作品聚合去重
+    excluded_source_types（fixture/synthetic/commentary 冒充；服务端
+    并集封底，调用方只可附加）、excluded_uses（并集附加）、
+    allowed_text_versions（服务端交集封顶，调用方只可收窄）、
+    license 禁用用途；镜像按 canonical 根作品聚合去重
     ——evidence_count=唯一 (根作品, span) 区间数，重跑不加置信度。"""
     instances = (s.query(StrategyInstance)
                  .filter(StrategyInstance.strategy_id == strategy_id,
@@ -203,11 +209,18 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     reg = {r.work_id: r for r in s.query(WorkSource)
            .filter(WorkSource.work_id.in_(work_ids)).all()} if work_ids else {}
     sp = policy.get("source_policy") or {}
-    excluded_types = frozenset(sp.get(
-        "excluded_source_types") or DEFAULT_EXCLUDED_SOURCE_TYPES)
-    excluded_uses = frozenset(sp.get("excluded_uses") or [])
-    allowed_tv = frozenset(sp.get(
-        "allowed_text_versions") or DEFAULT_ALLOWED_TEXT_VERSIONS)
+    # 服务端硬拦下限（审计 P1「客户端能放宽来源硬拦」，2026-09-23）：
+    # · 排除集=**并集**（DEFAULT ∪ 调用方集）——调用方传什么都换不掉
+    #   fixture/synthetic/commentary 的默认排除，只能在其上附加；
+    # · 允许版本=**交集**（DEFAULT ∩ 调用方集）——调用方只能收窄，
+    #   传默认外版本得空集（拦一切实例），不传/传空=用默认集。
+    excluded_types = DEFAULT_EXCLUDED_SOURCE_TYPES | frozenset(
+        sp.get("excluded_source_types") or [])
+    excluded_uses = DEFAULT_EXCLUDED_USES | frozenset(
+        sp.get("excluded_uses") or [])
+    caller_tv = sp.get("allowed_text_versions")
+    allowed_tv = (DEFAULT_ALLOWED_TEXT_VERSIONS & frozenset(caller_tv)
+                  ) if caller_tv else DEFAULT_ALLOWED_TEXT_VERSIONS
     stripped: list[str] = []
     intervals: set[tuple[str, int, int]] = set()
     refs: list[dict] = []
@@ -419,7 +432,22 @@ def capabilities(s) -> dict:
             "candidate_cap_max": CANDIDATE_CAP_MAX,
             "context_items_max": CONTEXT_ITEMS_MAX,
             "strategy_counts_by_status": counts,
-            "n_links": s.query(KnowledgeLink).count()}
+            "n_links": s.query(KnowledgeLink).count(),
+            # 来源策略下限如实报出（审计 P1 对账）：调用方可见的服务端
+            # 封底口径——排除集并集、版本交集，只能加严不能放宽。
+            "source_policy_floor": {
+                "excluded_source_types": sorted(
+                    DEFAULT_EXCLUDED_SOURCE_TYPES),
+                "allowed_text_versions": sorted(
+                    DEFAULT_ALLOWED_TEXT_VERSIONS),
+                "semantics": {
+                    "excluded_source_types":
+                        "union：实际生效=服务端默认∪调用方集，只可附加不可替换",
+                    "excluded_uses":
+                        "union：调用方附加禁用用途",
+                    "allowed_text_versions":
+                        "intersection：实际生效=服务端默认∩调用方集，只可收窄；空/不传=用默认集",
+                }}}
 
 
 def get_package(package_sha_or_id: str, s) -> dict | None:
