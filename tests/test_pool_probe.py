@@ -1,10 +1,12 @@
 """模型池存活探针回归（scripts/pool_probe.py，会审 89f779e R8 待办落地）。
 
 钉住的事：
-1. 分类口径：ok / slow（>slow_ms）/ dead（调用异常如实报，探针不炸）；
+1. 分类口径判定表：ok（status="ok" 且 error 空且未超时）/ slow（>slow_ms）/
+   dead（调用异常 **或软失败**——status != "ok" / error 非空，探针不炸）；
 2. 默认档零调用（preflight_block 池名单口径，mock 模式不发网络）；
 3. 双闸：--live 无 POOL_PROBE_ALLOW_LIVE=1 拒；有闸但 LLM_MODE≠real 拒；
-4. 测试不真跑 live 开放路径（真实调用纪律）。
+4. 预检闸真 exit 2（excinfo.value.code == 2，非 SystemExit(str) 的退 1）；
+5. 测试不真跑 live 开放路径（真实调用纪律）。
 """
 from __future__ import annotations
 
@@ -73,13 +75,58 @@ def test_main_empty_models_refused(monkeypatch):
 
 
 def test_main_default_exits_nonzero_when_blocked(monkeypatch, capsys):
-    """预检闸语义（9e02916 会审建议项）：默认档池外名非空 → exit 2，
-    调用方不必解析 stdout 才能拦死名。"""
+    """预检闸语义（9e02916 会审建议项 + 794521f 整改）：默认档池外名非空
+    → **真** exit 2（SystemExit(str) 实际退 1，调用方按 2 判会判错），
+    拦截原因打印到 stderr——调用方不必解析 stdout 才能拦死名。"""
     import preflight_models as PF
     monkeypatch.setattr(PF, "preflight_block",
                         lambda models, source="": "m1 不在池内（最接近：mx）")
     monkeypatch.setattr(sys, "argv", ["pp", "--models", "m1"])
-    with pytest.raises(SystemExit, match="预检失败"):
+    with pytest.raises(SystemExit) as excinfo:
         PP.main()
-    out = json.loads(capsys.readouterr().out)
+    assert excinfo.value.code == 2
+    captured = capsys.readouterr()
+    out = json.loads(captured.out)
     assert out["mode"] == "preflight_only" and out["blocked"]
+    assert "预检失败" in captured.err and "m1 不在池内" in captured.err
+
+
+def test_soft_fail_response_verdicts_dead(monkeypatch):
+    """软失败=dead 契约（会审 794521f）：gateway.chat 不抛异常但返回
+    status != "ok" 或 error 非空的响应 ⇒ 该模型不得判 ok，判 dead。"""
+    class _Resp:
+        def __init__(self, status, error):
+            self.latency_ms = 5
+            self.tokens_in = 0
+            self.tokens_out = 0
+            self.status = status
+            self.error = error
+
+    responses = {
+        "err-status": _Resp("error", "upstream 503"),
+        "err-field": _Resp("ok", "silent failure payload"),
+    }
+    monkeypatch.setattr(PP.gateway, "chat",
+                        lambda **kw: responses[kw["model"]])
+    rep = PP.run_probe(["err-status", "err-field"], slow_ms=30_000)
+    assert rep["verdicts"] == {"err-status": "dead", "err-field": "dead"}
+    for row in rep["rows"]:
+        assert row["ok"] is False
+
+
+def test_normal_and_slow_responses_keep_verdicts(monkeypatch):
+    """判定表非软失败侧不回归：status="ok" 且 error 空——快响应 ok、
+    超阈值响应 slow（既有阈值口径不变）。"""
+    class _Resp:
+        def __init__(self, latency):
+            self.latency_ms = latency
+            self.tokens_in = 1
+            self.tokens_out = 1
+            self.status = "ok"
+            self.error = ""
+
+    monkeypatch.setattr(
+        PP.gateway, "chat",
+        lambda **kw: _Resp(1_000 if kw["model"] == "fast-m" else 60_000))
+    rep = PP.run_probe(["fast-m", "slow-m"], slow_ms=30_000)
+    assert rep["verdicts"] == {"fast-m": "ok", "slow-m": "slow"}
