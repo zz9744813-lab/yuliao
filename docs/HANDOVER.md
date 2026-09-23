@@ -21,6 +21,8 @@
 
 > **2026-09-23 09:3x 拍板材料 + 三轴可建性评估收官**：①scripts/strategy_review_dossier.py（只读）——8 条策略语义审查卡生成，每卡含身份/抽象操作/不变项/失败模式/效果假设（未定如实显示）/适用条件（0 行如实显示）/证据概览（与 strategy_stats 一致）/3 条 verified 逐字引用样本/固定三条审查问句；产物 docs/策略语义审查清单_20260923.md（11,610 字符）——**集霸 拍板 status 逐条裁定的全部材料已备齐**；②subs 文档补 Semantic Fidelity / Dialogue / Style 可建性评估——三者均不可建：SF=18 类定义全以「不改事实」为前提无构造性保真侧；Dialogue=无对话单变量类型；Style=判据口径未定（先拍板口径）。至此 §14 十二子基准中可建项全部建毕（5 类 kind + implicitness/rhythm 构题器），不可建项全部卡点成文（答案键来源各异，均拍板项只记录）。
 
+> **2026-09-23 13:2x K4 健壮化正式任务收官（补投件）**：①verifier 空响应重试（6d35bf8：无效不烧改写轮、同角色重试 1 次 stage+'.retry' 留痕、fail-closed、预算闸不豁免——4 回归）+ 终闸修正（failed=已解决态不挡验证，dispatched/unknown 才挡；failed 行跳过 response 核对修复 json.loads(None)）；②tokens 记账修复（store.usage 聚合成功调用网关实账——此前恒 0）；③收据补通道/模型/retried/verifier 逐次尝试/worlds_dir 留痕（30e7d45，含审计非阻断项收口）；④pool_probe 修 length_capped 假阳性（9c81f3e：探针自设 1-token 触发 A06 完成门被误判 dead——生成本身已发生=通道活）；⑤**--channel-changed 复跑三场成功**（out_k4_3_mc22_v2 新目录，LiteLLM+deepseek-v4.1-flash 无前缀名双角色）：s1 **A/B 双 committed**（A 臂空包下首次真出正文）、s2 双臂诚实失败（A=call_budget_exhausted 6 调用后闸拒 / B=rewrite_budget_exhausted verifier 三轮不放行）、s3 双臂 skipped 无幻影；**tokens 对账 MATCH**（收据 1063/1104 = calls 表逐 job 相等；真跑总实耗 12,810=收据 2,167+失败臂 10,643，worlds_dir 留库可查）；证据 docs/K4_健壮化与复跑证据_20260923.md。纪律：未动门禁、未改 status（A 臂包空=预期，卡修复归 K2-CARDS-MERGE 线）。
+
 > 2026-09-20 Codex：长篇总方案已定稿，单场景恢复与连续三场 CLI 试点完成（含 Codex 复核，第一场未重跑）；508 项测试通过，调用 / 收据 / 验收边界见 [Runtime 交接](runtime-handover-20260920.md) 与 [执行计划](plan.md)。
 
 > 2026-09-20 18:10 起全面审查：仍有 8 项 P1 / 3 项 P2，含盲评映射、训练分组、调用漏账、租约竞争及测试污染真实游标；另 1 项测试夹具问题审查期间已修复。最新 LG 593 passed / 1 项模型下载连接失败，Distiller 214 passed。原三场收据保留，详见 [全面审查报告](project-audit-20260920-1810.md)，修复前不扩为无人值守长篇或开训。
