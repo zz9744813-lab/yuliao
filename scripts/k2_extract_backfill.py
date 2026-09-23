@@ -20,7 +20,8 @@
   跨作品复现（≥2 根作品）才有机会成立。
 - **双闸**：--live + 环境变量 K2_ALLOW_LIVE=1 才真跑（live client 走
   app.gateway.chat：A05 逐次记账/A06 完成原因门自动生效）；--dry-run 零调用
-  零库写预演；两者都不带 → 拒（不默认猜模式）。
+  零库写预演；两者都不带 → 拒（不默认猜模式）。R6 互斥守卫前置于预检/
+  客户端构造/init_db（锁在 ⇒ 立刻拒，与环境配置无关）。
 
 用法：
     python scripts/k2_extract_backfill.py --dry-run                # 预演
@@ -182,7 +183,13 @@ def run_backfill(s, client, *, limit: int = DEFAULT_LIMIT, max_calls: int = 20,
             r = KE.extract_segment(
                 client, strategy_id=st.id, strategy_version=st.version,
                 work_id=seg.work_id, segment_id=seg.id, text=item["text"],
-                text_version=item["text_version"], budget=budget, live=live)
+                text_version=item["text_version"], budget=budget, live=live,
+                strategy_def={
+                    "abstract_operation": st.abstract_operation,
+                    "invariants": list(st.invariants or []),
+                    "effect_hypothesis": st.effect_hypothesis,
+                    "failure_modes": list(st.failure_modes or []),
+                })
         except KE.ExtractBudgetExceeded:
             report["blocked_budget"] = True
             report["blocked_at"] = {"strategy": st.strategy_key,
@@ -256,15 +263,19 @@ def main() -> None:
             raise SystemExit("--live 需要 --extractor-model")
         if LLM_MODE != "real":
             raise SystemExit(f"--live 需要 LG_LLM_MODE=real（当前 {LLM_MODE}）")
-        from preflight_models import require_models   # 预检门：池外名字=整批白跑（A01 纪律）
-        require_models((a.extractor_model,), source="k2_extract_backfill")
-        client = _GatewayAdapter(a.extractor_model)
-    db.init_db()
     import contextlib
     from app.live_guard import live_lock
-    # R6 守卫：live 实跑与全量 pytest/live 互斥（锁文件 O_EXCL 原子创建）
+    # R6 守卫：live 实跑与全量 pytest/live 互斥（锁文件 O_EXCL 原子创建）。
+    # 顺序钉（2026-09-23 回归，与 k4 同口径）：互斥检查必须前置于预检
+    # （require_models 走网络取池）、客户端构造与 init_db——旧顺序里这些
+    # 副作用先跑，其异常会抢掉守卫的 SystemExit，互斥成环境依赖巧合。
     with (live_lock("k2_extract_backfill") if a.live
           else contextlib.nullcontext()):
+        if a.live:
+            from preflight_models import require_models   # 预检门：池外名字=整批白跑（A01 纪律）
+            require_models((a.extractor_model,), source="k2_extract_backfill")
+            client = _GatewayAdapter(a.extractor_model)
+        db.init_db()
         with db.session() as s:
             rep = run_backfill(s, client, limit=a.limit, max_calls=a.max_calls,
                                max_tokens=a.max_tokens, dry_run=a.dry_run,

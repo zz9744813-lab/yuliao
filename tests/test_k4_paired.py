@@ -420,19 +420,29 @@ def test_channel_changed_marked_on_receipts(tmp_path):
 
 
 def test_main_live_refused_when_lock_held(monkeypatch):
-    """R6 接线回归（9e02916 会审建议项）：--live 在锁被持有时 SystemExit
-    且未发起任何场景调用（run_paired 不许被触达）。"""
+    """R6 接线回归 + 顺序钉：锁被持有时 --live 必须**守卫先抛**
+    SystemExit(互斥守卫)，GatewayClient 构造与 run_paired 零触达。
+    与环境无关（2026-09-23 实测教训：干净 worktree 无 .env 时旧顺序
+    GatewayClient(...) 构造先抛 gateway_not_configured，抢掉守卫的
+    SystemExit——本用例把构造换成计数替身：一旦被触达即 AssertionError
+    即红，等于钉死「即使网关未配置/构造必炸，锁在也必须守卫先拒」，
+    不再依赖本机是否配了网关）。"""
     from app import live_guard as LG
+    import app.scene_runtime.client as client_mod
     monkeypatch.setenv("K4_ALLOW_LIVE", "1")
-    monkeypatch.setenv("LG_GATEWAY_BASE_URL", "http://127.0.0.1:9")
-    monkeypatch.setenv("LG_GATEWAY_API_KEY", "stub-not-used")
     from app import config as _cfg
-    monkeypatch.setattr(_cfg, "LLM_MODE", "real")
-    called = {"n": 0}
+    monkeypatch.setattr(_cfg, "LLM_MODE", "real")   # live 前提（结果与 mock/real 无关）
+    built = {"client": 0, "run": 0}
+
+    class _BoomClient:
+        def __init__(self, *a, **k):
+            built["client"] += 1
+            raise AssertionError("锁被持有时不许构造 GatewayClient——守卫必须前置于构造")
 
     def _boom(*a, **k):
-        called["n"] += 1
+        built["run"] += 1
         raise AssertionError("锁被持有时 run_paired 不许被调用")
+    monkeypatch.setattr(client_mod, "GatewayClient", _BoomClient)
     monkeypatch.setattr(k4, "run_paired", _boom)
     monkeypatch.setattr(sys, "argv", ["k4", "--live",
                                       "--writer-model", "a",
@@ -440,4 +450,5 @@ def test_main_live_refused_when_lock_held(monkeypatch):
     with LG.live_lock("t-other-live"):
         with pytest.raises(SystemExit, match="互斥守卫"):
             k4.main()
-    assert called["n"] == 0
+    assert built == {"client": 0, "run": 0}, \
+        f"守卫未前置：客户端构造 {built['client']} 次、run_paired {built['run']} 次"
