@@ -185,7 +185,9 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                      "job_id": receipt["job_id"],
                      "usage": {"calls": u.get("calls", 0),
                                "duration_ms": u.get("duration_ms", 0),
-                               "tokens": u.get("tokens", 0)},
+                               "tokens": u.get("tokens", 0),
+                               "verifier_invalid_retries":
+                                   u.get("verifier_invalid_retries", 0)},
                      "live": live,
                      # C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed
                      "channel_changed": channel_changed})

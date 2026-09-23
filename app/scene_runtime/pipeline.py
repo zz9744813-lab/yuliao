@@ -93,6 +93,23 @@ class SceneRunner:
                                duration_ms=round((time.monotonic()-started)*1000))
         return reply
 
+    def _call_verified(self, job_id, stage, verify_input, budget):
+        """verifier 主判定（主控 2026-09-23 真跑取证件）：网关**结果无效**
+        （gateway_invalid_or_partial_result=空/残缺/非 stop——2026-09-23
+        mc22 实测：verifier.2 空响应 16.8s 直接烧掉整条改写链）不消耗改写
+        轮——同角色重试 1 次，重试以 stage+'.retry' 落 calls 表（收据/台账
+        可区分 verifier_invalid_retry 与真 hard issue）。
+        fail-closed：重试仍无效 → 原样抛；预算闸不豁免——重试那次同样
+        过 call 预算（超限即 call_budget_exhausted，不静默放宽）。"""
+        try:
+            return self._call(job_id, stage, "verifier", VERIFIER_SYSTEM,
+                              verify_input, budget)
+        except RuntimeFault as e:
+            if str(e) != "gateway_invalid_or_partial_result":
+                raise
+            return self._call(job_id, stage + ".retry", "verifier",
+                              VERIFIER_SYSTEM, verify_input, budget)
+
     def run(self, plan: ScenePlan, knowledge: KnowledgePackage, budget: Budget, *, stop_after_verified=False):
         job_id = self.store.prepare(plan, knowledge, budget, self.client.models)
         receipt = self.store.receipt(job_id)
@@ -120,7 +137,7 @@ class SceneRunner:
                 if context.get("verifier_context_version") == 2:
                     verify_input["recent_committed_scenes"] = context["recent_committed_scenes"]
                 review_stage = f"verifier.{round_index}"
-                answer = self._call(job_id, review_stage, "verifier", VERIFIER_SYSTEM, verify_input, budget)
+                answer = self._call_verified(job_id, review_stage, verify_input, budget)
                 try:
                     review = align_quotes(draft.text, parse_result(answer["text"], Review))
                     review_contract_errors = [e for e in validate_review(plan, draft.text, review)

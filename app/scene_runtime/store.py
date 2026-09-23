@@ -214,7 +214,16 @@ class Store:
             if r["response"]:
                 reply = json.loads(r.pop("response"))
                 r.update({k: reply.get(k) for k in ("requested_model", "actual_model", "tokens_in", "tokens_out", "finish_reason")})
+        # 2026-09-23 主控取证件：tokens 聚合缺位=真跑收据恒 0（K5-A 成本模型
+        # 与 §6 止损命令都指它）。只聚合**成功调用**的网关实账 tokens；失败
+        # 调用的上游计费本侧不可见（网关账 llm_calls 是交叉核对侧）。
+        # verifier_invalid_retries=以 stage+'.retry' 落表的重试数（收据区分
+        # verifier_invalid_retry 与真 hard issue 的依据）。
+        tokens = sum((r.get("tokens_in") or 0) + (r.get("tokens_out") or 0)
+                     for r in results)
+        retries = sum(1 for r in results if str(r["stage"]).endswith(".retry"))
         return {"calls": len(rows), "duration_ms": sum(r["duration_ms"] or 0 for r in rows),
+                "tokens": tokens, "verifier_invalid_retries": retries,
                 "cost": None, "attempts": results}
 
     def add_confirmed_issue(self, job_id, text: str, issue: Issue):
@@ -315,11 +324,17 @@ class Store:
         request = json.loads(db.execute("SELECT request FROM jobs WHERE id=?", (job_id,)).fetchone()[0])
         budget = Budget.model_validate(request["budget"])
         rows = db.execute("SELECT status,duration_ms,response FROM calls WHERE job=?", (job_id,)).fetchall()
-        if any(r["status"] != "succeeded" for r in rows):
+        # 2026-09-23 主控取证件修正：终闸挡**未解决**调用（dispatched=在飞/
+        # unknown=结果未知）；status='failed'（错误已落账——如 verifier 无效
+        # 判定被 stage+'.retry' 补上）是已解决态，不挡验证。行数预算仍算
+        # failed 行（上游确实烧了 token，不静默放宽）。
+        if any(r["status"] in ("dispatched", "unknown") for r in rows):
             raise RuntimeFault("unresolved_call_at_verification")
         if len(rows) > budget.max_calls or sum(r["duration_ms"] or 0 for r in rows) > budget.max_elapsed_seconds * 1000:
             raise RuntimeFault("completed_call_exceeded_budget")
         for row in rows:
+            if row["status"] != "succeeded":
+                continue                    # failed 行无 response 可核
             reported = json.loads(row["response"]).get("tokens_out")
             if reported is not None and reported > budget.max_output_tokens:
                 raise RuntimeFault("provider_exceeded_output_limit")

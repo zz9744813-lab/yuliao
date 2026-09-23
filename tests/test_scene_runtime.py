@@ -440,3 +440,94 @@ def test_audited_false_positive_resume_keeps_budget_and_plan_gates(setup, forged
         with pytest.raises(RuntimeFault, match="cannot_annotate_committed"):
             store.dismiss_review_issue(job_id, "verifier.0", issue, **source)
     assert client.n == 2 and store.receipt(first["job_id"]) == {k: v for k, v in first.items() if k not in {"usage", "reused"}}
+
+
+# ── 主控 2026-09-23 真跑取证件：(a) verifier 无效不烧改写轮 + (b) tokens 落账 ──
+
+class _VerifierFlakyClient:
+    """writer 正常；verifier 按 invalid_times/always_invalid 抛
+    gateway_invalid_or_partial_result（2026-09-23 mc22 实测形态：空响应
+    16.8s）。tokens 固定 10/5 便于聚账断言。"""
+    models = {"writer": "fx-w", "verifier": "fx-v", "transport": "fixture"}
+
+    def __init__(self, *, always_invalid=False, invalid_times=1):
+        self.verifier_calls = 0
+        self.always_invalid = always_invalid
+        self.invalid_times = invalid_times
+
+    def _ok(self, body):
+        return {"text": canonical(body), "tokens_in": 10, "tokens_out": 5,
+                "actual_model": "fx", "finish_reason": "stop"}
+
+    def invoke(self, *, role, system, payload, max_tokens, timeout):
+        if role == "writer":
+            return self._ok({"text": "林穗把一枚钱放在桌上。她还剩两枚。"})
+        self.verifier_calls += 1
+        if self.always_invalid or self.verifier_calls <= self.invalid_times:
+            raise RuntimeFault("gateway_invalid_or_partial_result")
+        plan = payload["plan"]
+        quote = payload["text"]
+        return self._ok({"issues": [],
+                         "events": [{"event_id": e["event_id"], "quote": quote}
+                                    for e in plan["events"]],
+                         "changes": [{"fact": c["fact"], "after": c["after"],
+                                      "quote": quote}
+                                     for e in plan["events"]
+                                     for c in e["changes"]]})
+
+
+def test_verifier_invalid_retry_saves_round_and_is_distinguishable(setup):
+    """(a) verifier 结果无效（空/残缺/非 stop）不烧改写轮——同角色重试
+    1 次即恢复，场景正常 committed；重试以 stage+'.retry' 落 calls 表，
+    无效判定留痕，收据可区分 verifier_invalid_retry 与真 hard issue。"""
+    store, _, plan, knowledge = setup
+    client = _VerifierFlakyClient(invalid_times=1)
+    result = SceneRunner(store, client).run(plan, knowledge, Budget())
+    assert result["status"] == "committed"
+    usage = result["usage"]
+    assert usage["calls"] == 3, "writer + verifier.0(无效) + verifier.0.retry"
+    assert usage["verifier_invalid_retries"] == 1
+    stages = [a["stage"] for a in usage["attempts"]]
+    assert "verifier.0.retry" in stages
+    assert any(a["stage"] == "verifier.0" and a["status"] == "failed"
+               and "gateway_invalid_or_partial_result" in str(a["error"])
+               for a in usage["attempts"]), "无效判定必须留痕"
+
+
+def test_verifier_invalid_retry_fail_closed(setup):
+    """(a) fail-closed：重试仍无效 → RuntimeFault 原样抛，两次尝试都留痕。"""
+    store, _, plan, knowledge = setup
+    client = _VerifierFlakyClient(always_invalid=True)
+    with pytest.raises(RuntimeFault, match="gateway_invalid_or_partial_result"):
+        SceneRunner(store, client).run(plan, knowledge, Budget())
+    with store.connection() as db:
+        rows = dict(db.execute("SELECT stage, status FROM calls").fetchall())
+    assert rows.get("verifier.0") == "failed"
+    assert rows.get("verifier.0.retry") == "failed"
+
+
+def test_verifier_invalid_retry_respects_call_budget(setup):
+    """(a) 预算闸不豁免：重试那次同样过 call 预算——超限即
+    call_budget_exhausted（fail-closed，不静默放宽）。"""
+    store, _, plan, knowledge = setup
+    client = _VerifierFlakyClient(always_invalid=True)
+    with pytest.raises(RuntimeFault, match="call_budget_exhausted"):
+        SceneRunner(store, client).run(plan, knowledge, Budget(max_calls=2))
+
+
+def test_usage_tokens_aggregated_from_successful_calls(setup):
+    """(b) live tokens 落账：成功调用的网关实账 tokens 聚合进
+    usage['tokens']（此前恒 0——主控取证件）；失败调用不贡献（其上游
+    计费本侧不可见，网关账 llm_calls 为交叉核对侧）。"""
+    store, _, plan, knowledge = setup
+    client = _VerifierFlakyClient(invalid_times=1)
+    result = SceneRunner(store, client).run(plan, knowledge, Budget())
+    assert result["usage"]["tokens"] == 30,         "writer(15) + verifier.0 失败(0) + verifier.0.retry(15)"
+    plan2 = plan.model_copy(update={
+        "scene_id": "s2", "idempotency_key": "s2-v1", "expected_revision": 1,
+        "events": [PlannedEvent(event_id="pay", description="支付一枚钱",
+                                changes=[Change(fact="coins", before=2, after=1),
+                                         Change(fact="received", before=1, after=2)])]})
+    result2 = SceneRunner(store, FixtureClient()).run(plan2, knowledge, Budget())
+    assert result2["usage"]["tokens"] == 4, "基线：正常两调用 1+1 各"
+    assert result2["usage"]["verifier_invalid_retries"] == 0
