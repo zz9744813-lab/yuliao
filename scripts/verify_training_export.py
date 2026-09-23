@@ -18,9 +18,11 @@
    是 rows_target_empty（空=导出坏了，短=数据本来就短，两回事）。
 2. **冲突消解**（RM）：同源同文不同分的组数必须为 0；分数不可哈希
    （dict/list）→ 拒，不裸炸。
-3. **源质量**：逐行回连段 integrity.src_ok（批量 in_）。未校勘段与
-   悬空段（库中查无）**都入闸**且都进 manifest——两套口径一个家族，
-   不许一个闸一个抛（三轮 BLOCK 项）。
+3. **源质量**：逐行回连段 integrity.src_ok，**严格三态**（审查 F-1 收口）：
+   JSON true → 通过；JSON false → 判坏；任何非布尔（"true"/"false"/1/0/
+   []/{} /null/缺键）→ 未校验。判坏段、未校验段与悬空段（库中查无）
+   **都入闸**且都进 manifest——fail-closed，不许一个闸一个抛（三轮 BLOCK
+   项；bool("false")==True 的松口径在此废止）。
 4. **防手改**：manifest 是旁挂明文，手改 passed=true 挡不住——
    accept_for_training **重跑 verify 的全部纯检查**并与 manifest 的
    sha256/kind/行数/基准哈希数交叉核对；无 manifest（旧导出）、
@@ -200,9 +202,14 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
             groups[key].add(score)
         rm_conflicts = sum(1 for v in groups.values() if len(v) > 1)
 
-    # 源质量：按源段批量回连（in_，不逐段查）。未校勘段与悬空段同入闸——
+    # 源质量：按源段批量回连（in_，不逐段查）。判坏/未校验/悬空三态全入闸——
     # 悬空=导出与库不同源，比未校勘更严重，但同属源质量家族，统一入清单。
-    src_unverified, src_missing = 0, 0
+    # 严格三态（与 source_check.parse_src_ok 同口径，fail-closed）：
+    # JSON true → 通过；JSON false → 判坏；其余一切非布尔（"true"/"false"/
+    # 1/0/[]/{}/null/缺键，integrity 非法/非 dict）→ 未校验——
+    # 旧 bool("false") 为真的松口径（审查 F-1）在此收口：字符串 "false"
+    # 决不能再冒充通过。
+    src_ok_n, src_bad, src_unverified, src_missing = 0, 0, 0, 0
     with db.session() as s:
         seg_rows = {sid: integ for sid, integ in
                     s.query(Segment.id, Segment.integrity)
@@ -217,13 +224,21 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
                 integ = json.loads(integ)
             except Exception:
                 integ = None
-        ok = bool((integ or {}).get("src_ok")) if isinstance(integ, dict) else False
-        if not ok:
+        v = integ.get("src_ok") if isinstance(integ, dict) else None
+        if v is True:
+            src_ok_n += 1
+        elif v is False:
+            src_bad += 1
+        else:
             src_unverified += 1
+    # 三桶互斥自洽：通过+判坏+未校验+悬空 == 去重后的总源段数
+    assert (src_ok_n + src_bad + src_unverified + src_missing
+            == len(sources)), "源质量计数口径自洽性破坏（桶重叠/漏计）"
 
     passed = (overlap_rows == 0 and missing_key_rows == 0
               and rm_conflicts == 0 and rm_bad_score == 0
-              and src_unverified == 0 and src_missing == 0
+              and src_bad == 0 and src_unverified == 0   # fail-closed：判坏/未校验>0 即红
+              and src_missing == 0
               and rows_target_empty == 0)
     man = {
         "file": str(path), "kind": kind, "sha256": _sha256(path),
@@ -236,13 +251,16 @@ def verify(path_str: str, write_manifest: bool = True) -> dict:
         "bench_overlap_examples": overlap_examples,
         "rm_conflict_groups": rm_conflicts, "rm_bad_score_rows": rm_bad_score,
         "missing_key_rows": missing_key_rows,
+        "src_ok_segments": src_ok_n,
+        "src_bad_segments": src_bad,
         "src_unverified_segments": src_unverified,
         "src_missing_segments": src_missing,
         "same_source_note": "SFT 与 Rewrite 同源段是同一批样本的两种用法——"
                             "合计只按 union_distinct_sources 并集算，不许按行数相加",
         "acceptance": {"passed": passed,
                        "rule": "重合=0 且 主键齐全 且（RM）同源同文无多分且分数可哈希 "
-                               "且 未校勘源段=0 且 悬空源段=0 且 目标字段无空值行"
+                               "且 源段判坏=0 且 未校验源段=0（非严格布尔一律未校验，"
+                               "fail-closed）且 悬空源段=0 且 目标字段无空值行"
                                "（目标短于50字只报不闸：rows_target_short）"},
     }
     if write_manifest:
@@ -285,6 +303,7 @@ def accept_for_training(path_str: str) -> tuple[bool, list[str]]:
         problems.append(f"当场重算未通过：重合 {fresh['bench_overlap_rows']}"
                         f" / 缺键 {fresh['missing_key_rows']}"
                         f" / RM冲突 {fresh['rm_conflict_groups']}"
+                        f" / 源判坏段 {fresh['src_bad_segments']}"
                         f" / 未校勘段 {fresh['src_unverified_segments']}"
                         f" / 悬空段 {fresh['src_missing_segments']}"
                         f" / 目标空值行 {fresh['rows_target_empty']}")

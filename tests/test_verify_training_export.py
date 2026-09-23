@@ -8,7 +8,9 @@
 2. **半漂移**：目标字段置空/占位而前文键还在 → 拒（三轮 BLOCK 项——
    「取到字段的文本数」与「可比文本数」分列，空串混不进比较数）；
 3. RM 同源同文多分 / 分数不可哈希 → 拒；主键缺失 → 拒；
-4. 源质量全家入闸：未校勘段与悬空段（库中查无）都进 manifest 都红；
+4. 源质量全家入闸：判坏段（严格布尔 false）、未校验段（任何非布尔，
+   含字符串 "false"——审查 F-1 松口径收口）与悬空段（库中查无）都进
+   manifest 都红，三桶互斥 fail-closed；
 5. 基准哈希集为空（连错库）→ 宁可拒，不做恒绿检查；
 6. 全字段漂移（0 条可比文本）→ 拒（比较空转的假绿）；
 7. accept 防手改 + 结构化：当场重算交叉核对 sha/kind/行数/基准哈希数；
@@ -179,6 +181,72 @@ def test_src_missing_gates_and_is_in_manifest(clean_env, tmp_path):
     rep = VT.verify(str(p), write_manifest=False)   # 不 SystemExit
     assert rep["src_missing_segments"] == 1
     assert rep["acceptance"]["passed"] is False, "悬空段=导出与库不同源，必须红"
+
+
+# ── src_ok 严格三态（审查 F-1：bool("false") 松口径收口）─────────
+
+# (integrity 存库字符串, 期望桶: "ok" / "bad" / "unverified")
+_STRICT_CASES = [
+    ('{"src_ok": true}', "ok"),
+    ('{"src_ok": false}', "bad"),
+    ('{"src_ok": "false"}', "unverified"),   # 审查 F-1 主证：字符串假布尔
+    ('{"src_ok": "true"}', "unverified"),
+    ('{"src_ok": 0}', "unverified"),
+    ('{"src_ok": 1}', "unverified"),
+    ('{"src_ok": []}', "unverified"),
+    ('{"src_ok": {}}', "unverified"),
+    ('{"src_ok": null}', "unverified"),
+    ("{}", "unverified"),                    # 缺键
+    ("不是合法json", "unverified"),           # integrity 整体非法
+]
+
+
+@pytest.mark.parametrize("integrity,expect", _STRICT_CASES)
+def test_src_ok_strict_tri_state_buckets(clean_env, tmp_path, integrity, expect):
+    """审查 F-1 回归：验收器读 src_ok 改严格三态——JSON true 通过 /
+    JSON false 判坏 / 任何非布尔（字符串 "false"/"true"、0/1、[]、{}、
+    null、缺键、非法 integrity）一律计入未校验且绝不进「已通过」桶。
+    三桶互斥自洽、fail-closed（未校验>0 即拒收）。"""
+    with db.session() as s:
+        w = Work(title="t-strict3", source="test:strict3")
+        s.add(w)
+        s.flush()
+        seg = Segment(work_id=w.id, ordinal=0, text="x", role=None,
+                      integrity=integrity, n_sentences=1, n_chars=1)
+        s.add(seg)
+        s.flush()
+        sid, wid = seg.id, w.id
+        s.commit()
+    try:
+        p = _write_rows(tmp_path, "writer_sft_v9.jsonl", [
+            {"id": "R1", "segment_id": sid, "target": "无关文本" * 30},
+        ])
+        rep = VT.verify(str(p), write_manifest=False)
+        assert rep["src_ok_segments"] == (1 if expect == "ok" else 0)
+        assert rep["src_bad_segments"] == (1 if expect == "bad" else 0)
+        assert rep["src_unverified_segments"] == \
+            (1 if expect == "unverified" else 0)
+        assert rep["src_missing_segments"] == 0
+        # 计数口径自洽：三桶互斥，合计 == 去重后总源段数
+        assert (rep["src_ok_segments"] + rep["src_bad_segments"]
+                + rep["src_unverified_segments"] + rep["src_missing_segments"]
+                == rep["n_distinct_sources"] == 1)
+        # fail-closed：只有严格布尔 true 才放行
+        assert rep["acceptance"]["passed"] is (expect == "ok")
+    finally:
+        with db.session() as s:
+            s.query(Segment).filter_by(id=sid).delete()
+            s.query(Work).filter_by(id=wid).delete()
+            s.commit()
+
+
+def test_src_ok_strict_bool_tripwire():
+    """绊线：验收器源码不许再用 bool(...) 松口径读 src_ok——审查 F-1
+    的修法是收紧读取口径，回退成 bool(d.get("src_ok")) 必须变红。"""
+    src = Path(VT.__file__).read_text(encoding="utf-8")
+    assert "bool((integ" not in src, \
+        "verify_training_export 回退成 bool(...) 读 src_ok？" \
+        "必须用严格三态（is True / is False / 其余未校验）"
 
 
 def test_empty_bench_set_refuses(clean_env, tmp_path, monkeypatch):
