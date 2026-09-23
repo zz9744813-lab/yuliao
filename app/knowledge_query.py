@@ -76,21 +76,95 @@ def policy_sha256(policy: dict) -> str:
     return hashlib.sha256(canonical_json(policy).encode("utf-8")).hexdigest()
 
 
+# ── 冻结包指纹字段口径（审计 P1 对账项，2026-09-23）──────────────────
+# 指纹是「包过期判定」的唯一依据（query 生成 :snapshot_fingerprint、freeze
+# 比对），因此必须覆盖**所有影响「选哪些知识 / 包内容」的字段**——旧口径只
+# 认策略 (id,version,strategy_key) 与 work_sources 四列，原地改正文/状态/
+# 条件/证据而 id 不变时指纹不动，过期包被静默复用、对账口径失效。
+#
+# 每张表纳入除 created_at 外的全部列。created_at 是写入时刻的审计戳，不
+# 影响选知识与包内容；纳入它会让「同内容不同时刻」的库指纹漂移，破坏幂等
+# 与内容寻址，故显式排除（见 FINGERPRINT_EXCLUDED_FIELDS）。
+FINGERPRINT_EXCLUDED_FIELDS = frozenset({"created_at"})
+
+# 表名 → 纳入指纹的列名（顺序无关，实现侧统一先排序再落哈希）。
+FINGERPRINT_TABLE_FIELDS: dict[str, tuple[str, ...]] = {
+    "expression_strategies_v2": (
+        "id", "strategy_key", "version", "abstract_operation", "invariants",
+        "effect_hypothesis", "failure_modes", "status", "source",
+        "legacy_strategy_id", "scope", "scope_ids", "scope_basis",
+        "observation_status", "effect_status",
+    ),
+    "strategy_conditions": (
+        "id", "strategy_id", "strategy_version", "kind", "dimension",
+        "operator", "value", "required", "predicate_state", "evidence_refs",
+        "version",
+    ),
+    "strategy_instances": (
+        "id", "strategy_id", "strategy_version", "work_id", "segment_id",
+        "frame_id", "text_version", "span_start", "span_end", "evidence_text",
+        "evidence_sha256", "conditions_observed", "observed_content",
+        "effect_ref", "extractor_model", "reviewer_version", "status",
+    ),
+    "work_sources": (
+        "id", "work_id", "canonical_work_id", "author_id", "genre_ids",
+        "source_type", "text_version", "text_sha256", "purpose_basis",
+        "identity_purposes", "license_purposes", "license_basis",
+        "metadata_status", "metadata_basis",
+    ),
+}
+
+# 表名 → 以 sha256(规范化 JSON) 锚定（而非原文拼接）的大文本列：避免原文
+# 进指纹串导致膨胀。strategy_instances 的 evidence_text 用此锚——只改存证
+# 正文不改 evidence_sha256 锚的坏行，正文哈希变化仍逼指纹变化。
+FINGERPRINT_SHA256_FIELDS: dict[str, frozenset[str]] = {
+    "expression_strategies_v2": frozenset(
+        {"abstract_operation", "effect_hypothesis", "scope_basis"}),
+    "strategy_conditions": frozenset(),
+    "strategy_instances": frozenset(
+        {"evidence_text", "observed_content", "effect_ref"}),
+    "work_sources": frozenset(
+        {"purpose_basis", "license_basis", "metadata_basis"}),
+}
+
+
+def _fp_sha256(value) -> str:
+    """规范化 JSON 的 sha256——行内大字段与整行负载统一走这一个哈希口径。"""
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
 def fingerprint_knowledge(s) -> str:
-    """库知识快照指纹：全部 v2 策略 (id, version) 与 K1-A 登记行的规范化
-    哈希——同库同知识必同指纹；库变了（新策略/登记变更）包即失效。"""
+    """库知识快照指纹——包过期判定的唯一依据。
+
+    覆盖四张知识表（expression_strategies_v2 / strategy_conditions /
+    strategy_instances / work_sources）**除 created_at 外的全部列**：按表
+    分块、块内逐行取规范化哈希后先排序再 update（与库返回顺序无关、确定）；
+    同库同知识必同指纹。大文本列用规范化 JSON 的 sha256 锚定（不拼原文，
+    防指纹串膨胀）；strategy_instances 同时纳入 evidence_sha256 列**与**
+    sha256(evidence_text)——只改存证正文不改锚的坏行，指纹必变。
+
+    兼容性断裂（本次扩容如实声明）：旧指纹只认策略 (id, version,
+    strategy_key) 与 work_sources 四列，本实现纳入全部影响选知识/包内容的
+    字段，⇒ **旧包 snapshot_fingerprint 与新算法值必不相等，历史冻结包一律
+    判过期、必须重建**（一次性不兼容）。此后原地改正文/状态/条件/证据而
+    id、version 不变时指纹会变化，过期包不再被静默复用，须重新查询再冻结。
+    """
     h = hashlib.sha256()
-    for sid, ver, key in sorted(
-            (r.id, r.version, r.strategy_key) for r in
-            s.query(ExpressionStrategyV2.id, ExpressionStrategyV2.version,
-                    ExpressionStrategyV2.strategy_key).all()):
-        h.update(f"{sid}|{ver}|{key}\n".encode("utf-8"))
-    for wid, can, st, tv in sorted(
-            (r.work_id, r.canonical_work_id, r.source_type, r.text_version)
-            for r in s.query(
-                WorkSource.work_id, WorkSource.canonical_work_id,
-                WorkSource.source_type, WorkSource.text_version).all()):
-        h.update(f"ws|{wid}|{can}|{st}|{tv}\n".encode("utf-8"))
+    for tag, model in (
+            ("esv2", ExpressionStrategyV2),
+            ("cond", StrategyCondition),
+            ("inst", StrategyInstance),
+            ("ws", WorkSource)):
+        table = model.__tablename__
+        fields = FINGERPRINT_TABLE_FIELDS[table]
+        hashed = FINGERPRINT_SHA256_FIELDS[table]
+        row_digests = []
+        for row in s.query(model).all():
+            payload = {f: (_fp_sha256(getattr(row, f)) if f in hashed
+                           else getattr(row, f)) for f in fields}
+            row_digests.append(_fp_sha256(payload))
+        for d in sorted(row_digests):
+            h.update(f"{tag}|{d}\n".encode("utf-8"))
     return h.hexdigest()
 
 
