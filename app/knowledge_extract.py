@@ -117,26 +117,39 @@ def repair_span(raw: dict, text: str) -> dict:
 def extract_segment(client, *, strategy_id: str, strategy_version: int,
                    work_id: str, segment_id: str, text: str,
                    text_version: str, budget: ExtractBudget,
-                   live: bool = False) -> dict:
+                   live: bool = False,
+                   strategy_def: dict | None = None) -> dict:
     """单段抽取：预算闸→调用→输出门→证据门。返回带 status 的结果 dict。
 
     client 契约（与既有网关同形）：invoke(*, role, system, payload,
     max_tokens, timeout) → {"text": json_str, "tokens_in", "tokens_out"}。
     live=True 时调用方必须已注入真网关 client；默认 False 仅供测试与
-    FixtureClient——拍板前任何脚本都不许传 True（回归钉死）。"""
+    FixtureClient——拍板前任何脚本都不许传 True（回归钉死）。
+    strategy_def（审计 P1 2026-09-23）：策略定义正文（abstract_operation /
+    invariants / effect_hypothesis / failure_modes）——模型必须知道自己在
+    找**该抽象操作**的实例，不是这一段在写什么。None 时行为与旧版完全
+    一致（既有调用与测试不红）。只补输入，不放松任何输出门。"""
     if not client:
         raise RuntimeError("client 未注入（离线骨架需要显式注入测试 client）")
     budget.check()             # 调用前闸（超限在花 token 前拒）
+    system = ("从文本中抽取该策略的一个实例。只输出 JSON 对象，"
+              "字段与约束：span_start（整数，≥0，text 的字符"
+              "偏移）、span_end（整数，>span_start）、"
+              "evidence_text（字符串，必须**逐字等于** "
+              "text[span_start:span_end]，不得增删改一字）、"
+              "observed_content（≤500 字，描述该处如何体现"
+              "该策略）。若整段找不到该策略的实例，输出 "
+              '{"none": true}——不得虚构 span。')
+    if strategy_def:
+        system = ("你抽的是**该抽象操作**的实例，不是这一段在写什么："
+                  "只有该处文本确实呈现了下方策略定义的抽象操作时才算实例。"
+                  + system)
     reply = client.invoke(role="extractor",
-                         system=("从文本中抽取该策略的一个实例。只输出 JSON 对象，"
-                                 "字段与约束：span_start（整数，≥0，text 的字符"
-                                 "偏移）、span_end（整数，>span_start）、"
-                                 "evidence_text（字符串，必须**逐字等于** "
-                                 "text[span_start:span_end]，不得增删改一字）、"
-                                 "observed_content（≤500 字，描述该处如何体现"
-                                 "该策略）。若整段找不到该策略的实例，输出 "
-                                 '{"none": true}——不得虚构 span。'),
-                         payload={"strategy_id": strategy_id, "text": text},
+                         system=system,
+                         payload=({"strategy_id": strategy_id, "text": text}
+                                  if not strategy_def else
+                                  {"strategy_id": strategy_id, "text": text,
+                                   "strategy": strategy_def}),
                          max_tokens=2000, timeout=60)
     budget.spend(int(reply.get("tokens_in", 0)),
                  int(reply.get("tokens_out", 0)))

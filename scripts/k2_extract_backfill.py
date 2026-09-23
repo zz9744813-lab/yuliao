@@ -183,7 +183,13 @@ def run_backfill(s, client, *, limit: int = DEFAULT_LIMIT, max_calls: int = 20,
             r = KE.extract_segment(
                 client, strategy_id=st.id, strategy_version=st.version,
                 work_id=seg.work_id, segment_id=seg.id, text=item["text"],
-                text_version=item["text_version"], budget=budget, live=live)
+                text_version=item["text_version"], budget=budget, live=live,
+                strategy_def={
+                    "abstract_operation": st.abstract_operation,
+                    "invariants": list(st.invariants or []),
+                    "effect_hypothesis": st.effect_hypothesis,
+                    "failure_modes": list(st.failure_modes or []),
+                })
         except KE.ExtractBudgetExceeded:
             report["blocked_budget"] = True
             report["blocked_at"] = {"strategy": st.strategy_key,
