@@ -23,7 +23,7 @@
 | corruption_type | cct-SEMANTIC_OVERCOMPLETION-v1 | BS-71f5ce63dbd9 | 11 | 类型0混入 |
 | corruption_type | cct-SUBTEXT_ERASE-v1 | BS-ebe57dc9a747 | 9 | 类型0混入 |
 
-§14 其余子基准状态（**2026-09-22 更正**）：human_vs_ai **已建**（hvai-v1，545 题，BS-95651478c6dd——此前「待解锁：基准段缺自由重建候选」一行已过期）；Implicitness / Rhythm **构题器已就位**（见下方增补节）；Semantic Fidelity / Dialogue / Style 待解锁（需构题器+可验证答案键）；Pragmatics **卡点见增补节**；Human Preference Prediction / Reconstruction Quality（需基准段上的集霸裁定）。
+§14 其余子基准状态（**2026-09-22 更正**）：human_vs_ai **已建**（hvai-v1，545 题，BS-95651478c6dd——此前「待解锁：基准段缺自由重建候选」一行已过期）；Implicitness / Rhythm **构题器已就位**（见下方增补节）；Semantic Fidelity / Dialogue / Style 待解锁（**可建性评估见增补节**——三者均不可建，卡点各异）；Pragmatics **卡点见增补节**；Human Preference Prediction / Reconstruction Quality（需基准段上的集霸裁定）。
 
 ## 2026-09-22 增补（监管指令：Implicitness / Rhythm 构题器离线预置）
 
@@ -33,6 +33,12 @@
 | rhythm_pair | rhy-v1（同上） | ✅ 同模式（白名单 2 类：RHYTHM_FLATTEN / PARALLELISM_OVERUSE，类型定义即「拉平节奏/句式变化」） | 18 题 / 14 段 / 2 类 |
 
 真库构建命令（拍板后）：`BENCH_ALLOW_LIVE=1 <PY> scripts/benchmark_build.py --kind implicitness_pair --name imp-v1 --live`（rhythm 同理 `--kind rhythm_pair --name rhy-v1`）；默认离线**零库写**（`--out` 落 fixture JSON，目录已存在即拒）。
+
+**Semantic Fidelity / Dialogue / Style 可建性评估（2026-09-23，同 Pragmatics 口径：答案键只能来自构造或冻结数据）**：
+
+- **Semantic Fidelity 不可建**：18 类劣化类型的 variable 定义**全部以「改风格、不改事实」为前提**（LITERARY_OVERWRITE「意思一个字不改」、REDUNDANCY「同义复述」、POV_DRIFT「事实层面不新增事件」……），无一类型定义宣称「改变/破坏源语义」——「哪边更保真」在现有 taxonomy 上没有构造性的一边可指（NEUTRAL_PARAPHRASE 控制臂按定义保真，恰好说明该轴的「保真侧」没有天然题源）。出路同 Pragmatics 三条（扩类型表/人工构题/放宽零 LLM 答案键纪律），拍板项。
+- **Dialogue 不可建**：无任何类型以「对话质量」为单一变量；最接近的 DIALOGUE_EXPOSITION 是信息呈现方式迁移，不承诺对话轴向（同 Pragmatics 评估）。出路同上，拍板项。
+- **Style 不可建（口径未定）**：「风格」轴在 §14 无项目级判据定义——自然度轴已由 nat-v1 承接「哪边更自然」问句，Style 与之的边界（问什么、对什么基线）需 集霸 先定口径，才谈构题器与答案键。**拍板项：先定 Style 判据口径。**
 
 **Pragmatics 卡点（不可建：构造性答案键来源缺失）**——现有 18 类劣化类型的 variable 定义无一承诺「语用违规」（言外之意/会话含义/合作原则层面的破坏）；最接近的 DIALOGUE_EXPOSITION 定义是**表述方式迁移**（叙述→对话），不承诺语用不当——按 Implicitness 白名单同一条纪律，未承诺改本轴的类型不得进答案键。出路三条（均 集霸 拍板项，只记录不实现）：① 扩劣化类型表——新增 variable 明确定义语用违规的构造器（如同模式即接通）；② 人工构题（语用对错场景对，人工可复核）；③ 放宽「答案键不得来自 LLM 判读」纪律（现行硬纪律，不自行放宽）。
 

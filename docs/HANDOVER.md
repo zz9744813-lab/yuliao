@@ -19,6 +19,8 @@
 
 > **2026-09-23 03:4x K2 二轮放量（跨作品）+ strategy_stats 投影落地**：①段序改 (ordinal, work_id) 跨作品交错（首轮实测教训：work-major 时 48 对全落一部作品、root_works 恒 1）+回归；②第二轮放量 48 对（99 调用累计 / **26,938 tokens**）：+37 verified（**累计 82**），11 条模型诚实 none 逃逸（no_instance_claimed 入报告）；③顺带修驱动 rejected 落库枚举 bug（rejected_evidence 是 gate 词汇，行状态须写库契约枚举 rejected——真跑未触发，测试钉死）；④strategy_stats_rebuild.py 补齐 K1-B 投影缺失写入方（重建即替换，fingerprint 绑实例快照，镜像经 canonical 回连根不重复计）：**8 条策略全 root_works=3 / valid 9~12 / 唯一源区间 9~12——观察层复现判据（≥2 根作品）全部成立**，§6 ① 判据命令现有实数可核。拍板项证据已强化进任务单。
 
+> **2026-09-23 09:3x 拍板材料 + 三轴可建性评估收官**：①scripts/strategy_review_dossier.py（只读）——8 条策略语义审查卡生成，每卡含身份/抽象操作/不变项/失败模式/效果假设（未定如实显示）/适用条件（0 行如实显示）/证据概览（与 strategy_stats 一致）/3 条 verified 逐字引用样本/固定三条审查问句；产物 docs/策略语义审查清单_20260923.md（11,610 字符）——**集霸 拍板 status 逐条裁定的全部材料已备齐**；②subs 文档补 Semantic Fidelity / Dialogue / Style 可建性评估——三者均不可建：SF=18 类定义全以「不改事实」为前提无构造性保真侧；Dialogue=无对话单变量类型；Style=判据口径未定（先拍板口径）。至此 §14 十二子基准中可建项全部建毕（5 类 kind + implicitness/rhythm 构题器），不可建项全部卡点成文（答案键来源各异，均拍板项只记录）。
+
 > 2026-09-20 Codex：长篇总方案已定稿，单场景恢复与连续三场 CLI 试点完成（含 Codex 复核，第一场未重跑）；508 项测试通过，调用 / 收据 / 验收边界见 [Runtime 交接](runtime-handover-20260920.md) 与 [执行计划](plan.md)。
 
 > 2026-09-20 18:10 起全面审查：仍有 8 项 P1 / 3 项 P2，含盲评映射、训练分组、调用漏账、租约竞争及测试污染真实游标；另 1 项测试夹具问题审查期间已修复。最新 LG 593 passed / 1 项模型下载连接失败，Distiller 214 passed。原三场收据保留，详见 [全面审查报告](project-audit-20260920-1810.md)，修复前不扩为无人值守长篇或开训。
