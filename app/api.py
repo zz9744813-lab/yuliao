@@ -23,13 +23,14 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from . import access, config, console, corpus, db, engine, experiments, observability
 from .ids import new_id
@@ -142,16 +143,124 @@ def corpus_stats():
 
 # ── 实验 ────────────────────────────────────────────────────
 
+# ExperimentIn 校验常量（审计 P1 2026-09-23 余项：入参枚举 + 数量/长度/区间上限）。
+# 数值依据全部来自仓库内实测口径（app/experiments.DEFAULT_CONFIG、app/config.py、
+# scripts/ 与 docs/calibration-design.md 的历史实验取值），并写明安全余量：
+#
+#   granularities  真值域 = frames_schema.Granularity 的 S/M/L 三档 Literal
+#                  （DEFAULT_CONFIG 默认 ["S","M","L"]），白名单即全值域，无放宽。
+#   n_segments     默认 24（Phase 1 定标实验）；脚本最大观测 50
+#                  （scripts/corpus_matrix_extract.py）→ 上限 200（≈4× 观测值）。
+#                  成本随段数近似线性放大（再乘粒度/模型/温度/采样数），必须封顶。
+#   samples_per_pair  默认 2、观测 1~2 → 上限 8（4× 余量）。每帧候选数
+#                  = 模型数×温度数×采样数，封顶后再乘也已有硬上界。
+#   adversarial_k  默认 8；docs/calibration-design.md 记 "16 更稳但贵一倍" → 上限 32；
+#                  下限 0（scripts/bench_recon_setup.py 用 k=0 跳过对抗层，是既有口径）。
+#   concurrency    全部既有实验取值 4；网关单次超时 300s（config.HTTP_TIMEOUT_S）→
+#                  上限 16（4× 余量）：挡持令牌者把并发拉满放大费用/撞网关限速。
+#   模型列表       DEFAULT_RECON_MODELS 实测 4 个、DEFAULT_TEMPERATURES 4 个 →
+#                  各上限 8（2× 余量，换模/消融有余地）。
+#   work_ids       Work.id = new_id("WK") 形如 "WK-"+12hex、列宽 String(32) →
+#                  元素上限 64（全语料 Work 远低于此；不限域用 None，无需穷举传入）。
+_GRANULARITIES = ("S", "M", "L")
+_MAX_SEGMENTS = 200
+_MAX_SAMPLES_PER_PAIR = 8
+_MAX_ADVERSARIAL_K = 32
+_MAX_CONCURRENCY = 16
+_MAX_MODEL_LIST = 8
+_MAX_TEMP_LIST = 8
+_MAX_WORK_IDS = 64
+# 模型 ID 字符白名单（纵深防御：前端收口另派 lg-fix-frontend-escape）。
+# 实测网关模型名只含字母数字与 . - _ / : @ +（deepseek-v4.1-flash、
+# moonshotai/kimi-k3、z-ai/glm-5.3、agnes-3.0-flash）；引号/尖括号/空白/
+# 换行/反斜杠等一律进不来——这些串会原样存进 config 并随响应回到任意
+# 渲染端（列表页、控制台、研究台），必须挡在落库前。
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,63}")
+# work_id 同上，字符集收紧到 ID 生成器实际产出（字母数字、-、_），列宽 32。
+_WORK_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
 class ExperimentIn(BaseModel):
-    n_segments: int | None = None
+    """POST /experiments 入参契约（服务端强制，改前端绕不过）。
+
+    越界一律 422（pydantic RequestValidationError），**不 clamp、不静默过滤**：
+    clamp 会让落库的实验配置与调用者意图不符，属新的对账隐患；混着非法值时
+    整单拒绝，错误信息带字段名与合法域，可行动。
+    唯一的重解释是刻意约定：**空列表 [] 视同未提供（None）**——与既有前端
+    空表单口径一致（`create_experiment` 对 falsy 一律落到 DEFAULT_CONFIG），
+    并顺带挡掉 `granularities: []` 这种"零帧零候选的空实验"。非空列表里的
+    任何非法元素都会整单 422，不存在"丢坏留好"。
+    """
+    # 数值字段：下限挡 0/负数（无意义且绕闸），上限见上方常量的依据注释。
+    n_segments: int | None = Field(default=None, ge=1, le=_MAX_SEGMENTS)
     granularities: list[str] | None = None
     recon_models: list[str] | None = None
     judge_models: list[str] | None = None
     temperatures: list[float] | None = None
-    samples_per_pair: int | None = None
-    adversarial_k: int | None = None
-    concurrency: int | None = None
+    samples_per_pair: int | None = Field(default=None, ge=1,
+                                         le=_MAX_SAMPLES_PER_PAIR)
+    adversarial_k: int | None = Field(default=None, ge=0,
+                                      le=_MAX_ADVERSARIAL_K)
+    concurrency: int | None = Field(default=None, ge=1, le=_MAX_CONCURRENCY)
     work_ids: list[str] | None = None
+
+    @field_validator("granularities")
+    @classmethod
+    def _v_granularities(cls, v: list[str] | None) -> list[str] | None:
+        if not v:
+            return None
+        bad = [x for x in v if x not in _GRANULARITIES]
+        if bad:
+            raise ValueError(
+                "granularities 只允许 " + "/".join(_GRANULARITIES)
+                + " 的子集（frames_schema 三档 Literal），非法值: "
+                + repr(bad[:3]))
+        if len(set(v)) != len(v):
+            raise ValueError("granularities 不允许重复项（重复=同粒度多跑一遍）")
+        return list(v)
+
+    @staticmethod
+    def _v_token_list(v: list[str] | None, *, name: str, pattern: re.Pattern,
+                      max_items: int, item_hint: str) -> list[str] | None:
+        if not v:
+            return None
+        if len(v) > max_items:
+            raise ValueError(f"{name} 最多 {max_items} 个元素，收到 {len(v)} 个")
+        for x in v:
+            if not pattern.fullmatch(x):
+                raise ValueError(f"{name} 含非法元素（{item_hint}）: {x[:40]!r}")
+        return list(v)
+
+    @field_validator("recon_models", "judge_models")
+    @classmethod
+    def _v_models(cls, v: list[str] | None, info) -> list[str] | None:
+        return cls._v_token_list(
+            v, name=info.field_name, pattern=_MODEL_ID_RE,
+            max_items=_MAX_MODEL_LIST,
+            item_hint="只允许字母数字与 . - _ / : @ +，长度 1~64")
+
+    @field_validator("work_ids")
+    @classmethod
+    def _v_work_ids(cls, v: list[str] | None) -> list[str] | None:
+        return cls._v_token_list(
+            v, name="work_ids", pattern=_WORK_ID_RE, max_items=_MAX_WORK_IDS,
+            item_hint="只允许字母数字与 - _，长度 1~32（Work.id 列宽口径）")
+
+    @field_validator("temperatures")
+    @classmethod
+    def _v_temperatures(cls, v: list[float] | None) -> list[float] | None:
+        if not v:
+            return None
+        if len(v) > _MAX_TEMP_LIST:
+            raise ValueError(f"temperatures 最多 {_MAX_TEMP_LIST} 个元素，"
+                             f"收到 {len(v)} 个")
+        for t in v:
+            # 采样温度合法域 0~2（各网关口径上限；既有实验实测 0.3~1.1，
+            # config.DEFAULT_TEMPERATURES 最大 1.1）。越界温度是配置错误，
+            # 拒掉而不是夹到 2.0。
+            if not 0.0 <= t <= 2.0:
+                raise ValueError(f"temperatures 元素必须在 0.0~2.0，收到 {t!r}")
+        return list(v)
 
 
 @app.post("/experiments")
