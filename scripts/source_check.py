@@ -31,7 +31,8 @@
 - 只判"这文本是不是完好的"，**不判写得好不好**（文风是另一件事，别混）。
 - 作者本人的风格问题（如唐家三少爱用"地"当"的"）**算缺陷但不拦**——
   它是真实语料的一部分；只有**信息被破坏**（缺字、缺句、名字指代混乱）才拦。
-- 幂等：已有 `integrity.src_ok` 的段默认跳过。
+- 幂等：已有**严格布尔** `integrity.src_ok` 的段默认跳过；存量值类型不严
+  （字符串/数字/null）按未校验处理，强制重查。
 - 防呆（T-GUARD）：开跑前先校验 `LG_SOURCE_MODEL` 在网关模型池内（池外 fail-fast 并
   打印最接近的名字，见 `scripts/preflight_models.py`）；累计 20 次调用后失败率 >30%
   当场熔断中止。起因：`data/_dbg/DIAG_rescore_387.md`（名字写错 → 387 条 503 全灭）。
@@ -96,7 +97,62 @@ PROMPT = """下面是一段从网上下载的中文小说（盗版 txt 常有掉
 _lock = threading.Lock()
 # first_error：本轮**首条失败原文**。纪律：失败率再高，只报数字不报原因就等于没报
 # （2026-09-20 第五批扩产 100% failed 被误归因成"池子耗尽"，就是因为它）。
-_stat = {"ok": 0, "failed": 0, "skip": 0, "bad": 0, "first_error": ""}
+_stat = {"ok": 0, "failed": 0, "skip": 0, "bad": 0, "unverified": 0, "first_error": ""}
+
+
+# ── 严格布尔口径（纯函数，无 DB / 无网络，便于回归）──────────────────
+# 缺陷实证（审计 P1）：旧写入用 bool(d.get("src_ok"))，模型返回 `{"src_ok": "false"}`
+# 这类合法 JSON 但类型不严的值时，bool("false") == True ⇒ 落库成 src_ok=true，
+# 被下游（benchmark_build / goldpick_build / k2_extract_backfill 均用 `is True`）
+# 当成"源文本完好"的合格证据。全仓只有写入方松 ⇒ 真缺陷。
+
+def parse_src_ok(value) -> bool | None:
+    """三态：JSON true → True（完好），JSON false → False（判坏），
+    其余（"true"/"false"/1/0/None/缺字段/其它类型）→ None = 未校验。"""
+    if value is True:
+        return True
+    if value is False:
+        return False
+    return None
+
+
+def merge_integrity(prev: dict | None, verdict: bool | None, severity=None,
+                    defects=None, checked_pv: str = "", raw: str = "") -> dict:
+    """合并出新的 integrity dict（纯函数）。
+
+    verdict 为 True/False：写**严格布尔** src_ok。
+    verdict 为 None（模型返回类型不严）：**绝不写布尔 src_ok**，改成显式未校验态
+    `{"src_ok_unverified": true, "src_ok_raw": <截断 200 字的模型原文片段>}`，
+    并把历史残留的 src_ok（可能是落过库的字符串/数字）一并清掉——
+    免得 `"src_ok" in d` 这类旧判断把它当成"已查过"。"""
+    out = dict(prev or {})
+    if verdict is True or verdict is False:
+        out.pop("src_ok_unverified", None)
+        out.pop("src_ok_raw", None)
+        out["src_ok"] = verdict
+        if severity is not None:
+            out["severity"] = severity
+        out["defects"] = list(defects or [])
+        if checked_pv:
+            out["checked_pv"] = checked_pv
+    else:
+        out.pop("src_ok", None)
+        out["src_ok_unverified"] = True
+        out["src_ok_raw"] = (raw or "")[:200]
+        if checked_pv:
+            out["checked_pv"] = checked_pv
+        if severity is not None:
+            out["severity"] = severity
+        if defects:
+            out["defects"] = list(defects)
+    return out
+
+
+def needs_check(have: dict | None) -> bool:
+    """幂等判定（纯函数）：仅当 src_ok 是严格布尔（True/False）才跳过；
+    字符串/数字/null/缺字段一律要重查——存量脏值不允许被幂等永久留存。"""
+    v = (have or {}).get("src_ok")
+    return not (v is True or v is False)
 
 # 批量防呆②：失败率熔断。累计 LLM 调用满 BREAKER_MIN_CALLS 次后，failed/total 超线
 # 就当场中止（返回 dict 里 aborted=true），不等跑完 387 条再报 ok=0。
@@ -187,9 +243,13 @@ def targets(scope: str) -> list[str]:
             have = json.loads(integ or "{}")
         except Exception:
             have = {}
-        if "src_ok" in have:
+        if not isinstance(have, dict):
+            have = {}
+        if not needs_check(have):
             _stat["skip"] += 1
             continue
+        if "src_ok" in have:
+            _stat["unverified"] += 1   # 存量值类型不严：按未校验计，且必须重查
         out.append((sid, text))
     return out
 
@@ -234,9 +294,13 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                 have = json.loads(integ or "{}")
             except Exception:
                 have = {}
-            if "src_ok" in have:
+            if not isinstance(have, dict):
+                have = {}
+            if not needs_check(have):
                 _stat["skip"] += 1
                 continue
+            if "src_ok" in have:
+                _stat["unverified"] += 1   # 存量值类型不严：按未校验计，且必须重查
             todo.append((sid, text))
     else:
         todo = targets(scope)
@@ -260,8 +324,7 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                         prev = json.loads(seg.integrity or "{}")
                     except Exception:
                         prev = {}
-                    prev.update({"src_ok": False, "severity": "high",
-                                 "defects": hits, "checked_pv": PV + "+rules"})
+                    prev = merge_integrity(prev, False, "high", hits, PV + "+rules")
                     seg.integrity = json.dumps(prev, ensure_ascii=False)
                     s.commit()
             _count("bad")
@@ -270,9 +333,9 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
             with db.session() as s:
                 seg = s.get(Segment, sid)
                 if seg:
-                    seg.integrity = json.dumps({"src_ok": False, "severity": "high",
-                                                "defects": ["段为空或过短"]},
-                                               ensure_ascii=False)
+                    seg.integrity = json.dumps(
+                        merge_integrity({}, False, "high", ["段为空或过短"]),
+                        ensure_ascii=False)
                     s.commit()
             _count("bad")
             return
@@ -285,6 +348,10 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
             _count("failed",
                    first_error="LLM 返回空/JSON 解析不出（原文见 llm_calls 该行 error 字段）")
             return
+        # 严格口径：只有 JSON true/false 才算已校验；类型不严（"false"/1/null 等）
+        # 一律 unverified，绝不落库成布尔，更不计入 ok。
+        verdict = parse_src_ok(d.get("src_ok"))
+        raw = json.dumps(d, ensure_ascii=False)
         with db.session() as s:
             seg = s.get(Segment, sid)
             if seg is None:
@@ -294,20 +361,24 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                 prev = json.loads(seg.integrity or "{}")
             except Exception:
                 prev = {}
-            prev.update({"src_ok": bool(d.get("src_ok")), "severity": d.get("severity"),
-                         "defects": d.get("defects") or [], "checked_pv": PV})
-            seg.integrity = json.dumps(prev, ensure_ascii=False)
+            new_integ = merge_integrity(prev, verdict, d.get("severity"),
+                                        d.get("defects") or [], PV, raw=raw)
+            seg.integrity = json.dumps(new_integ, ensure_ascii=False)
             s.commit()
-        if d.get("src_ok"):
+        if verdict is True:
             _count("ok")
-        else:
+        elif verdict is False:
             _count("ok", "bad")
+        else:
+            _count("unverified")
 
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
         list(ex.map(one, todo))
     done = (f"完成：ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
-            f"（{(time.time() - t0) / 60:.1f} 分钟）")
+            f"unverified={_stat['unverified']}（{(time.time() - t0) / 60:.1f} 分钟）")
+    if _stat["unverified"]:
+        done += f"；{_stat['unverified']} 段模型返回类型不严/存量脏值，按未校验处理，需重跑"
     if _stat["failed"]:
         # 有失败就必须当场说原因——不许把"去找网关"留给人工翻 DB
         done += f"；首条错误原文：{_stat['first_error'] or '（未捕获到异常文本）'}"
@@ -319,17 +390,28 @@ def scan() -> None:
     with db.session() as s:
         rows = [(x.id, x.integrity) for x in s.query(Segment).all()]
     tot = len(rows)
-    checked = ok = bad = 0
+    checked = ok = bad = unverified = 0
     for _sid, integ in rows:
         try:
             d = json.loads(integ or "{}")
         except Exception:
             continue
-        if "src_ok" in d:
+        if not isinstance(d, dict):
+            continue
+        v = parse_src_ok(d.get("src_ok"))
+        if v is True:
             checked += 1
-            ok += bool(d["src_ok"])
-            bad += not d["src_ok"]
-    print(f"全库 {tot} 段；已检查 {checked}（完好 {ok}，判坏 {bad}），未检查 {tot - checked}")
+            ok += 1
+        elif v is False:
+            checked += 1
+            bad += 1
+        elif "src_ok" in d or d.get("src_ok_unverified"):
+            unverified += 1        # 类型不严的存量值/显式未校验态：不算完好也不算判坏
+    msg = (f"全库 {tot} 段；已检查 {checked}（完好 {ok}，判坏 {bad}），"
+           f"未校验 {unverified}，未检查 {tot - checked - unverified}")
+    if unverified:
+        msg += "；未校验段按未校验处理，需重跑"
+    print(msg)
 
 
 def main() -> None:

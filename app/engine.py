@@ -185,14 +185,22 @@ def _stage_plan(s: Session, exp: Experiment) -> dict:
 
 
 def _integrity_state(rows: list[Segment]) -> dict:
-    checked = ok_true = ok_false = 0
+    """统计口径严格化：只 `is True` 计完好、`is False` 计判坏，
+    其余（字符串/数字/null/缺字段）计未校验。旧键全保留，新增 src_unverified。"""
+    checked = ok_true = ok_false = unverified = 0
     for x in rows:
         d = _as_dict(x.integrity)
-        if "src_ok" in d:
+        v = d.get("src_ok")
+        if v is True:
             checked += 1
-            ok_true += bool(d["src_ok"])
-            ok_false += not d["src_ok"]
-    return {"checked": checked, "src_ok": ok_true, "src_bad": ok_false}
+            ok_true += 1
+        elif v is False:
+            checked += 1
+            ok_false += 1
+        elif "src_ok" in d or d.get("src_ok_unverified"):
+            unverified += 1
+    return {"checked": checked, "src_ok": ok_true, "src_bad": ok_false,
+            "src_unverified": unverified}
 
 
 def _stage_source_check(s: Session, exp: Experiment) -> dict:
@@ -209,7 +217,7 @@ def _stage_source_check(s: Session, exp: Experiment) -> dict:
     import scripts.source_check as sc
 
     ids = (exp.config or {}).get("segment_ids") or []
-    sc._stat.update(ok=0, failed=0, skip=0, bad=0)   # 模块全局计数是跨趟累计的，先归零
+    sc._stat.update(ok=0, failed=0, skip=0, bad=0, unverified=0)   # 模块全局计数是跨趟累计的，先归零
     buf = io.StringIO()
     with redirect_stdout(buf):
         sc.run(ids=ids, exp_id=exp.id, conc=int(exp.config.get("concurrency") or 4))
