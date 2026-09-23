@@ -10,7 +10,10 @@
    盯 config.DATA_DIR 会恰好看不到生产 live 的锁）；
 4. 原子性（O_EXCL）：不存在「两个 live 同时拿到」的竞态窗口；
 5. 损坏锁按「存在」处理（宁可拦，不可猜）；测试全部隔离锁路径（绝不
-   触碰真实生产锁位）。
+   触碰真实生产锁位）；
+6. 顺序钉（driver 侧，2026-09-23 回归）：live 驱动的互斥守卫必须**前置**
+   于任何客户端构造/模型解析/预检/init_db——锁在 ⇒ 守卫先抛，下游副作用
+   路径零触达（计数替身断言，与环境是否配置网关无关）。
 """
 from __future__ import annotations
 
@@ -106,3 +109,37 @@ def test_corrupt_lock_still_blocks():
     finally:
         p.unlink(missing_ok=True)               # 测试自清，不留死锁给后续会话
     assert LG.live_run_active() is None
+
+
+def test_k2_live_guard_precedes_preflight_and_client(monkeypatch):
+    """顺序钉（k2 driver 侧，2026-09-23 回归，与 k4 同口径）：--live 锁被
+    持有时守卫必须先抛——网络预检 require_models、客户端构造、init_db、
+    run_backfill 全部零触达。环境无关：下游路径都是计数替身，任一被触达
+    即 AssertionError 红——不依赖本机是否配置网关。"""
+    import importlib.util as _u
+    spec = _u.spec_from_file_location(
+        "k2_guard_order", ROOT / "scripts" / "k2_extract_backfill.py")
+    k2b = _u.module_from_spec(spec)
+    spec.loader.exec_module(k2b)               # 顶层只建路径与 import，不执行
+    import preflight_models as PF
+    touches = {"preflight": 0, "client": 0, "init_db": 0, "run": 0}
+
+    def _boom(key):
+        def _f(*a, **k):
+            touches[key] += 1
+            raise AssertionError(
+                f"锁被持有时不许触达 {key}——互斥守卫必须前置于一切构造/预检")
+        return _f
+    monkeypatch.setattr(PF, "require_models", _boom("preflight"))
+    monkeypatch.setattr(k2b, "_GatewayAdapter", _boom("client"))
+    monkeypatch.setattr(k2b.db, "init_db", _boom("init_db"))
+    monkeypatch.setattr(k2b, "run_backfill", _boom("run"))
+    monkeypatch.setenv("K2_ALLOW_LIVE", "1")
+    monkeypatch.setattr(k2b, "LLM_MODE", "real")   # live 前提（替身与 mock/real 无关）
+    monkeypatch.setattr(sys, "argv", ["k2", "--live",
+                                      "--extractor-model", "m", "--limit", "1"])
+    with LG.live_lock("t-other-live"):
+        with pytest.raises(SystemExit, match="互斥守卫"):
+            k2b.main()
+    assert touches == {"preflight": 0, "client": 0, "init_db": 0, "run": 0}, \
+        f"守卫未前置，下游被触达：{touches}"

@@ -15,7 +15,8 @@ rollback 再记失败，不留半成品会话态。
 纪律：默认全离线（FxClient；verifier 是自证式夹具——证据门/负例
 不在此 e2e 触发，由 paired_cards 卡组覆盖，勿把 e2e 绿读成门全过）；
 --live 双闸（CLI flag + 环境变量 K4_ALLOW_LIVE=1）才接 GatewayClient
-（LLM_MODE=real + 网关已配）——402 资金墙未拍板前不许真跑；
+（LLM_MODE=real + 网关已配）——402 资金墙未拍板前不许真跑；R6 互斥
+守卫前置于任何客户端构造/模型解析（锁在 ⇒ 立刻拒，与环境配置无关）；
 --out 已存在即拒（不静默覆盖上次实验产物）。
 
     python scripts/k4_paired_scenes.py              # 离线端到端（fixture，默认 3 场）
@@ -263,17 +264,21 @@ def main() -> None:
         if os.environ.get("K4_ALLOW_LIVE") != "1":
             raise SystemExit("--live 需要环境变量 K4_ALLOW_LIVE=1（双闸："
                             "402 资金墙未拍板前防误跑烧钱）")
-        from app.scene_runtime.client import GatewayClient
         if not (a.writer_model and a.verifier_model):
             raise SystemExit("--live 需要 --writer-model 与 --verifier-model")
-        client = GatewayClient(a.writer_model, a.verifier_model)
-    else:
-        client = FxClient()
     import contextlib
     from app.live_guard import live_lock
-    # R6 守卫：live 实跑与全量 pytest / 其他 live 互斥（锁文件原子创建）
+    # R6 守卫：live 实跑与全量 pytest / 其他 live 互斥（锁文件原子创建）。
+    # 顺序钉（2026-09-23 回归）：互斥检查必须前置于任何 GatewayClient 构造/
+    # 模型解析——旧顺序在未配网关的环境里构造即抛 RuntimeFault
+    # (gateway_not_configured)，抢掉守卫的 SystemExit，互斥成环境依赖巧合。
     with (live_lock("k4_paired_scenes") if a.live
           else contextlib.nullcontext()):
+        if a.live:
+            from app.scene_runtime.client import GatewayClient
+            client = GatewayClient(a.writer_model, a.verifier_model)
+        else:
+            client = FxClient()
         tmp = Path(tempfile.mkdtemp(prefix="k4_worlds_"))
         try:
             def factory():
