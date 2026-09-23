@@ -89,7 +89,11 @@ def policy_sha256(policy: dict) -> str:
 # 每张表纳入除 created_at 外的全部列。created_at 是写入时刻的审计戳，不
 # 影响选知识与包内容；纳入它会让「同内容不同时刻」的库指纹漂移，破坏幂等
 # 与内容寻址，故显式排除（见 FINGERPRINT_EXCLUDED_FIELDS）。
-FINGERPRINT_EXCLUDED_FIELDS = frozenset({"created_at"})
+# allowed_purposes 是建表史遗留的**纯插行管道**列（真库 NOT NULL 无默认，
+# 语义自 K1-A 二轮起走 identity_purposes/license_purposes，本列不参与任何
+# 判定/查询/包内容——2026-09-23 恢复为带默认 ORM 声明）：同 created_at 理
+# 由显式排除，不入指纹。
+FINGERPRINT_EXCLUDED_FIELDS = frozenset({"created_at", "allowed_purposes"})
 
 # 表名 → 纳入指纹的列名（顺序无关，实现侧统一先排序再落哈希）。
 FINGERPRINT_TABLE_FIELDS: dict[str, tuple[str, ...]] = {
