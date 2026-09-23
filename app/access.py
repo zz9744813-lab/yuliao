@@ -9,7 +9,11 @@
 
 设计（按第一性原理取舍）：
 - **令牌从文件读，自动生成并持久化** → 重启后令牌不变，手机上的 cookie 不会失效。
-- **本机免鉴权** → 不破坏 `present_files` 的本机预览与本机日常使用。
+- **本机免鉴权 → 2026-09-23（审计残留 R2）改为显式 opt-in**：旧实现「peer 是
+  loopback 且无代理头就免令牌」是**隐式默认**——任何本机回环代理只要漏传
+  指定头，整站就免鉴权。现在 loopback 免令牌只在显式设置 `LG_LOCAL_BYPASS=1`
+  时开启（默认关闭=本机访问也需令牌；本机开发带令牌的既有用法不受影响，
+  serve_remote.sh 不设该开关）。启动自检（`self_check`）如实打印当前状态。
 - **但要识别反向代理**：cloudflared 把隧道流量转到本机，`request.client.host` 会是 `127.0.0.1`。
   若只看 host 就会**把整条外网流量当本机放行**，鉴权形同虚设。
   故：只有在 host 是本机 **且没有** `CF-Connecting-IP` / `X-Forwarded-For` 时才免鉴权。
@@ -62,13 +66,32 @@ def load_token() -> str | None:
 _TOKEN = load_token()
 _PROXY_HEADERS_ACTIVE = False
 
+# R2（审计残留 2026-09-23）：loopback 免令牌的**显式开关**。
+# 默认关闭 = 本机回环请求也需令牌；只有显式 `LG_LOCAL_BYPASS=1` 才免。
+# 取值口径从严：只有字面 "1" 算开（"0"/"yes"/"true" 一律不算——开关语义
+# 必须无歧义，避免 "看起来像开了其实没开" 的对账事故）。
+_LOCAL_BYPASS_ENV = "LG_LOCAL_BYPASS"
+
+
+def local_bypass_enabled() -> bool:
+    """loopback 免令牌是否显式开启（每次调用现读环境，测试可 monkeypatch）。
+
+    严格等值比较，不 strip、不宽容大小写——" 1"/"01"/"yes" 都不算开。"""
+    return os.environ.get(_LOCAL_BYPASS_ENV) == "1"
+
 
 def _is_local(request: Request) -> bool:
-    """本机直连（非经代理）。经代理的请求即便 host 是 127.0.0.1 也不算本机。"""
+    """本机直连（非经代理）**且** loopback 免令牌已显式开启。
+
+    经代理的请求即便 host 是 127.0.0.1 也不算本机（代理头一票否决，
+    即使 LG_LOCAL_BYPASS=1 也不豁免——回环代理漏传头不能变成全站免鉴权）。
+    """
     host = request.client.host if request.client else ""
     if host not in _LOCAL_HOSTS:
         return False
-    return not any(h in request.headers for h in _PROXY_HEADERS)
+    if any(h in request.headers for h in _PROXY_HEADERS):
+        return False
+    return local_bypass_enabled()
 
 
 def _is_https(request: Request) -> bool:
@@ -105,8 +128,29 @@ _GATE_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 </form></body></html>"""
 
 
+def self_check() -> None:
+    """启动自检（R2）：如实打印鉴权面与 loopback 免令牌开关状态。
+
+    绑定面（0.0.0.0 还是 loopback）归 uvicorn `--host` 管，应用进程内拿
+    不到真实值，这里指明去哪看；serve_remote.sh 侧会另行打印它控制的
+    `--host`。免令牌状态是应用侧能确知的事实，必须原样亮出来——审计
+    残留 R2 的诉求就是「免令牌不许再是隐式默认」。
+    """
+    if _TOKEN is None:
+        mode = "鉴权=关闭（REVIEW_NO_AUTH=1，所有请求免令牌——仅限本机开发/测试）"
+    elif local_bypass_enabled():
+        mode = ("鉴权=开启；loopback 免令牌=开启（LG_LOCAL_BYPASS=1）"
+                "——本机直连免令牌，带代理头的请求仍需令牌")
+    else:
+        mode = ("鉴权=开启；loopback 免令牌=关闭（LG_LOCAL_BYPASS 未设）"
+                "——本机访问也需令牌（?t=<token> 或 cookie）")
+    print(f"[access] 启动自检：{mode}；绑定面看 uvicorn --host"
+          f"（0.0.0.0=对外暴露，127.0.0.1=仅本机）", flush=True)
+
+
 def install(app) -> None:
     """挂上访问门。未配置令牌时完全不介入（本机使用行为不变）。"""
+    self_check()
     if _TOKEN is None:
         return
 
