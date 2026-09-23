@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import threading
@@ -120,6 +121,16 @@ def looks_broken(text: str) -> bool:
 
 LLM_SYSTEM = ("你是中文文本修复器。只把被盗版工具换成拼音的字**还原成汉字**，"
               "并删掉残留的站点水印碎片。不改写文风、不增删内容、不调整句读。")
+
+# ── 正文保留门（审计《language-genome-code-audit-20260923》非阻断项）──
+# LLM 截断、跑题、只回一句"已修复"时，直接覆写会把好正文换成残句，
+# 而 text_clean 是下游取题/上下文/生成优先读的正文——误清洗会静默污染下游。
+# 门默认开启；设 CLEAN_TEXT_GUARD=0/off/false/no 可临时关闭（对比用）。
+GUARD_ENV = "CLEAN_TEXT_GUARD"
+GUARD_MIN_LEN = 20       # 去空白后低于此长度 → 视为垃圾输出（如"已修复"），拒
+GUARD_MIN_RATIO = 0.6    # 相对长度下限：out < 0.6×src → 视为截断，拒
+GUARD_SHORT_SRC = 40     # 短原文豁免口径：src 去空白后 ≤ 40 字时**不做比例卡**，
+                         # 只卡绝对下限——否则 25 字的正常短段会被 0.6 比例误伤全拒。
 # 分批：一段一次调用要跑 1 万多段（≈11 小时）。10 段一包，调用数掉到约 1/10，
 # 且同包内互相不干扰（编号返回，顺序可校验）。
 LLM_BATCH = 10
@@ -139,7 +150,34 @@ LLM_PROMPT = """下面有 {n} 段中文小说（编号 1..{n}），其中有些�
 {{"items": [{{"i": 1, "text": "第1段修复后的文本"}}, {{"i": 2, "text": "第2段修复后的文本"}}]}}"""
 
 _lock = threading.Lock()
-_stat = {"rule_ok": 0, "llm_ok": 0, "llm_failed": 0, "skip": 0, "still_broken": 0}
+_stat = {"rule_ok": 0, "llm_ok": 0, "llm_failed": 0, "llm_rejected": 0,
+         "llm_identical": 0, "skip": 0, "still_broken": 0}
+
+
+def guard_verdict(src: str, out: str) -> str:
+    """正文保留门的判定：返回 'accept' / 'identical' / 'too_short' / 'truncated'。
+
+    口径（见 GUARD_* 常量注释）：
+    - out 去空白后与 src 去空白后完全相同 → 'identical'（幂等，免无谓 UPDATE，非拒绝）；
+    - out 去空白后 < GUARD_MIN_LEN → 'too_short'（垃圾输出，如"已修复"）；
+    - src 去空白后 > GUARD_SHORT_SRC 且 out < GUARD_MIN_RATIO×src → 'truncated'；
+      短原文豁免比例卡，避免把正常短段全拒。
+    """
+    s_src, s_out = (src or "").strip(), (out or "").strip()
+    if s_out == s_src:
+        return "identical"
+    if len(s_out) < GUARD_MIN_LEN:
+        return "too_short"
+    if len(s_src) > GUARD_SHORT_SRC and len(s_out) < GUARD_MIN_RATIO * len(s_src):
+        return "truncated"
+    return "accept"
+
+
+def _guard_enabled(guard: bool | None = None) -> bool:
+    """门开关：显式参数优先；否则读 GUARD_ENV（默认开启）。"""
+    if guard is not None:
+        return guard
+    return os.environ.get(GUARD_ENV, "").strip().lower() not in {"0", "off", "false", "no"}
 
 
 def parse_json(text: str) -> dict | None:
@@ -225,8 +263,13 @@ def polish(limit: int = 0) -> dict:
     return {"polished": n, "checked": len(segs)}
 
 
-def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False) -> dict:
-    """把规则修不掉的送 LLM 还原拼音。幂等：text_clean 已无拉丁残留的会跳过。"""
+def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False,
+            guard: bool | None = None) -> dict:
+    """把规则修不掉的送 LLM 还原拼音。幂等：text_clean 已无拉丁残留的会跳过。
+
+    正文保留门（默认开）：LLM 结果过短/截断时不覆写 text_clean，计 llm_rejected；
+    可用 guard=False 或环境变量 CLEAN_TEXT_GUARD=0 关闭（对比用）。
+    """
     with db.session() as s:
         rows = [(x.id, x.text_clean or x.text) for x in s.query(Segment).all()]
     todo = [(i, t) for i, t in rows if needs_llm(t)]
@@ -237,6 +280,7 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False) ->
           f"× {LLM_BATCH} 段")
     if not todo:
         return {"llm": 0}
+    guard_on = _guard_enabled(guard)
 
     def one(batch: list[tuple[str, str]]) -> None:
         try:
@@ -246,7 +290,7 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False) ->
                 _stat["llm_failed"] += len(batch)
             return
         with db.session() as s:
-            for (sid, _), out in zip(batch, outs):
+            for (sid, src), out in zip(batch, outs):
                 if not out:
                     with _lock:
                         _stat["llm_failed"] += 1
@@ -254,6 +298,16 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False) ->
                 seg = s.get(Segment, sid)
                 if seg is None:
                     continue
+                if guard_on:
+                    verdict = guard_verdict(src, out)
+                    if verdict == "identical":       # 幂等：不写，免无谓 UPDATE
+                        with _lock:
+                            _stat["llm_identical"] += 1
+                        continue
+                    if verdict != "accept":          # 过短/截断 → 保留原值不写
+                        with _lock:
+                            _stat["llm_rejected"] += 1
+                        continue
                 seg.text_clean = out
                 with _lock:
                     _stat["llm_ok"] += 1
@@ -265,6 +319,7 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False) ->
     with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
         list(ex.map(one, batches))
     print(f"完成：llm_ok={_stat['llm_ok']} failed={_stat['llm_failed']} "
+          f"门拒={_stat['llm_rejected']} 幂等={_stat['llm_identical']} "
           f"仍坏={_stat['still_broken']}（{(time.time() - t0) / 60:.1f} 分钟）")
     return dict(_stat)
 
