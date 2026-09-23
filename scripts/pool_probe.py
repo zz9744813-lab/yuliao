@@ -14,6 +14,16 @@
   报 {model, ok|error, latency_ms, tokens}，超 --slow-ms（默认 30000）标
   slow。live 探针持 live_lock（R6：与 pytest/其他 live 互斥）。
 
+退出码（会审 794521f 整改：真 exit 2，不再用 SystemExit(str)——那实际退 1）：
+- 0 = 无阻断（默认档预检通过）
+- 2 = 预检发现池外名（阻断；原因打印到 stderr 后 raise SystemExit(2)）
+
+verdict 判定表（live 档，契约）：
+- ok:   调用未抛异常，且 status == "ok"，且 error 为空，且 latency_ms <= slow_ms
+- slow: 调用未抛异常，且 status == "ok"，且 error 为空，但 latency_ms > slow_ms（慎选）
+- dead: 调用抛异常，**或软失败**（未抛异常但 status != "ok" / error 非空）——
+  在册但叫不醒、以错误响应收场的死名不得判 ok（R8 要防的正是要这个场景）
+
 用法：
     python scripts/pool_probe.py --models deepseek-v4.1-flash,z-ai/glm-5.3
     POOL_PROBE_ALLOW_LIVE=1 python scripts/pool_probe.py --models a,b --live
@@ -39,12 +49,15 @@ SLOW_MS_DEFAULT = 30_000
 
 def probe_one(model: str) -> dict:
     """单模型一次最小真探（max_tokens=1）。异常不炸——探针的本职就是
-    把「叫不醒」如实报出来。"""
+    把「叫不醒」如实报出来。软失败（未抛异常但 status != "ok" / error
+    非空）同样算叫不醒：ok=False，verdict 判 dead。"""
     try:
         r = gateway.chat(model=model, system="存活探针",
                          user="1", purpose="pool_probe", temperature=0.0,
                          max_tokens=1)
-        return {"model": model, "ok": True, "latency_ms": r.latency_ms,
+        alive = (getattr(r, "status", None) == "ok"
+                 and not getattr(r, "error", None))
+        return {"model": model, "ok": alive, "latency_ms": r.latency_ms,
                 "tokens": r.tokens_in + r.tokens_out,
                 "status": r.status, "error": r.error}
     except Exception as exc:                                # noqa: BLE001
@@ -87,8 +100,11 @@ def main() -> None:
                                   "POOL_PROBE_ALLOW_LIVE=1"},
                          ensure_ascii=False, indent=1))
         if blocked:
-            raise SystemExit(f"[预检失败] 池外名：{blocked}——拒绝放行"
-                             "（预检闸语义，exit 2）")
+            # 真 exit 2（SystemExit(str) 实际退 1，会审 794521f 整改）；
+            # 原因照旧打印，与 require_models 同口径
+            print(f"[预检失败] 池外名：{blocked}——拒绝放行"
+                  "（预检闸语义，exit 2）", file=sys.stderr)
+            raise SystemExit(2)
         return
     if os.environ.get("POOL_PROBE_ALLOW_LIVE") != "1":
         raise SystemExit("--live 需要环境变量 POOL_PROBE_ALLOW_LIVE=1（双闸）")
