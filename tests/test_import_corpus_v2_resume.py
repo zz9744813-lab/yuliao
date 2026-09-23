@@ -337,10 +337,20 @@ def test_cli_exit_codes_on_temp_db(tmp_path):
             cwd=str(ROOT), env=env, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=180)
 
+    real_db = ROOT / "data" / "language_genome.db"
+
+    def _real_db_state():
+        """真库指纹：存在性 + mtime_ns + size（真库本就存在时不得被本次 CLI 创建/改写）。"""
+        if not real_db.exists():
+            return (False, None, None)
+        st = real_db.stat()
+        return (True, st.st_mtime_ns, st.st_size)
+
+    before = _real_db_state()
     first, second = run(), run()
     assert first.returncode == 0, first.stdout + first.stderr
     assert "v2 段 6" in first.stdout
     assert second.returncode == 0, second.stdout + second.stderr
     assert "已导入过" in second.stdout
     assert (tmp_path / "cli.db").exists()
-    assert not (ROOT / "data" / "language_genome.db").exists(), "临时库之外的真库不得被创建"
+    assert _real_db_state() == before, "临时库之外的真库不得被创建或改写"
