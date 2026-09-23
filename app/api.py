@@ -29,7 +29,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import access, config, console, corpus, db, engine, experiments, observability
 from .ids import new_id
@@ -77,7 +77,9 @@ def import_inbox():
 
 
 class FileImport(BaseModel):
-    path: str
+    # 审计 P1（2026-09-23）：形状校验挡空串/超长；真正的内容闸在
+    # corpus.import_file（允许根 + 扩展名白名单 + 体积上限）。
+    path: str = Field(min_length=1, max_length=1024)
     title: str | None = None
     author: str | None = None
     note: str | None = None
@@ -86,11 +88,16 @@ class FileImport(BaseModel):
 @app.post("/corpus/import-file")
 def import_file(body: FileImport):
     with db.session() as s:
+        # 守卫拒因（import_root_not_allowed 等）以 HTTP 200 + error 字段
+        # **原样透出**——与既有错误返回风格一致，不改 500。
         return corpus.import_file(s, body.path, title=body.title,
                                   author=body.author, note=body.note)
 
 
 class DistillerImport(BaseModel):
+    # 默认值留在签名里（既有调用方依赖）；corpus.import_distiller 把这两个
+    # 逐字路径列为内置精确白名单例外（见 app/corpus.py 的
+    # _DISTILLER_BUILTIN_EXACT 注释），其余路径必须在 LG_IMPORT_ROOTS 允许根内。
     db_path: str = r"F:\agi\novel-distiller\data\app.sqlite3"
     root: str = r"F:\agi\novel-distiller"
 
@@ -121,6 +128,8 @@ def list_segments(work_id: str | None = None, limit: int = 20, offset: int = 0):
         if work_id:
             q = q.filter(Segment.work_id == work_id)
         rows = q.offset(offset).limit(limit).all()
+        # [:80] 是响应里段文本预览的**硬上限**（审计 P1：防整库正文经列表端点
+        # 批量外流）。长度/字段语义已定，不要放宽或改名。
         return [{"id": x.id, "work": x.work_id, "chars": x.n_chars, "sents": x.n_sentences,
                  "text": x.text[:80] + "…"} for x in rows]
 
