@@ -12,6 +12,15 @@
 7. 按构造标注（独立审查 REVISE 修法）：op 必填，S1/S2 归属由 label_of(op)
    直接决定（唯一映射、判定确定）；四个 op 各有**对着自己**的构造断言；
    混合 op（跨标签证据形态混入同一对）必须被拒。
+8. 门4 anti-copy / 门5 cross-strategy（二次独立审查 REVISE 修法）：human 侧
+   全文被 ai 侧**连续包含**（照抄+贴标签）必须被拒且理由含 `anti-copy` 与
+   命中片段长度；两条判据（ai 以 human 全文为前缀 / 剔标点后归一包含且
+   ≥ min_copy_len）各有一条对应用例；本方与对方策略特征词表同时命中必须
+   被拒且理由含 `cross-strategy`。审查席两个反例（照抄+贴标签 / 逐字引用
+   后接无关延展）逐字入回归，必须被拦。
+9. 旁路账本：live 落库时完整配对（含 AI 侧原文、pair_id、op 两个标签、
+   逐门结果与拒绝理由）逐对追加写入 JSONL（路径参数，默认 k2_pairs.jsonl）；
+   dry-run 不写账本；不改任何既有表结构。
 
 纪律：测试**从不**执行 CLI --live 开放路径（那是真落库）；库函数
 run_contrast(live=True) 只对 conftest 的临时 sqlite 用。
@@ -51,8 +60,43 @@ HUMAN_S2 = "林昭推门进来，把伞收了，靠在门边喘气。"
 AI_S2 = ("林昭推门进来，把伞收了，靠在门边喘气。忽然她像是想起了什么，"
          "缓缓直起身，然后一步一步走回桌边，仿佛屋里的一切都慢了下来。")
 HUMAN_PSYCH = "林昭把杯子放下，没接话。"
-AI_PSYCH = "林昭把杯子放下，没接话。她心里明白，这件事再争也不会有结果。"
+# 好对纪律（门4 新口径）：AI 侧不得逐字包含 human 全文——首句改写（没→没有），
+# AI 侧不再以 human 全文为前缀，是合理的扩写而非"照抄+贴标签"。
+AI_PSYCH = "林昭把杯子放下，没有接话。她心里明白，这件事再争也不会有结果。"
 SCENES = {"林昭", "临江城"}
+
+# 旁路账本用例的**独立证据文本**：与 persist 用例的 (HUMAN_S1, AI_S1) 刻意
+# 不同。原因：同一 pytest 会话共用一条临时库，_seed 每调一次就多一张同
+# (strategy_key, version=1) 的卡，而 resolve_strategy 的 id 兜底序排的是
+# `ESV2-<随机hex>` 的**字典序**（app/ids.py），不是创建序——若账本用例复用
+# 同一证据文本，它可能解到 persist 用例**已写过行**的旧卡上：幂等 dup 命中
+# ⇒ skip_dup_sha ⇒ written=0（随机翻脸，本用例曾因此在主控复跑变红）。
+# 换独有证据文本后，落库结果与「解到哪张卡」无关，判定确定。
+# 构造仍是 S1 合法形态：首句改写（没→没有 ⇒ AI 侧不以 human 全文为前缀、
+# 剔标后也不构成连续包含，门4 新口径放行）、新增句命中解释标记
+# （其实/因为/说到底）、两侧共指 沈默、长度比约 2.1。
+HUMAN_LEDGER = "沈默把茶碗推过去，没再多问。廊下有人挑着担子走过，他侧耳听了一阵，终究没开口。"
+AI_LEDGER = ("沈默把茶碗推过去，没有再多问。其实他心里清楚，就算问了她也未必肯讲，"
+             "因为讲了于事无补。廊下有人挑着担子走过，他侧耳听了一阵，"
+             "终究没开口，说到底不过是怕惹麻烦。")
+SCENES_LEDGER = {"沈默", "临江城"}
+
+# —— 二次独立审查 REVISE 反例（文本逐字取自审查席反例描述）——
+# 反例1（贴标签式假对照）：ai 侧 = human 侧逐字全文 + 尾缀一句万能标签。
+# human 侧取 林昭把杯子放下…（36 字）——短于 min_copy_len=40，仍须因
+# "ai 以 human 全文为前缀开头且其后直接接标签句"被判拒（判据①）。
+CE1_TAG = "然后她忽然笑了一下，其实她心里明白，说到底不过是懒得再提。"
+CE1_AI = HUMAN_S1 + CE1_TAG
+# 反例2（引用后跑题式）：逐字引用后接无关延展。延展不含对方策略词表，
+# 使拦截只能来自 anti-copy（归因干净），且既有四道门确实放行它。
+CE2_EXT = ("其实说到底，院里的猫又上了墙，风把晾衣绳吹得直晃，"
+           "远处的火车过了桥才响起来。")
+CE2_AI = HUMAN_S1 + CE2_EXT
+
+# 判据②（剔标点后归一包含）的专用夹具：human 侧剔标后 48 字 ≥ min_copy_len
+# 40，使其能走"归一包含"分支（而非 36 字反例1 走的前缀分支）。
+HUMAN_LONG = ("林昭把杯子放下，没接话。窗外有人喊了一嗓子，她朝那边看了一眼，"
+              "还是没说。廊下的灯笼晃了两晃，她把袖口拢紧了些。")
 
 # 既有用例沿用 strategy_key 口径时的缺省 op（按构造标注：每对必须声明一个 op）
 _DEFAULT_OP = {k2c.S1_KEY: k2c.OP_ADD_INTERPRETATION,
@@ -147,16 +191,16 @@ def test_gate_length_ratio_accept_and_reject():
 def test_gate_pair_collects_all_and_summarize_classes():
     bad = _pair(k2c.S1_KEY, HUMAN_S1, HUMAN_S1, scene_keys=set())
     ok, reasons = k2c.gate_pair(bad)
-    assert not ok and len(reasons) >= 4, \
-        f"四道门全破时理由须收全不短路：{reasons}"
+    assert not ok and len(reasons) >= 5, \
+        f"六道门全破时理由须收全不短路：{reasons}"
     pairs = [_pair(k2c.S1_KEY, HUMAN_S1, AI_S1),
              _pair(k2c.S2_KEY, HUMAN_S2, AI_S2), bad]
     rep = k2c.summarize(pairs)
     assert rep["n_pairs"] == 3 and rep["passed"] == 2 and rep["rejected"] == 1
     assert set(rep["reject_reason_classes"]) == {
         "add_interpretation 构造不符", "S1 双向未命中",
-        "场景指称缺失", "长度比超界"}, \
-        f"拒绝理由必须分类可读：{rep['reject_reason_classes']}"
+        "场景指称缺失", "长度比超界", "anti-copy 照抄+贴标签"}, \
+        f"拒绝理由必须分类可读（含新门 anti-copy）：{rep['reject_reason_classes']}"
     assert rep["by_op"] == {"add_interpretation": {"passed": 1, "rejected": 1},
                             "add_psych_narration": {"passed": 0, "rejected": 0},
                             "split_beats": {"passed": 1, "rejected": 0},
@@ -200,6 +244,11 @@ def test_dry_run_zero_writes(tmp_path, monkeypatch):
         ensure_ascii=False), encoding="utf-8")
     with db.session() as s:
         before = s.query(StrategyInstance).count()
+
+    def _boom(*_a, **_k):               # pragma: no cover
+        raise AssertionError("dry-run 不许写旁路账本")
+
+    monkeypatch.setattr(k2c, "write_pairs_ledger", _boom)
     monkeypatch.setattr(sys, "argv",
                         ["k2c", "--dry-run", "--pairs-file", str(pf)])
     k2c.main()                          # 默认即 dry-run，不应碰库
@@ -224,13 +273,15 @@ def test_live_without_env_refused(tmp_path, monkeypatch):
 
 
 # --------------------------------------------- 落库：幂等 + 破形不落
-def test_persist_idempotent_and_gated_pairs_never_land():
+def test_persist_idempotent_and_gated_pairs_never_land(tmp_path):
     seg_id, tv, key = _seed()
+    led = str(tmp_path / "k2_pairs.jsonl")
     good = _pair(key, HUMAN_S1, AI_S1,
                  meta={"segment_id": seg_id, "text_version": tv})
     with db.session() as s:
-        rep1 = k2c.run_contrast(s, [good], live=True)
+        rep1 = k2c.run_contrast(s, [good], live=True, ledger_path=led)
     assert rep1["written"] == 1 and rep1["passed"] == 1
+    assert rep1["ledger"]["entries"] == 1, "live 落库必须逐对写旁路账本"
     with db.session() as s:
         rows = (s.query(StrategyInstance)
                 .filter_by(evidence_sha256=good.human_sha256).all())
@@ -240,12 +291,13 @@ def test_persist_idempotent_and_gated_pairs_never_land():
         assert cond["op"] == k2c.OP_ADD_INTERPRETATION
         assert cond["op_label"] == "S1"
         assert cond["ai_side_sha256"] and cond["ai_side_chars"] == len(AI_S1)
-        assert sorted(cond["gates"]) == ["keyword_cooccurrence",
+        assert sorted(cond["gates"]) == ["anti_copy", "cross_strategy",
+                                         "keyword_cooccurrence",
                                          "length_ratio",
                                          "op_construction",
                                          "scene_reference"]
     with db.session() as s:             # 同输入重跑：同 sha 不重复落库
-        rep2 = k2c.run_contrast(s, [good], live=True)
+        rep2 = k2c.run_contrast(s, [good], live=True, ledger_path=led)
     assert rep2["written"] == 0 and rep2["skipped"].get("skip_dup_sha") == 1
     with db.session() as s:
         assert (s.query(StrategyInstance)
@@ -253,7 +305,7 @@ def test_persist_idempotent_and_gated_pairs_never_land():
     bad = _pair(key, HUMAN_S2, HUMAN_S2, scene_keys=SCENES,
                 meta={"segment_id": seg_id, "text_version": tv})
     with db.session() as s:             # 破形对：门内拦掉，永不落库
-        rep3 = k2c.run_contrast(s, [bad], live=True)
+        rep3 = k2c.run_contrast(s, [bad], live=True, ledger_path=led)
     assert rep3["written"] == 0 and rep3["rejected"] == 1
     with db.session() as s:
         assert (s.query(StrategyInstance)
@@ -262,24 +314,25 @@ def test_persist_idempotent_and_gated_pairs_never_land():
 
 
 # ------------------------------- 既有门禁照用：span 核不上 / 缺定位不落
-def test_persist_span_and_meta_gates():
+def test_persist_span_and_meta_gates(tmp_path):
     seg_id, tv, key = _seed()
+    led = str(tmp_path / "k2_pairs.jsonl")
     off = _pair(key, HUMAN_S1, AI_S1, span=(3, len(HUMAN_S1) + 5),
                 meta={"segment_id": seg_id, "text_version": tv})
     with db.session() as s:             # span 对登记段核不上 ⇒ 不落（不放宽）
-        rep = k2c.run_contrast(s, [off], live=True)
+        rep = k2c.run_contrast(s, [off], live=True, ledger_path=led)
     assert rep["written"] == 0 and rep["skipped"].get("skip_span_mismatch") == 1
 
     no_seg = _pair(key, HUMAN_S1, AI_S1, meta={"text_version": tv})
     with db.session() as s:
-        rep2 = k2c.run_contrast(s, [no_seg], live=True)
+        rep2 = k2c.run_contrast(s, [no_seg], live=True, ledger_path=led)
     assert rep2["skipped"].get("skip_no_segment") == 1
 
     no_strategy = _pair(k2c.S2_KEY, HUMAN_S2, AI_S2, span=(0, len(HUMAN_S2)),
                         meta={"segment_id": seg_id, "text_version": tv})
     with db.session() as s:             # 门全过但库内无该卡 ⇒ 跳过，不自动建卡
-        rep3 = k2c.run_contrast(s, [no_strategy], live=True)
-    assert rep3["passed"] == 1           # 四道门过了（拦点在库侧，不在门侧）
+        rep3 = k2c.run_contrast(s, [no_strategy], live=True, ledger_path=led)
+    assert rep3["passed"] == 1           # 六道门过了（拦点在库侧，不在门侧）
     assert rep3["skipped"].get("skip_no_strategy") == 1
     with db.session() as s:
         assert (s.query(StrategyInstance)
@@ -405,3 +458,140 @@ def test_marker_vocab_overridable(monkeypatch):
     monkeypatch.setattr(k2c, "INTERPRET_MARKERS", ("争",))
     ok, why = k2c.gate_op_construction(_pair(k2c.S1_KEY, HUMAN_S1, AI_S1))
     assert ok and why == [], "换成自定义词表命中后同一对必须通过"
+
+
+# ------------------------------- 门4：反抄写（anti-copy）接受与拒绝
+def test_gate_anti_copy_accept_and_reject():
+    # 正例：摊开会复述大半原文，但第 1 句被改写（没接话→没有接话）——
+    # ai 侧不以 human 全文为前缀、剔标后全文也不连续包含 ⇒ 放行
+    ok, why = k2c.gate_anti_copy(_pair(k2c.S1_KEY, HUMAN_S1, AI_S1))
+    assert ok and why == [], why
+    # S2 类对不适用本门（按构造保留原句，human 本就整段在 ai 侧）
+    ok, why = k2c.gate_anti_copy(_pair(k2c.S2_KEY, HUMAN_S2, AI_S2))
+    assert ok and why == [], why
+    # human 整段被逐字包含（ai 以 human 全文为前缀，判据①）⇒ 拒
+    ok, why = k2c.gate_anti_copy(
+        _pair(k2c.S1_KEY, HUMAN_S1, HUMAN_S1 + "其实她累了。"))
+    assert not ok and any("anti-copy" in r for r in why), why
+    # fail-closed：human 剔标后无内容 ⇒ 不可判即拒
+    ok, why = k2c.gate_anti_copy(
+        _pair(k2c.S1_KEY, "……！！", "其实她累了。再者说，也没用。"))
+    assert not ok and any("anti-copy 不可判" in r for r in why), why
+
+
+def test_anti_copy_min_copy_len_overridable(monkeypatch):
+    # ai 侧把 human 全文嵌在中部（非前缀）：剔标后 31 字 < 默认 40 ⇒ 放行
+    ai_embed = "屋外起了风。" + HUMAN_S1 + "她终于抬脚往回走。"
+    p = _pair(k2c.S1_KEY, HUMAN_S1, ai_embed)
+    ok, why = k2c.gate_anti_copy(p)
+    assert ok and why == [], "短于 min_copy_len 的偶合不判照抄"
+    monkeypatch.setattr(k2c, "MIN_COPY_LEN", 30)
+    ok, why = k2c.gate_anti_copy(p)
+    assert not ok and any("anti-copy" in r for r in why), \
+        "min_copy_len 调低后同一对必须被拒（证明门读的是模块常量）"
+    monkeypatch.setattr(k2c, "MIN_COPY_LEN", 40)
+    ok, why = k2c.gate_anti_copy(p)
+    assert ok and why == [], why
+
+
+# ------------------------------- 门5：跨策略互斥（cross-strategy）
+def test_gate_cross_strategy_accept_and_reject():
+    ok, why = k2c.gate_cross_strategy(_pair(k2c.S1_KEY, HUMAN_S1, AI_S1))
+    assert ok and why == [], why
+    ok, why = k2c.gate_cross_strategy(_pair(k2c.S2_KEY, HUMAN_S2, AI_S2))
+    assert ok and why == [], why
+    # S1 对的 ai 侧同时命中对方（S2）词表 ⇒ 拒，理由带双方命中的词
+    ok, why = k2c.gate_cross_strategy(
+        _pair(k2c.S1_KEY, HUMAN_S1, AI_S1 + "然后她缓缓转身。"))
+    assert not ok and any("cross-strategy" in r for r in why), why
+    cross = next(r for r in why if "cross-strategy" in r)
+    assert "然后" in cross and "其实" in cross, cross
+    # S2 对的 ai 侧同时命中对方（S1）词表 ⇒ 拒
+    ok, why = k2c.gate_cross_strategy(
+        _pair(k2c.S2_KEY, HUMAN_S2, AI_S2 + "其实她心里明白。"))
+    assert not ok and any("cross-strategy" in r for r in why), why
+
+
+# ------- 审查席反例1：照抄+贴标签（同一对 S1/S2 双卡双计）⇒ 两面都拦
+def test_review_counterexample1_copy_plus_label():
+    # 同一对文本：先以 S1 提交，再以 S2 提交（审查席指认的双卡双计形态）
+    p_s1 = _pair(k2c.S1_KEY, HUMAN_S1, CE1_AI, op=k2c.OP_ADD_INTERPRETATION)
+    ok, why = k2c.gate_pair(p_s1)
+    assert not ok, "反例1（照抄+贴标签）以 S1 提交必须被拒"
+    assert any("anti-copy" in r for r in why), why
+    ac = next(r for r in why if "anti-copy" in r)
+    assert "前缀" in ac and str(len(HUMAN_S1)) in ac, \
+        f"anti-copy 理由必须点名前缀照抄与命中片段长度: {ac}"
+    p_s2 = _pair(k2c.S1_KEY, HUMAN_S1, CE1_AI, op=k2c.OP_SPLIT_BEATS)
+    ok2, why2 = k2c.gate_pair(p_s2)
+    assert not ok2, "同一对换 S2 标签重交仍必须被拒（不许双卡双计）"
+    assert any("cross-strategy" in r for r in why2), why2
+    cross = next(r for r in why2 if "cross-strategy" in r)
+    assert "其实" in cross and "忽然" in cross, \
+        f"cross-strategy 理由必须带上双方命中的词: {cross}"
+
+
+# ------- 反例1 变体（判据②）：human 全文嵌在 ai 中部、标点被改动
+# ⇒ 原文 `in` 不命中、剔标点归一后连续包含且 ≥ min_copy_len ⇒ 仍拒
+def test_anti_copy_embedded_containment_variant():
+    ai_embed = ("屋外起了风。" + HUMAN_LONG.replace("。", "！")
+                + "她终于抬脚往回走。")
+    p = _pair(k2c.S1_KEY, HUMAN_LONG, ai_embed,
+              op=k2c.OP_ADD_INTERPRETATION)
+    # 钉住形态：非前缀开头、原文逐字不包含——拦截只能来自归一包含分支
+    assert not (ai_embed.startswith(HUMAN_LONG))
+    assert HUMAN_LONG not in ai_embed
+    ok, why = k2c.gate_anti_copy(p)
+    assert not ok, "human 全文剔标后被连续包含（≥ min_copy_len）必须被拒"
+    assert any("anti-copy" in r for r in why), why
+    ac = next(r for r in why if "anti-copy" in r)
+    assert "连续子串" in ac and str(len(k2c._strip_punct(HUMAN_LONG))) in ac \
+        and str(k2c.MIN_COPY_LEN) in ac, \
+        f"anti-copy 理由必须点名归一包含与命中片段长度: {ac}"
+
+
+# ------- 审查席反例2：逐字引用后接无关延展 ⇒ anti-copy 拦
+def test_review_counterexample2_quote_then_drift():
+    p = _pair(k2c.S1_KEY, HUMAN_S1, CE2_AI, op=k2c.OP_ADD_INTERPRETATION)
+    # 钉住审查席的反例形态：既有四道门确实放行它——拦截只能来自新门
+    for name, gate in k2c.GATES:
+        if name in ("anti_copy", "cross_strategy"):
+            continue
+        g_ok, g_why = gate(p)
+        assert g_ok, f"反例2 应过既有门 {name}（否则反例不成立）: {g_why}"
+    ok, why = k2c.gate_pair(p)
+    assert not ok, "反例2（逐字引用后跑题）必须被拒"
+    assert any("anti-copy" in r for r in why), why
+
+
+# ------------------------------- 旁路账本：AI 侧可复核 + 拒绝理由入账
+def test_pairs_ledger_records_full_pair(tmp_path):
+    # 独立证据文本（HUMAN_LEDGER/AI_LEDGER，理由见其定义处注释）：
+    # 落库结果必须与「resolve 解到哪张同键卡」无关，判定确定。
+    seg_id, tv, key = _seed(human_text=HUMAN_LEDGER)
+    good = _pair(key, HUMAN_LEDGER, AI_LEDGER, scene_keys=SCENES_LEDGER,
+                 meta={"segment_id": seg_id, "text_version": tv})
+    assert k2c.gate_pair(good)[0] is True, \
+        f"账本用例的 good 对必须先过六道门：{k2c.gate_pair(good)[1]}"
+    bad = _pair(key, HUMAN_S2, HUMAN_S2, scene_keys=SCENES,
+                meta={"segment_id": seg_id, "text_version": tv})
+    led = tmp_path / "k2_pairs.jsonl"
+    with db.session() as s:
+        rep = k2c.run_contrast(s, [good, bad], live=True, ledger_path=str(led))
+    assert rep["written"] == 1 and rep["skipped"] == {}, \
+        f"过门对必须落库（skipped 报告拦点）：{rep}"
+    assert rep["ledger"] == {"path": str(led), "entries": 2}
+    recs = [json.loads(line) for line in
+            led.read_text(encoding="utf-8").strip().splitlines()]
+    assert len(recs) == 2
+    by_outcome = {r["persist_outcome"]: r for r in recs}
+    w = by_outcome["written"]
+    assert w["ai_text"] == AI_LEDGER and w["human_text"] == HUMAN_LEDGER, \
+        "旁路账本必须存 AI 侧原文与完整配对（事后可复核）"
+    assert w["op"] == k2c.OP_ADD_INTERPRETATION and w["op_label"] == "S1"
+    assert w["human_sha256"] == good.human_sha256 and w["ai_sha256"]
+    assert set(w["gate_results"].values()) == {"pass"}
+    assert w["pair_id"] == k2c.pair_id(good), "pair_id 必须确定性、可跨 run 对账"
+    g = by_outcome["gated_out"]
+    assert g["gates_ok"] is False and g["reject_reasons"], "拒绝理由必须入账"
+    assert g["ai_text"] == HUMAN_S2, "被拒对的完整配对同样留档"

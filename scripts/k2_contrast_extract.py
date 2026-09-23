@@ -11,7 +11,7 @@
 REVIEW_merge_plan.md）：靠"事后看文本归类"判 S1/S2（delta_new / delta_dil）
 没有可执行的计算程序 ⇒ 分类器不可机械判定。修法：**按构造标注**——配对时
 显式声明用了哪种操作（`op`，每对只许一个），S1/S2 归属由 op 经唯一映射表
-**直接决定**（可机械），门只验证"这个构造真的成立"。四道**可机械判定**的门：
+**直接决定**（可机械），门只验证"这个构造真的成立"。六道**可机械判定**的门：
 
 - 门0 gate_op_construction（按 op 验证构造，每类 op 有自己的断言）：
   · OP_ADD_INTERPRETATION / OP_ADD_PSYCH_NARRATION（→S1）：AI 侧**句数增加**，
@@ -28,6 +28,24 @@ REVIEW_merge_plan.md）：靠"事后看文本归类"判 S1/S2（delta_new / delt
   引用了此指称），证明两段写的是同一个场景；空集 ⇒ 拒。
 - 门3 gate_length_ratio：len(ai)/len(human) ∈ [1.2, 6.0]，出界 ⇒ 拒
   （S2 的"注水"必须有可测的密度变化；S1 的"摊开"同理）。
+- 门4 gate_anti_copy（anti-copy 反抄写，独立审查 REVISE 反例1/2）：S1 类对
+  若 human 侧全文被 ai 侧**连续包含** ⇒ 拒（"照抄+贴标签"式假对照）。
+  口径是**连续包含**而非模糊相似（合法扩写本就共享大量子串，LCS 相似度
+  阈值必然误杀）：
+  ① ai 侧以 human 侧全文为前缀开头（其后直接接续标签句）⇒ 拒；
+  ② human 侧剔标点后全文作为连续子串出现在 ai 侧、且命中长度 ≥
+  MIN_COPY_LEN（默认 40 字，模块常量，测试可覆写——短于该长度的偶合不判
+  照抄）⇒ 拒。理由含 `anti-copy` 与命中片段长度。S2（拆拍/注水）按构造
+  **保留原句**，human 侧本就整段出现在 ai 侧，不适用本门——该形态的双卡
+  风险由门5 拦。
+- 门5 gate_cross_strategy（cross-strategy 跨策略互斥，独立审查 REVISE
+  反例1 根因）：一对必须**只**在声明的那条策略下放行——用**对方策略**的
+  特征词表把 ai 侧再评一遍：本方词表与对方词表**同时**命中 ⇒ 拒（理由带
+  双方命中的词），从根上堵住"同一对以 S1/S2 双卡双计"。
+- 旁路账本（AI 侧可复核）：live 落库时把**完整配对**（含 AI 侧原文、
+  pair_id、op 与 S1/S2 两个标签、六道门结果与拒绝理由、落库结果）追加
+  写入 JSONL 账本（--pairs-ledger，默认 k2_pairs.jsonl）。不改任何既有
+  表结构（真库建表史有 NOT NULL 无默认的坑，故走旁路文件）。
 
 纪律：
 - **纯离线**：AI 侧片段由调用方注入（--pairs-file / run_contrast 入参），
@@ -86,6 +104,22 @@ _STRATEGY_LABEL = {S1_KEY: "S1", S2_KEY: "S2"}
 # 门3 长度比边界（任务口径：S2 注水/S1 摊开都必须有可测的长度变化）
 MIN_LEN_RATIO = 1.2
 MAX_LEN_RATIO = 6.0
+
+# 门4 反抄写口径（独立审查 REVISE 反例1：ai 侧 = human 侧逐字全文 + 尾缀
+# 标签句）。判据是**连续包含**而非模糊相似——LCS 相似度阈值会误杀合法扩写
+# （同一场景的人名、动作词本就共享大量子串）。两条判据并列，任一命中即拒：
+#   ① ai 侧以 human 侧全文为前缀开头（其后直接接续标签句的典型照抄形态；
+#     反例1 的 human 全文 36 字 < 40，仍由此条判拒——前缀照抄不设长度容错）；
+#   ② human 侧剔标点后全文作为连续子串出现在 ai 侧，且命中长度 ≥
+#     MIN_COPY_LEN（短于该长度的偶合不判照抄）。
+# 模块常量，测试可整体覆写（monkeypatch 模块属性）。
+MIN_COPY_LEN = 40
+
+# 剔标点字符集（中英常用标点与空白；只影响门4 的包含判定，别处不用）
+_PUNCT_CHARS = set(
+    "，。！？；：、…—·～（）《》〈〉「」『』“”‘’"
+    ",.;:!?()<>[]{}'\"`~^%|\\"
+    " \t\n\r")
 
 # ---------------------------------------------------------- 按构造标注
 # 独立审查 REVISE（F:/agi/_scratch/worktrees/mergeplan/REVIEW_merge_plan.md）：
@@ -153,6 +187,11 @@ def _hit_count(text: str, words) -> int:
     """词表命中总次数（substring 口径，离线确定）。"""
     t = text or ""
     return sum(t.count(w) for w in words)
+
+
+def _strip_punct(text: str) -> str:
+    """剔除标点与空白（门4 口径：只比内容字，逗号差异不算改写）。"""
+    return "".join(ch for ch in (text or "") if ch not in _PUNCT_CHARS)
 
 
 def content_tokens(text: str) -> set:
@@ -340,20 +379,83 @@ def gate_length_ratio(pair: ContrastPair) -> tuple[bool, list[str]]:
     return True, []
 
 
+# ---------------------------------------------------------------- 门 4
+def gate_anti_copy(pair: ContrastPair) -> tuple[bool, list[str]]:
+    """门4 反抄写（anti-copy）：human 侧全文被 ai 侧**连续包含** ⇒ 拒。
+
+    只对 S1 类对生效：S2（拆拍/注水）按构造**保留原句**、命题不增，human
+    侧整段出现在 ai 侧正是其合法形态，本门若套用会连正例一起拒——S2 形态
+    的"照抄+贴标签"双卡风险由门5（cross-strategy）拦。
+
+    两条判据并列（任一命中即拒，理由含 `anti-copy` 与命中片段长度）：
+    ① ai 侧以 human 侧全文为前缀开头（`ai.startswith(human)`，照抄+贴标签
+      的典型形态，不设长度容错——审查反例1 的 human 全文 36 字 < 40 仍判拒）；
+    ② human 侧剔标点后全文作为连续子串出现在 ai 侧（`h_norm in a_norm`，
+      去掉首尾空白/标点后仍如此），且命中长度 ≥ MIN_COPY_LEN——短于该
+      长度的偶合不判照抄。"""
+    if OP_LABEL[pair.op] != "S1":
+        return True, []
+    h, a = pair.human_text or "", pair.ai_text or ""
+    h_norm = _strip_punct(h)
+    if not h_norm:
+        return False, ["anti-copy 不可判: human_text 剔标后无内容（fail-closed）"]
+    if a.startswith(h):
+        return False, [f"anti-copy 照抄+贴标签: ai 侧以 human 全文为前缀开头"
+                       f"（命中片段 {len(h)} 字，其后直接接续标签句）——"
+                       f"逐字照抄只贴标签，不构成对照"]
+    if h_norm in _strip_punct(a):
+        n = len(h_norm)
+        if n >= MIN_COPY_LEN:
+            return False, [f"anti-copy 照抄+贴标签: human 侧全文作为连续子串"
+                           f"出现在 ai 侧（剔标点后命中片段 {n} 字 ≥ "
+                           f"min_copy_len={MIN_COPY_LEN}）——"
+                           f"逐字照抄只贴标签，不构成对照"]
+    return True, []
+
+
+# ---------------------------------------------------------------- 门 5
+def gate_cross_strategy(pair: ContrastPair) -> tuple[bool, list[str]]:
+    """门5 跨策略互斥（cross-strategy）：一对必须**只**在声明的那条策略下
+    放行。用**对方策略**的特征词表把 ai 侧再评一遍：本方词表与对方词表
+    **同时**命中 ⇒ 拒（理由带双方命中的词）——同一对不许以 S1/S2 双卡双计
+    （审查反例1 的根因：门1 只查自己策略的词表，从不查对方词表）。"""
+    label = _STRATEGY_LABEL.get(pair.strategy_key, pair.strategy_key)
+    other_label = "S2" if label == "S1" else "S1"
+    other_key = LABEL_STRATEGY[other_label]
+    own_hits = sorted(w for w in FEATURE_WORDS.get(pair.strategy_key, ())
+                      if w in (pair.ai_text or ""))
+    other_hits = sorted(w for w in FEATURE_WORDS.get(other_key, ())
+                        if w in (pair.ai_text or ""))
+    if own_hits and other_hits:
+        return False, [f"cross-strategy 互斥破形: {label} 对的 ai 侧同时命中"
+                       f"对方 {other_label} 词表 {other_hits}"
+                       f"（本方命中 {own_hits}）——同一对不许以两条策略双卡双计"]
+    return True, []
+
+
 GATES = (("op_construction", gate_op_construction),
          ("keyword_cooccurrence", gate_keyword_cooccurrence),
          ("scene_reference", gate_scene_reference),
-         ("length_ratio", gate_length_ratio))
+         ("length_ratio", gate_length_ratio),
+         ("anti_copy", gate_anti_copy),
+         ("cross_strategy", gate_cross_strategy))
 
 
-def gate_pair(pair: ContrastPair) -> tuple[bool, list[str]]:
-    """四道门全过才放行；任一破形收集全部理由（不短路，拒绝样本可读）。"""
-    ok, reasons = True, []
-    for _name, gate in GATES:
+def _run_gates(pair: ContrastPair) -> tuple[bool, list[str], dict]:
+    """跑全部六道门：返回 (是否全过, 汇总理由, 逐门结果明细)。"""
+    ok, reasons, detail = True, [], {}
+    for name, gate in GATES:
         g_ok, g_reasons = gate(pair)
+        detail[name] = "pass" if g_ok else "fail"
         if not g_ok:
             ok = False
             reasons.extend(g_reasons)
+    return ok, reasons, detail
+
+
+def gate_pair(pair: ContrastPair) -> tuple[bool, list[str]]:
+    """六道门全过才放行；任一破形收集全部理由（不短路，拒绝样本可读）。"""
+    ok, reasons, _detail = _run_gates(pair)
     return ok, reasons
 
 
@@ -482,35 +584,89 @@ def _persist_one(s, pair: ContrastPair, *, extractor_model: str) -> tuple[str, s
     return "written", ""
 
 
+# ------------------------------------------------------------- 旁路账本
+def pair_id(pair: ContrastPair) -> str:
+    """确定性 pair_id：由协议、策略键与两侧 sha 派生——同输入重跑必得同 id，
+    账本可跨 run 对账（同 id 重复出现即同对重交）。"""
+    return "k2pair-" + _sha256(
+        f"{PROTOCOL}|{pair.strategy_key}|{pair.human_sha256}"
+        f"|{_sha256(pair.ai_text)}")[:16]
+
+
+def ledger_entry(pair: ContrastPair, *, gates_ok: bool, gate_results: dict,
+                 reasons: list[str], outcome: str) -> dict:
+    """旁路账本一行：完整配对可复核（AI 侧原文在库外留档），不改任何表结构。"""
+    return {
+        "pair_id": pair_id(pair),
+        "protocol": PROTOCOL,
+        "strategy_key": pair.strategy_key,
+        "op": pair.op,
+        "op_label": label_of(pair.op),
+        "scene_keys": sorted(pair.scene_keys),
+        "span_start": pair.span_start,
+        "span_end": pair.span_end,
+        "human_text": pair.human_text,
+        "human_sha256": pair.human_sha256,
+        "ai_text": pair.ai_text,
+        "ai_sha256": _sha256(pair.ai_text),
+        "ai_side_chars": len(pair.ai_text),
+        "gates_ok": gates_ok,
+        "gate_results": gate_results,
+        "reject_reasons": reasons,
+        "persist_outcome": outcome,
+    }
+
+
+def write_pairs_ledger(path: str, entries: list[dict]) -> int:
+    """追加写 JSONL 旁路账本（一行一对）。entries 为空不落文件。返回行数。"""
+    if not entries:
+        return 0
+    with Path(path).open("a", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False, sort_keys=True) + "\n")
+    return len(entries)
+
+
 def run_contrast(s, pairs: list[ContrastPair], *, live: bool,
-                 extractor_model: str = PROTOCOL) -> dict:
-    """一次 run：四道门 →（非 live 即回，零库写）→ 过门对逐条落库。
+                 extractor_model: str = PROTOCOL,
+                 ledger_path: str = "k2_pairs.jsonl") -> dict:
+    """一次 run：六道门 →（非 live 即回，零库写）→ 过门对逐条落库。
 
     live 只表示"允许写库"（CLI --live 已过环境变量双闸才到这）；
-    本模块自身不联网、不生成 AI 侧——pairs 全部来自调用方注入。"""
+    本模块自身不联网、不生成 AI 侧——pairs 全部来自调用方注入。
+    live 路径同时把每对（含被门拒掉的）完整配对写入 JSONL 旁路账本
+    （路径 ledger_path，默认 k2_pairs.jsonl）：AI 侧原文、pair_id、op 与
+    S1/S2 两个标签、逐门结果、拒绝理由、落库结果全留档，事后可复核。"""
     rep = {"mode": "live" if live else "dry_run",
            **summarize(pairs), "written": 0, "skipped": {}}
     if not live:
-        return rep                    # dry-run：零库写承诺
+        return rep                    # dry-run：零库写承诺（账本也不写）
     skipped: dict[str, int] = {}
+    entries = []
     for p in pairs:
-        ok, _reasons = gate_pair(p)
+        ok, reasons, detail = _run_gates(p)
         if not ok:
-            continue                  # 破形对不落库（拒绝样本已在 summarize 里）
+            entries.append(ledger_entry(p, gates_ok=False, gate_results=detail,
+                                        reasons=reasons, outcome="gated_out"))
+            continue                  # 破形对不落库（理由随账本留档）
         outcome, _why = _persist_one(s, p, extractor_model=extractor_model)
+        entries.append(ledger_entry(p, gates_ok=True, gate_results=detail,
+                                    reasons=[], outcome=outcome))
         if outcome == "written":
             rep["written"] += 1
         else:
             skipped[outcome] = skipped.get(outcome, 0) + 1
     s.commit()
     rep["skipped"] = skipped
+    n = write_pairs_ledger(ledger_path, entries)
+    rep["ledger"] = {"path": str(ledger_path), "entries": n}
     return rep
 
 
 # --------------------------------------------------------------- CLI
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="K2 成对对照抽取器（paired_contrast_v2：按构造标注+四道机械门+落库）")
+        description="K2 成对对照抽取器（paired_contrast_v2：按构造标注+六道机械门+旁路账本+落库）")
     ap.add_argument("--dry-run", dest="mode", action="store_const",
                     const="dry_run", help="预演（默认）：零库写，只出统计与拒绝样本")
     ap.add_argument("--live", dest="mode", action="store_const", const="live",
@@ -518,6 +674,9 @@ def main() -> None:
     ap.set_defaults(mode="dry_run")
     ap.add_argument("--pairs-file", default="",
                     help="成对片段 JSON（AI 侧由调用方注入；--live 必填）")
+    ap.add_argument("--pairs-ledger", default="k2_pairs.jsonl",
+                    help="旁路账本 JSONL 路径（--live 落库时逐对追加完整配对，"
+                         "默认 k2_pairs.jsonl）")
     ap.add_argument("--extractor-model", default=PROTOCOL)
     a = ap.parse_args()
     live = a.mode == "live"
@@ -543,7 +702,8 @@ def main() -> None:
         db.init_db()
         with db.session() as s:
             rep = run_contrast(s, pairs, live=True,
-                               extractor_model=a.extractor_model)
+                               extractor_model=a.extractor_model,
+                               ledger_path=a.pairs_ledger)
     print(json.dumps(rep, ensure_ascii=False, indent=1))
 
 
