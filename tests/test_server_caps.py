@@ -10,6 +10,11 @@
 4. 空列表 [] 视同未提供（刻意约定，与既有前端空表单 falsy 落默认一致）：
    granularities=[] → 落回默认 ["S","M","L"]，而不是零粒度空实验。
 
+另钉独立审查 2026-09-23 BLOCK 判出的两个 [严重] 残余项（lg-fix-server-caps-residual）：
+F1 批注 kind 服务端强枚举（口径源 = index.html:1108 MARK_KINDS，越界 422 零写入）；
+F2 GET /segments 翻页上界（limit ≤200、offset+limit ≤5000 总量闸，越界 422 不 clamp，
+   [:80] 预览硬上限不变式不回退）。
+
 纯离线：TestClient + conftest 的临时 SQLite（LG_LLM_MODE=mock），
 不连真网关、不写真库；上限只走 pydantic 校验，不触发任何 stage 执行。
 """
@@ -25,7 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import api, corpus, db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Experiment, Job, Work  # noqa: E402
+from app.models import Experiment, Job, ReviewItem, Work  # noqa: E402
 
 SEED_TEXT = (
     "天擦黑的时候他进了院子。院门没闩，他一推就开。屋里点着灯，人影晃了一下。\n"
@@ -177,3 +182,141 @@ def test_no_corpus_still_400(client):
     合法入参但 work_ids 指向不存在的 Work → 400「没有语料」，仍零副作用。"""
     r = client.post("/experiments", json={"work_ids": ["WK-deadbeef0000"]})
     assert r.status_code == 400, r.text[:300]
+
+
+# ── F1：批注 kind 强枚举（POST /review/{id}/verdict，独立审查 2026-09-23
+#     BLOCK 严重项：066b754 声称收口但代码不存在，注入串可直通落库）──────
+
+# 口径源 = app/static/index.html:1108 MARK_KINDS，两边必须同步。
+LEGAL_KINDS = list(api._MARK_KINDS)
+# 审查点名形态：[:40] 截断挡不住它（33 字符），只有枚举能挡。
+INJECT_ANN = '"><img src=x onerror=alert(1)>'
+
+
+_PROBE_EXP = "EXP-capsprobe0000"
+
+
+def _mk_pending_review() -> str:
+    """直插一条 pending 题（无任何呈现行）→ verdict 走无绑定路径，
+    批注按原样校验落库，真打路由而不只测 pydantic 模型。
+    FK 提示：db.py 开了 PRAGMA foreign_keys=ON，experiment_id 必须真行。"""
+    with db.session() as s:
+        if not s.get(Experiment, _PROBE_EXP):
+            s.add(Experiment(id=_PROBE_EXP, name="caps-probe", status="created",
+                             config={}, stats={}))
+        r = ReviewItem(experiment_id=_PROBE_EXP,
+                       subject_type="candidate", subject_id="CX-capsprobe0000",
+                       status="pending", reasons=[])
+        s.add(r)
+        s.commit()
+        return r.id
+
+
+def _ann(**kw):
+    base = {"side": "A", "start": 0, "end": 2, "text": "天擦",
+            "kind": "用词", "note": ""}
+    base.update(kw)
+    return base
+
+
+def _review_state(rid: str) -> tuple[str, dict | None]:
+    with db.session() as s:
+        r = s.get(ReviewItem, rid)
+        return r.status, r.human_verdict
+
+
+def test_annotation_kind_seven_legal_values_all_pass(client):
+    """合法 7 值各一次通过，且按提交顺序原样落库。"""
+    assert LEGAL_KINDS == ['用词', '解释过度', '情绪直给', '节奏', '逻辑', '意象', '其他'], \
+        "服务端枚举与 index.html MARK_KINDS 口径漂移了"
+    rid = _mk_pending_review()
+    anns = [_ann(kind=k, side="A" if i % 2 == 0 else "B")
+            for i, k in enumerate(LEGAL_KINDS)]
+    r = client.post(f"/review/{rid}/verdict",
+                    json={"winner": "tie", "reasons": [], "annotations": anns})
+    assert r.status_code == 200, r.text[:400]
+    assert r.json()["n_annotations"] == 7
+    _, hv = _review_state(rid)
+    assert [a["kind"] for a in hv["annotations"]] == LEGAL_KINDS
+
+
+def test_annotation_kind_omitted_falls_to_qita(client):
+    """缺省新口径：不带 kind → 落「其他」（旧默认 other 的直译，在口径内）。"""
+    rid = _mk_pending_review()
+    ann = {"side": "A", "start": 0, "end": 2, "text": "天擦"}
+    r = client.post(f"/review/{rid}/verdict",
+                    json={"winner": "tie", "reasons": [], "annotations": [ann]})
+    assert r.status_code == 200, r.text[:400]
+    _, hv = _review_state(rid)
+    assert hv["annotations"][0]["kind"] == "其他"
+
+
+def test_annotation_kind_illegal_422_zero_write(client):
+    """注入串（含 < " ' 反引号）、空串、超长串、大小写变体、旧默认 other →
+    一律 422，且**该题零写入**（status 仍 pending、human_verdict 仍 NULL）。"""
+    bad = [INJECT_ANN, "<script>x</script>", 'a"b', "a'b", "a`b", "",
+           "x" * 200, "other", "Other", "用词 ", "用词<img>"]
+    for k in bad:
+        rid = _mk_pending_review()
+        r = client.post(f"/review/{rid}/verdict",
+                        json={"winner": "tie", "reasons": [],
+                              "annotations": [_ann(kind=k)]})
+        assert r.status_code == 422, \
+            f"kind={k!r} 应 422，实得 {r.status_code}: {r.text[:300]}"
+        status, hv = _review_state(rid)
+        assert status == "pending" and hv is None, f"拒绝后该题仍被写入: {k!r}"
+
+
+def test_annotation_kind_mixed_batch_rejected_wholesale(client):
+    """混合提交整单拒（不「丢坏留好」）：合法+非法同单 → 422 且零写入。"""
+    rid = _mk_pending_review()
+    r = client.post(f"/review/{rid}/verdict",
+                    json={"winner": "tie", "reasons": [],
+                          "annotations": [_ann(kind="用词"),
+                                          _ann(kind=INJECT_ANN, side="B")]})
+    assert r.status_code == 422, r.text[:400]
+    status, hv = _review_state(rid)
+    assert status == "pending" and hv is None
+
+
+# ── F2：GET /segments 翻页上界（独立审查 2026-09-23 BLOCK 严重项：
+#     limit/offset 无上界，配合 [:80] 预览可对整库正文无界翻页外流）──────
+
+def test_segments_limit_cap_boundary(client):
+    """limit 上界 200：界内放行、越界 422（**不 clamp**，与 ExperimentIn 同纪律）；
+    0/负数同拒（旧实现可传负数/超大数，一并钉死）。"""
+    assert api._MAX_SEGMENT_LIMIT == 200
+    assert client.get("/segments?limit=200").status_code == 200
+    assert client.get("/segments?limit=201").status_code == 422
+    assert client.get("/segments?limit=1000000").status_code == 422
+    assert client.get("/segments?limit=0").status_code == 422
+    assert client.get("/segments?limit=-5").status_code == 422
+    assert client.get("/segments?offset=-1").status_code == 422
+
+
+def test_segments_offset_scan_gate(client):
+    """总量闸 offset+limit ≤ 5000：恰好 5000 放行（offset=上界 4999@limit=1）、
+    5001 拒；天文数字 offset 必拒。空结果页仍是 200（闸只卡请求形状）。"""
+    assert api._MAX_SEGMENT_SCAN == 5000
+    assert client.get("/segments?offset=4999&limit=1").status_code == 200
+    assert client.get("/segments?offset=5000&limit=1").status_code == 422
+    assert client.get("/segments?offset=4900&limit=100").status_code == 200
+    assert client.get("/segments?offset=4901&limit=100").status_code == 422
+    assert client.get(f"/segments?offset={10**12}&limit=20").status_code == 422
+
+
+def test_segments_preview_80_cap_unchanged(client):
+    """[:80] 预览硬上限不变式（审计 P1 注释语义不放宽）：单条响应文本
+    ≤ 80 + 1 个省略号；>80 字的段必须恰好截到 81 并以 … 结尾。"""
+    long_text = "雾" * 300 + "。"  # 单句 301 字（切分器 max_chars=300 即到即断）
+    with db.session() as s:
+        w = corpus.add_work(s, title="预览上限测试书", text=long_text,
+                            source="test:caps-seg")
+        s.commit()
+        wid = w.id
+    rows = client.get(f"/segments?work_id={wid}").json()
+    assert len(rows) == 1 and rows[0]["chars"] > 80
+    for item in client.get("/segments?limit=200").json():
+        assert len(item["text"]) <= 81, f"预览超 80+… 上限: {item['id']}"
+    assert rows[0]["text"] == "雾" * 80 + "…"
+    assert len(rows[0]["text"]) == 81

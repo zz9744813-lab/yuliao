@@ -27,7 +27,7 @@ import re
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -122,8 +122,25 @@ def list_works():
         return out
 
 
+# /segments 翻页上界收口（独立审查 2026-09-23 F2 [严重]，lg-fix-server-caps-residual）：
+# 旧签名 limit/offset 无上界，配合 [:80] 预览可对整库正文无界翻页外流（该端点
+# 同时是审计 P1「评审令牌可读取」的读出口）。口径 = 越界一律 422、**不 clamp**
+# （与 ExperimentIn 同一纪律：clamp 让调用者拿到的页与意图不符）。
+#   · limit ∈ [1, 200]：前端实际只用 ?limit=8（index.html:1433），200 封顶单页；
+#   · offset ≥ 0 且 offset+limit ≤ 5000（总量闸）：单令牌可外流的正文总量
+#     封顶在 5000×80 字；再往外翻必须按 work_id 收窄或走受控导出。
+_MAX_SEGMENT_LIMIT = 200
+_MAX_SEGMENT_SCAN = 5000
+
+
 @app.get("/segments")
-def list_segments(work_id: str | None = None, limit: int = 20, offset: int = 0):
+def list_segments(work_id: str | None = None,
+                  limit: int = Query(default=20, ge=1, le=_MAX_SEGMENT_LIMIT),
+                  offset: int = Query(default=0, ge=0)):
+    if offset + limit > _MAX_SEGMENT_SCAN:
+        raise HTTPException(
+            422, f"offset+limit 超过总量闸 ≤{_MAX_SEGMENT_SCAN}"
+                 f"（收到 offset={offset}, limit={limit}）；请按 work_id 收窄翻页")
     with db.session() as s:
         q = s.query(Segment).order_by(Segment.id)
         if work_id:
@@ -695,6 +712,19 @@ def review_serve_one(exp_id: str, review_id: str):
         return out
 
 
+# 批注 kind 唯一口径（独立审查 2026-09-23 F1 [严重]，lg-fix-server-caps-residual）：
+# **口径源 = app/static/index.html:1108 MARK_KINDS，两边必须同步**。
+# 066b754 的 commit message 声称做了本收口但代码里不存在——批注 kind 曾任意
+# 字符串直通落库（仅 [:40] 截断，40 字符足够放注入串），再经 serve 改判回填与
+# 响应回显原样透出。现在服务端强枚举：越界 422（与 ExperimentIn 口径一致）。
+# 存量兼容性论证（审查 2026-09-23 真库快照）：review_items.human_verdict 存量
+# kind 分布 = 用词 29 / 解释过度 19 / 其他 14 / 逻辑 1，全部落在 MARK_KINDS 内，
+# 收口不拒任何存量合法值；库内 "other" 为零行。旧默认 "other" 随之改为 "其他"：
+# "other" 不在枚举口径内，保留即豁免一个枚举外值；"其他" 是其直译，
+# kind 缺省时落库语义不变，前端回填同一口径（index.html:1091 `a.kind||'其他'`）。
+_MARK_KINDS = ("用词", "解释过度", "情绪直给", "节奏", "逻辑", "意象", "其他")
+
+
 class Annotation(BaseModel):
     """盲评过程中的「噪点」批注：指出某一段里具体哪几处坏了。
 
@@ -706,8 +736,17 @@ class Annotation(BaseModel):
     start: int           # 相对该侧全文的字符偏移
     end: int
     text: str = ""       # 冗余存被选中的原文，便于人工核对
-    kind: str = "other"  # 缺陷类型标签
+    kind: str = "其他"   # 缺陷类型标签，服务端强枚举（见 _MARK_KINDS / _v_kind）
     note: str = ""
+
+    @field_validator("kind")
+    @classmethod
+    def _v_kind(cls, v: str) -> str:
+        if v not in _MARK_KINDS:
+            raise ValueError("kind 只允许 " + "/".join(_MARK_KINDS)
+                             + "（口径源 = index.html MARK_KINDS），非法值: "
+                             + repr(v[:40]))
+        return v
 
 
 class Verdict(BaseModel):
@@ -797,7 +836,9 @@ def verdict(review_id: str, body: Verdict):
                 "target": target,          # human | candidate | None(映射丢失)
                 "start": start, "end": end,
                 "text": (a.text or "")[:300],
-                "kind": (a.kind or "other")[:40],
+                # 枚举校验后 [:40] 只是惰性兜底（MARK_KINDS 最长 4 字）；
+                # 旧 `or "other"` 兜底已删——"other" 不在口径内（见 _MARK_KINDS）。
+                "kind": a.kind[:40],
                 "note": (a.note or "")[:300],
                 "verified": verified,      # True/False=校验结果；None=映射丢失无法校验
             })
