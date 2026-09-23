@@ -181,6 +181,21 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                 # usage 三键恒在（tokens 缺记=0：fixture 零真实消耗如实
                 # 记 0；live 走网关实账）——K5-A §6 止损命令不因缺键空转
                 u = usage or {}
+                # 通道/模型/重试留痕（主控 K4-健壮化取证件 2026-09-23）：
+                # 收据写清 writer/verifier 请求模型与网关主机；verifier
+                # 无效重试（stage+'.retry'）逐次列明——两次尝试的通道名由
+                # 此可核（实际路由被校准网关隐藏，记请求侧，client.py 口径）。
+                gw_host = ""
+                if live:
+                    from app import config as _cfg
+                    gw_host = (_cfg.GATEWAY_BASE_URL or ""
+                               ).split("//")[-1].split("/")[0]
+                v_attempts = [{"stage": a["stage"],
+                               "model": a.get("requested_model"),
+                               "status": a["status"]}
+                              for a in u.get("attempts", [])
+                              if str(a.get("stage", "")
+                                     ).startswith("verifier")]
                 four["receipts"].append(
                     {"scene": scene_id, "arm": arm,
                      "job_id": receipt["job_id"],
@@ -191,7 +206,12 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                                    u.get("verifier_invalid_retries", 0)},
                      "live": live,
                      # C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed
-                     "channel_changed": channel_changed})
+                     "channel_changed": channel_changed,
+                     "gateway_host": gw_host,
+                     "models": {"writer": client.models.get("writer"),
+                                "verifier": client.models.get("verifier")},
+                     "retried": bool(u.get("verifier_invalid_retries")),
+                     "verifier_attempts": v_attempts})
             except Exception as exc:             # noqa: BLE001
                 failed_at[arm] = scene_id       # 断臂标记：本臂后续场 skip
                 # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
@@ -291,8 +311,11 @@ def main() -> None:
                                   freeze=a.live, n_scenes=a.scenes,
                                   channel_changed=a.channel_changed)
             analysis = paired_analysis(four, scenes_for(a.scenes))
+            # worlds_dir 记入产物（审计非阻断项收口）：live 留库作收据——
+            # tokens 对账（收据之和 vs calls 表之和）要读这里的 arm*/k4.sqlite
             out = {"artifacts": four, "analysis": analysis, "live": a.live,
-                   "channel_changed": a.channel_changed}
+                   "channel_changed": a.channel_changed,
+                   "worlds_dir": str(tmp)}
             print(json.dumps(out, ensure_ascii=False, indent=1))
             if a.out:
                 d = Path(a.out)

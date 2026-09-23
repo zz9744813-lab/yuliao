@@ -413,10 +413,30 @@ def test_channel_changed_marked_on_receipts(tmp_path):
                             channel_changed=True)
     assert len(four["receipts"]) == 6 and \
         all(r["channel_changed"] is True for r in four["receipts"])
+    # 主控 K4-健壮化取证件（2026-09-23）：通道/模型/重试留痕逐条携带
+    for r in four["receipts"]:
+        assert set(r["models"]) == {"writer", "verifier"}
+        assert r["retried"] is False and \
+            r["usage"]["verifier_invalid_retries"] == 0
+        assert isinstance(r["verifier_attempts"], list) and \
+            all(a["stage"].startswith("verifier") for a in r["verifier_attempts"])
+        assert r["gateway_host"] == ""      # 离线：无网关主机
     with db.session() as s:
         four2 = k4.run_paired(factory, k4.FxClient(), s, live=False)
     assert all(r["channel_changed"] is False for r in four2["receipts"]), \
         "默认（同通道基线）不得带 channel_changed=true"
+
+
+def test_worlds_dir_recorded_in_output(tmp_path, monkeypatch):
+    """审计非阻断项收口：worlds_dir 记入产物（live 留库作收据——tokens
+    对账要读 arm*/k4.sqlite 的 calls 表）；离线跑也记录（可诊断、可清理）。"""
+    out_dir = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv",
+                        ["k4", "--out", str(out_dir)])
+    k4.main()
+    art = json.loads((out_dir / "k4_paired.json").read_text(encoding="utf-8"))
+    assert Path(art["worlds_dir"]).is_dir() or not art["live"], art["worlds_dir"]
+    assert "worlds_dir" in art and art["live"] is False
 
 
 def test_main_live_refused_when_lock_held(monkeypatch):
