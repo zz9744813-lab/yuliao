@@ -21,6 +21,10 @@
 9. 旁路账本：live 落库时完整配对（含 AI 侧原文、pair_id、op 两个标签、
    逐门结果与拒绝理由）逐对追加写入 JSONL（路径参数，默认 k2_pairs.jsonl）；
    dry-run 不写账本；不改任何既有表结构。
+10. 门0 场景锚定（REVISE_k2_contrast_v2 修法）：S1 新增命中句必须自身可
+    锚定到场景（句内含 scene_keys 指称或 她/他/它/自己 回指）——C 型
+    （不提名跑题）必须被拒；D 型（复述人名跑题）在机械口径下可锚定、
+    拦不住，xfail 钉成显式残余；E 型真摊开必须仍放行。
 
 纪律：测试**从不**执行 CLI --live 开放路径（那是真落库）；库函数
 run_contrast(live=True) 只对 conftest 的临时 sqlite 用。
@@ -74,10 +78,12 @@ SCENES = {"林昭", "临江城"}
 # 换独有证据文本后，落库结果与「解到哪张卡」无关，判定确定。
 # 构造仍是 S1 合法形态：首句改写（没→没有 ⇒ AI 侧不以 human 全文为前缀、
 # 剔标后也不构成连续包含，门4 新口径放行）、新增句命中解释标记
-# （其实/因为/说到底）、两侧共指 沈默、长度比约 2.1。
+# （其实/因为/说到底）且逐句锚定到场景（他/她 回指）、两侧共指 沈默、
+# 长度比约 2.1。（原「因为讲了于事无补」句无任何锚定特征，门0 追加锚定
+# 断言后改写为「因为再讲他也不会改」，构造与判定语义不变。）
 HUMAN_LEDGER = "沈默把茶碗推过去，没再多问。廊下有人挑着担子走过，他侧耳听了一阵，终究没开口。"
 AI_LEDGER = ("沈默把茶碗推过去，没有再多问。其实他心里清楚，就算问了她也未必肯讲，"
-             "因为讲了于事无补。廊下有人挑着担子走过，他侧耳听了一阵，"
+             "因为再讲他也不会改。廊下有人挑着担子走过，他侧耳听了一阵，"
              "终究没开口，说到底不过是怕惹麻烦。")
 SCENES_LEDGER = {"沈默", "临江城"}
 
@@ -97,6 +103,20 @@ CE2_AI = HUMAN_S1 + CE2_EXT
 # 40，使其能走"归一包含"分支（而非 36 字反例1 走的前缀分支）。
 HUMAN_LONG = ("林昭把杯子放下，没接话。窗外有人喊了一嗓子，她朝那边看了一眼，"
               "还是没说。廊下的灯笼晃了两晃，她把袖口拢紧了些。")
+
+# —— 三型探针（主控实跑 2026-09-23，k2_probe3：C/D 在旧门0 下均 ACCEPT，
+# 即旧门0 只验形态不验所指）——门0 追加「新增句场景锚定」断言后的归属：
+#   C 型（首句改写+跑题尾缀，不提名）→ 拒（锚定判据拦，其余门本就放行）；
+#   D 型（同 C 但尾缀复述人名）→ 仍 ACCEPT：人名即 scene_keys 指称，机械
+#     口径下与合法正例不可区分 ⇒ 已知残余，xfail 钉住；
+#   E 型（真摊开：尾缀是对同场景的 genuine 铺陈，含回指字）→ 仍放行。
+HUMAN_C = HUMAN_S1      # human 侧同基线；AI 侧首句改写（没→没有）
+AI_C = ("林昭把杯子放下，没有接话。窗外有人喊了一嗓子，她朝那边看了一眼，"
+        "还是没说。其实说到底，院里的猫又上了墙，风把晾衣绳吹得直晃。")
+AI_D = ("林昭把杯子放下，没有接话。窗外有人喊了一嗓子，她朝那边看了一眼，"
+        "还是没说。其实说到底，林昭没再理会院里的猫，风把晾衣绳吹得直晃。")
+AI_E = ("林昭把杯子放下，没有接话。窗外有人喊了一嗓子，她朝那边看了一眼，"
+        "还是没说。其实说到底，她不是不想争，只是这话传出去只会让她更难做。")
 
 # 既有用例沿用 strategy_key 口径时的缺省 op（按构造标注：每对必须声明一个 op）
 _DEFAULT_OP = {k2c.S1_KEY: k2c.OP_ADD_INTERPRETATION,
@@ -551,17 +571,58 @@ def test_anti_copy_embedded_containment_variant():
 
 
 # ------- 审查席反例2：逐字引用后接无关延展 ⇒ anti-copy 拦
+# （门0 追加锚定断言后，op_construction 亦拦：跑题句未锚定到场景——
+#   拦截不再唯一，但 anti-copy 判据保持不动，两条理由并列可读）
 def test_review_counterexample2_quote_then_drift():
     p = _pair(k2c.S1_KEY, HUMAN_S1, CE2_AI, op=k2c.OP_ADD_INTERPRETATION)
-    # 钉住审查席的反例形态：既有四道门确实放行它——拦截只能来自新门
+    # 钉住形态：其余既有门确实放行它
     for name, gate in k2c.GATES:
-        if name in ("anti_copy", "cross_strategy"):
+        if name in ("op_construction", "anti_copy", "cross_strategy"):
             continue
         g_ok, g_why = gate(p)
         assert g_ok, f"反例2 应过既有门 {name}（否则反例不成立）: {g_why}"
+    # 门0 锚定断言现在也拦它：跑题延展句（其实/说到底…）不含指称与回指字
+    g_ok, g_why = k2c.gate_op_construction(p)
+    assert not g_ok and any("未锚定" in r for r in g_why), g_why
     ok, why = k2c.gate_pair(p)
     assert not ok, "反例2（逐字引用后跑题）必须被拒"
     assert any("anti-copy" in r for r in why), why
+
+
+# ------- 门0 场景锚定：三型探针（C 拒 / D 残余 xfail / E 放行）
+def test_c_type_drift_without_name_rejected_by_anchor():
+    p = _pair(k2c.S1_KEY, HUMAN_C, AI_C, op=k2c.OP_ADD_INTERPRETATION)
+    # 归因干净：除门0 外的既有门确实放行它——拦截只能来自新锚定判据
+    for name, gate in k2c.GATES:
+        if name == "op_construction":
+            continue
+        g_ok, g_why = gate(p)
+        assert g_ok, f"C 型应过既有门 {name}（否则归因不干净）: {g_why}"
+    ok, why = k2c.gate_pair(p)
+    assert not ok, "C 型（首句改写+不提名跑题尾缀）必须被拒"
+    assert any("未锚定" in r for r in why), why
+    anchor = next(r for r in why if "未锚定" in r)
+    assert "跑题尾缀" in anchor and "猫又上了墙" in anchor, \
+        f"锚定理由必须点名未锚定的新增句: {anchor}"
+
+
+@pytest.mark.xfail(reason="已知残余：D 型跑题句复述人名（林昭）后，"
+                          "句内即含 scene_keys 指称，机械锚定口径下与合法"
+                          "正例不可区分——不误伤 E 型的代价，如实钉住")
+def test_d_type_drift_with_name_is_known_residual():
+    p = _pair(k2c.S1_KEY, HUMAN_C, AI_D, op=k2c.OP_ADD_INTERPRETATION)
+    # 归因：门0 的锚定判据对 D 型放行（尾缀句含 林昭）——残余根因在此
+    g_ok, g_why = k2c.gate_op_construction(p)
+    assert g_ok, f"锚定判据应放行复述人名的跑题句（残余根因）: {g_why}"
+    ok, why = k2c.gate_pair(p)
+    assert not ok, "D 型（复述人名跑题）理想上应被拒——当前机械判据拦不住"
+
+
+def test_e_type_genuine_spread_still_accepted():
+    p = _pair(k2c.S1_KEY, HUMAN_C, AI_E, op=k2c.OP_ADD_INTERPRETATION)
+    ok, why = k2c.gate_pair(p)
+    assert ok and why == [], \
+        f"真摊开正对照（新增句含回指字，锚定成立）必须仍放行: {why}"
 
 
 # ------------------------------- 旁路账本：AI 侧可复核 + 拒绝理由入账

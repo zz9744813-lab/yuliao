@@ -16,6 +16,10 @@ REVIEW_merge_plan.md）：靠"事后看文本归类"判 S1/S2（delta_new / delt
 - 门0 gate_op_construction（按 op 验证构造，每类 op 有自己的断言）：
   · OP_ADD_INTERPRETATION / OP_ADD_PSYCH_NARRATION（→S1）：AI 侧**句数增加**，
     命中解释/心理标记词表的句必须是**新增**（不在人类侧），且人类侧不命中词表；
+    新增命中句还须**自身可锚定到场景**（句内含 scene_keys 指称——_scene_refs
+    字符集口径——或人称回指字 她/他/它/自己；REVISE_k2_contrast_v2：原门0 只验
+    形态不验所指，"逐字引用后接跑题句"能过全门）。机械口径的**已知残余**：
+    跑题句复述人名即可锚定，拦不住（回归 xfail 钉住）；
   · OP_SPLIT_BEATS / OP_DILUTE_MODIFIERS（→S2）：**实词集合 Jaccard ≥ 阈值**
     （命题/实词集合基本不变）且节拍/修饰标记数上升（密度变化可测）；
   · 并拒**混合形态**：跨标签的另一操作证据混入同一对 ⇒ 无效——不让混合形态
@@ -242,9 +246,26 @@ class ContrastPair:
 
 
 # ------------------------------------------------ 门 0：构造验证（按 op）
+# 门0 场景锚定口径（REVISE_k2_contrast_v2 修法）：新增的命中句必须**自身**
+# 可锚定到场景——句内含 scene_keys 的指称（复用门2 的 _scene_refs 字符集
+# 口径）或含人称回指字（她/他/它/自己）。纯 substring/字符集运算，可机械
+# 判定；复述人名的跑题句在此口径下仍可锚定 ⇒ 已知残余（回归 xfail 钉住）。
+_ANAPHORA_CHARS = ("她", "他", "它", "自己")
+
+
+def _anchored_to_scene(scene_keys: set, sent: str) -> bool:
+    """句级场景锚定（纯机械）：句内含场景指称（_scene_refs 字符集口径）
+    或人称回指字（她/他/它/自己）即视为可锚定。离线、确定。"""
+    if _scene_refs(scene_keys, sent):
+        return True
+    return any(c in (sent or "") for c in _ANAPHORA_CHARS)
+
+
 def _verify_s1_addition(pair: ContrastPair, op: str) -> list[str]:
     """S1 类 op 的构造断言：AI 侧句数增加；命中解释/心理标记词表的句必须是
-    新增（不在人类侧）；人类侧不命中词表。词表是模块常量，可被测试覆写。"""
+    新增（不在人类侧）；人类侧不命中词表；新增命中句还须**锚定到场景**
+    （_anchored_to_scene：句内含 scene_keys 指称或她/他/它/自己回指——
+    堵"首句改写+跑题尾缀"形态）。词表是模块常量，可被测试覆写。"""
     markers = INTERPRET_MARKERS if op == OP_ADD_INTERPRETATION else PSYCH_MARKERS
     vocab_name = "解释" if op == OP_ADD_INTERPRETATION else "心理"
     h_text = pair.human_text or ""
@@ -265,6 +286,14 @@ def _verify_s1_addition(pair: ContrastPair, op: str) -> list[str]:
             reasons.append(
                 f"{op} 构造不符: 命中{vocab_name}标记的句在人类侧已存在"
                 f"（非新增）: {old[:1]}")
+        loose = [s for s in hit_sents
+                 if s not in h_sents and s not in h_text
+                 and not _anchored_to_scene(pair.scene_keys, s)]
+        if loose:
+            reasons.append(
+                f"{op} 构造不符: 新增{vocab_name}句未锚定到场景"
+                f"（句内无 scene_keys 指称也无她/他/它/自己回指——"
+                f"所指不落本场景，疑似跑题尾缀）: {loose[:1]}")
     if any(m in h_text for m in markers):
         reasons.append(
             f"{op} 构造不符: 人类侧命中{vocab_name}标记词表（不构成对照）")
