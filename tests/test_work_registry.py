@@ -203,11 +203,11 @@ def test_dangling_registry_row(clean_tree):
     con = sqlite3.connect(path)
     con.execute("INSERT INTO work_sources (id, work_id, canonical_work_id,"
                 " author_id, genre_ids, source_type, text_version,"
-                " text_sha256, purpose_basis, identity_purposes,"
-                " license_purposes, license_basis,"
+                " text_sha256, purpose_basis, allowed_purposes,"
+                " identity_purposes, license_purposes, license_basis,"
                 " metadata_status, metadata_basis, created_at)"
                 " VALUES ('WSRC-dangle','WK-ghost','WK-ghost',NULL,'[]',"
-                "'human_fiction','corpus-v1',NULL,'test','[]','[]',NULL,"
+                "'human_fiction','corpus-v1',NULL,'test','[]','[]','[]',NULL,"
                 "'verified','raw 注入','t')")
     con.commit()
     con.close()

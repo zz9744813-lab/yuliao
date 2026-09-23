@@ -104,6 +104,12 @@ class WorkSource(Base):
     license_purposes: Mapped[list[str]] = mapped_column(JSON, default=list)
     # 授权依据（license_purposes 非空时必填：授权人/日期/范围）
     license_basis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 遗留列（建表史）：真库 allowed_purposes JSON NOT NULL 无默认；K1-A 二轮
+    # 把语义迁到 identity_purposes/license_purposes 时从模型删列——此后一切
+    # **新插行**必炸（2026-09-23 首次新登记才暴露；存量 UPDATE 路径不受影响）。
+    # 恢复为纯插行管道的带默认声明：语义仍看新列，本列不参与任何判定；
+    # 测试库由本声明建表，两侧同构。
+    allowed_purposes: Mapped[list] = mapped_column(JSON, default=list)
     metadata_status: Mapped[str] = mapped_column(String(20))   # verified/partial/unverified
     metadata_basis: Mapped[str] = mapped_column(Text)     # 元数据核对依据
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
@@ -526,6 +532,30 @@ class StrategyStats(Base):
     missing: Mapped[int] = mapped_column(Integer, default=0)
     counter_examples: Mapped[int] = mapped_column(Integer, default=0)
     extras: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class StrategyReview(Base):
+    """席位评审留痕（K2-CARDS 2026-09-23；真表由主控判定器先建，此处补
+    ORM 映射——列型逐列对齐既有 DDL，测试库由本声明建表同构）。
+    judge_kind：semantic_card=8 张 legacy 卡 × 3 席独立判定（24 行，
+    24/24 证据不支持、0 条 verified）；semantic_card_v2=合并新卡 × 成对
+    对照证据的席位判定。**判定≠升格**：本表只留痕；status 只在 ≥2 独立席
+    PASS 后按纪律改，禁批量升格。evidence_support/distinct_flag 用 0/1。"""
+    __tablename__ = "strategy_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True,
+                                    autoincrement=True)
+    strategy_id: Mapped[str] = mapped_column(String(32), index=True)
+    judge_kind: Mapped[str] = mapped_column(String(32))
+    reviewer_model: Mapped[str] = mapped_column(String(80))
+    verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    evidence_support: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    distinct_flag: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sufficiency: Mapped[float | None] = mapped_column(Float, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(32), default=_now)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class KnowledgeLink(Base):
