@@ -20,3 +20,14 @@ os.environ["LG_LLM_MODE"] = "mock"
 # 门会把它判为远程而返回 401，导致所有接口测试变红。
 # 访问门本身由 tests/test_access_gate.py 直接构造 app 单独验证（不走这里）。
 os.environ["REVIEW_NO_AUTH"] = "1"
+
+# R6 守卫（会审 89f779e，app/live_guard.py 的 pytest 侧）：live 实跑进行中
+# 拒跑全量 pytest——全绿结论不许被并发 live 污染（2026-09-22 瞬态红教训）。
+# 直查锁文件而不 import app（conftest 纪律：app import 前先设完环境）。
+_live_lock = _TMP / "live_run.lock"
+if _live_lock.exists():
+    raise SystemExit(
+        "[live/pytest 互斥守卫] live 实跑进行中（"
+        + _live_lock.read_text(encoding="utf-8")[:200]
+        + "）——拒绝并发 pytest（R6 纪律）。等 live 结束；若 live 已崩溃"
+          "遗留死锁，人工核实后清除：" + str(_live_lock))

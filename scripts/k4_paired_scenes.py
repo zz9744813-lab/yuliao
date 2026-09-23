@@ -267,36 +267,41 @@ def main() -> None:
         client = GatewayClient(a.writer_model, a.verifier_model)
     else:
         client = FxClient()
-    tmp = Path(tempfile.mkdtemp(prefix="k4_worlds_"))
-    try:
-        def factory():
-            factory.n = getattr(factory, "n", 0) + 1
-            store = Store(tmp / f"arm{factory.n}" / "k4.sqlite")
-            store.create_world(build_world())
-            return store
-        with db.session() as s:
-            four = run_paired(factory, client, s, live=a.live,
-                              freeze=a.live, n_scenes=a.scenes,
-                              channel_changed=a.channel_changed)
-        analysis = paired_analysis(four, scenes_for(a.scenes))
-        out = {"artifacts": four, "analysis": analysis, "live": a.live,
-               "channel_changed": a.channel_changed}
-        print(json.dumps(out, ensure_ascii=False, indent=1))
-        if a.out:
-            d = Path(a.out)
-            d.mkdir(parents=True, exist_ok=True)
-            (d / "k4_paired.json").write_text(
-                json.dumps(out, ensure_ascii=False, indent=1),
-                encoding="utf-8")
-            print(f"[k4_paired_scenes] 产物已写 {d / 'k4_paired.json'}")
-    finally:
-        if not a.live:                      # 离线 fixture 世界用后即清；
-            shutil.rmtree(tmp, ignore_errors=True)   # --live 留库作收据
-    if four["failures"]:
-        raise SystemExit(
-            f"有失败臂：{len(four['failures'])} 条（另有 "
-            f"{len(four['skipped'])} 条 skipped_after_failure 未执行）"
-            "（exit 1）")
+    import contextlib
+    from app.live_guard import live_lock
+    # R6 守卫：live 实跑与全量 pytest / 其他 live 互斥（锁文件原子创建）
+    with (live_lock("k4_paired_scenes") if a.live
+          else contextlib.nullcontext()):
+        tmp = Path(tempfile.mkdtemp(prefix="k4_worlds_"))
+        try:
+            def factory():
+                factory.n = getattr(factory, "n", 0) + 1
+                store = Store(tmp / f"arm{factory.n}" / "k4.sqlite")
+                store.create_world(build_world())
+                return store
+            with db.session() as s:
+                four = run_paired(factory, client, s, live=a.live,
+                                  freeze=a.live, n_scenes=a.scenes,
+                                  channel_changed=a.channel_changed)
+            analysis = paired_analysis(four, scenes_for(a.scenes))
+            out = {"artifacts": four, "analysis": analysis, "live": a.live,
+                   "channel_changed": a.channel_changed}
+            print(json.dumps(out, ensure_ascii=False, indent=1))
+            if a.out:
+                d = Path(a.out)
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "k4_paired.json").write_text(
+                    json.dumps(out, ensure_ascii=False, indent=1),
+                    encoding="utf-8")
+                print(f"[k4_paired_scenes] 产物已写 {d / 'k4_paired.json'}")
+        finally:
+            if not a.live:                  # 离线 fixture 世界用后即清；
+                shutil.rmtree(tmp, ignore_errors=True)   # --live 留库作收据
+        if four["failures"]:
+            raise SystemExit(
+                f"有失败臂：{len(four['failures'])} 条（另有 "
+                f"{len(four['skipped'])} 条 skipped_after_failure 未执行）"
+                "（exit 1）")
     print(f"[k4_paired_scenes] PASS：3 场×2 臂全 committed，"
           f"{analysis['n_packages']} 个 A 臂包（freeze={'True' if a.live else 'False'}）")
 

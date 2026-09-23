@@ -260,10 +260,15 @@ def main() -> None:
         require_models((a.extractor_model,), source="k2_extract_backfill")
         client = _GatewayAdapter(a.extractor_model)
     db.init_db()
-    with db.session() as s:
-        rep = run_backfill(s, client, limit=a.limit, max_calls=a.max_calls,
-                           max_tokens=a.max_tokens, dry_run=a.dry_run,
-                           live=a.live)
+    import contextlib
+    from app.live_guard import live_lock
+    # R6 守卫：live 实跑与全量 pytest/live 互斥（锁文件 O_EXCL 原子创建）
+    with (live_lock("k2_extract_backfill") if a.live
+          else contextlib.nullcontext()):
+        with db.session() as s:
+            rep = run_backfill(s, client, limit=a.limit, max_calls=a.max_calls,
+                               max_tokens=a.max_tokens, dry_run=a.dry_run,
+                               live=a.live)
     print(json.dumps(rep, ensure_ascii=False, indent=1))
 
 
