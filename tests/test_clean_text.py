@@ -123,6 +123,9 @@ def test_span_flavor_detector_contract(tmp_path):
     构造劣化对外部验证 75.9%。有一折 AUC 0.446（低于随机）→ 不稳定，
     所以这里只钉"给得出片段、分数有界、不因空文本崩"。
     """
+    # fastembed 是可选依赖（bge-small-zh 向量，未在 requirements 声明，flavor_train.py 懒加载）。
+    # 这不是跳过缺陷：依赖未装时该契约无从判定，只能显式 skip，不能算 fail。
+    pytest.importorskip("fastembed", reason="可选依赖：bge-small-zh 向量，未在 requirements 声明")
     import flavor_span as FS
     r = FS.score_spans("她停了一拍，问：那要是喜欢陆姐姐，还能喜欢别人吗？")
     assert set(r) >= {"max", "mean_top", "spans"}
