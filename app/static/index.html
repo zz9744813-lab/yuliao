@@ -1113,7 +1113,10 @@ let curPid = '';             // A01：本次端题的 presentation_id——提�
 let markSeq = 0;
 let pendingSel = null;
 
-function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// 属性上下文也要安全：批注 kind 会拼进 title="…"，引号不转义就能提前闭合属性
+// 注入 onmouseover 等事件处理器（审计 2026-09-23 P2）。` 一并处理，防模板串上下文。
+function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/`/g,'&#96;'); }
 
 function buildMarkedHtml(text, list){
   // 按 start 排序渲染；与前者重叠的跳过（避免嵌套 mark 破坏 offset 语义）
@@ -1128,7 +1131,7 @@ function buildMarkedHtml(text, list){
     if(s < pos) continue;
     out += escHtml(text.slice(pos, s));
     const ki = Math.max(0, MARK_KINDS.indexOf(m.kind));
-    out += `<mark class="k${ki}" data-mid="${m.id}" title="${escHtml(m.kind)}（点击删除）">`
+    out += `<mark class="k${ki}" data-mid="${escHtml(m.id)}" title="${escHtml(m.kind)}（点击删除）">`
          + escHtml(text.slice(s, e)) + '</mark>';
     pos = e;
   }
@@ -1336,14 +1339,36 @@ async function loadDoneList(){
 }
 
 // ── 实验 ────────────────────────────────────────────────
+// 实验列表全部走 DOM 构造：granularities/id/status 等都是服务端数据（granularities 是
+// 用户建实验时的任意字符串），一律 textContent，不走 innerHTML 拼接（审计 2026-09-23 P2）。
 async function loadExps(){
   const rows = await api('/experiments');
-  $('#exp-table tbody').innerHTML = rows.map(e =>
-    `<tr><td class="kv">${e.id}</td>
-     <td><span class="tag ${e.status}">${e.status}</span></td>
-     <td>${e.current_stage||''}</td><td>${e.n_segments}</td>
-     <td>${(e.granularities||[]).join(',')}</td><td>${e.created_at||''}</td>
-     <td><button class="act" onclick="showExp('${e.id}')">详情</button></td></tr>`).join('');
+  const tbody = $('#exp-table tbody');
+  tbody.textContent = '';
+  for(const e of rows){
+    const tr = document.createElement('tr');
+    const td = (cls) => {
+      const d = document.createElement('td');
+      if(cls) d.className = cls;
+      tr.appendChild(d);
+      return d;
+    };
+    td('kv').textContent = e.id;
+    const tag = document.createElement('span');
+    tag.className = 'tag ' + (e.status || '');
+    tag.textContent = e.status || '';
+    td().appendChild(tag);
+    td().textContent = e.current_stage || '';
+    td().textContent = e.n_segments;
+    td().textContent = (e.granularities || []).join(',');
+    td().textContent = e.created_at || '';
+    const btn = document.createElement('button');
+    btn.className = 'act';
+    btn.textContent = '详情';
+    btn.onclick = () => showExp(e.id);
+    td().appendChild(btn);
+    tbody.appendChild(tr);
+  }
 }
 
 async function createExp(){

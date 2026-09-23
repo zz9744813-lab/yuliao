@@ -96,8 +96,12 @@
     return { A: mergeNear(A, 2), B: mergeNear(B, 2) };
   }
 
+  // 属性上下文也要安全：kind 会拼进 title="…"，引号不转义就能提前闭合属性注入
+  // 事件处理器（审计 2026-09-23 P2）。与 index.html 的 escHtml 保持一致的行为，
+  // composeHtml 与 buildMarkedHtml 无高亮时输出必须完全相等（test_diff_js 钉住）。
   function escHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/`/g, '&#96;');
   }
 
   /** 把 diff 高亮与噪点批注 mark 复合渲染成一段 HTML。
@@ -151,8 +155,9 @@
       var o = '';
       if (sn) o += '<i class="dhl ' + sn.type + '">';
       if (mk) {
+        // data-mid 按 id 不可信口径走同一套转义（数字 id 输出不变）
         var ki = Math.max(0, kinds.indexOf(mk.m.kind));
-        o += '<mark class="k' + ki + '" data-mid="' + mk.m.id + '" title="'
+        o += '<mark class="k' + ki + '" data-mid="' + escHtml(mk.m.id) + '" title="'
            + escHtml(mk.m.kind) + '（点击删除）">';
       }
       o += escHtml(text.slice(ca, cb));
