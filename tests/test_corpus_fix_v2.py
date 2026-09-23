@@ -95,9 +95,13 @@ def test_corpus_v2_build_mirrors_and_repairs(tmp_path):
     v1_id = _seed_v1_work("斗罗大陆（唐家三少）-v2t")
     import scripts.corpus_fix_v2 as CF
     out = CF.build(only=("斗罗大陆",), map_path=tmp_path / "map.jsonl")
-    assert out["created"] and out["created"][0]["segments"] == 2
+    # 按 work 名 + v1 id 定位本用例条目，不按索引取值——共享测试库里可能有
+    # 其他用例留下的「斗罗大陆」前缀作品，created 的顺序不保证稳定
+    mine = next(c for c in out["created"]
+                if c["work"].endswith("-v2t") and c["v1_work"] == v1_id)
+    assert mine["segments"] == 2
     with db.session() as s:
-        v2 = s.query(Work).filter(Work.title.like("斗罗大陆%corpus v2%")).one()
+        v2 = s.get(Work, mine["v2_work"])
         rows = (s.query(Segment).filter(Segment.work_id == v2.id)
                 .order_by(Segment.ordinal).all())
         v1_segs = (s.query(Segment).filter(Segment.work_id == v1_id)
@@ -120,13 +124,18 @@ def test_corpus_v2_build_mirrors_and_repairs(tmp_path):
 
 
 def test_corpus_v2_idempotent(tmp_path):
-    _seed_v1_work("斗罗大陆（唐家三少）-v2t2")
+    v1_id = _seed_v1_work("斗罗大陆（唐家三少）-v2t2")
     import scripts.corpus_fix_v2 as CF
     out1 = CF.build(only=("斗罗大陆",), map_path=tmp_path / "m.jsonl")
-    n1 = len(out1["created"])
+    # 按本用例的 v1 id 过滤，不按索引/总数——共享库里可能有别的「斗罗大陆」行
+    mine1 = [c for c in out1["created"] if c["v1_work"] == v1_id]
+    assert len(mine1) == 1 and mine1[0]["segments"] == 2
     out2 = CF.build(only=("斗罗大陆",), map_path=tmp_path / "m.jsonl")
-    assert out2["created"] == [] and out2["skipped"], "重跑必须幂等跳过"
-    assert n1 == 1
+    mine2_created = [c for c in out2["created"] if c["v1_work"] == v1_id]
+    mine2_skipped = [sk for sk in out2["skipped"] if sk["v1_work"] == v1_id]
+    assert mine2_created == [] and mine2_skipped, "重跑必须幂等跳过"
+    assert all("v2_work" in sk for sk in mine2_skipped), \
+        "跳过要报出命中了哪本 v2（不许静默）"
 
 
 # ── 4. 会审补课：apply 黄金用例（幂等 / 顺序 / 空值）──────────

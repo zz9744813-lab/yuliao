@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import benchmark_build as BB  # noqa: E402
 import goldpick_build as GP  # noqa: E402
+import pytest  # noqa: E402
 import scale_corpus as SC  # noqa: E402
 import ai_ranking_build as AR  # noqa: E402
 import controlled_corruption as CC  # noqa: E402
@@ -38,6 +39,45 @@ TEXT = ("这是一段足够长的正文文本，用来通过最小字数与来�
         "它继续讲述人物在夜色里的动作与对话，长度超过六十个汉字的门槛。")
 EXP = "EXP-V2-ISO"
 EXP_CC = "EXP-V2-ISOCC"   # 劣化/基准侧用例独占，避免与上面互相牵动计数
+
+# 本模块用例造出的 Work/Segment id（_seed_pair 登记，autouse 夹具按 id 回收）
+_SEEDED: list[dict] = []
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_seeded_works():
+    """每个用例结束后按 id 精确回收本文件种子造出的行。
+
+    根因（假红）：_seed_pair 造的 Work/Segment 曾无任何 teardown，残留在
+    会话共享测试库；后跑的 test_corpus_fix_v2.build(only=("斗罗大陆",)) 是
+    子串匹配，把这些 -iso-* / -cc-* / -ar-pool 行也捞进 created，导致按
+    索引 [0] 取值的断言随运行顺序随机变红。清理只删本文件登记的 id
+    （幂等、不依赖字典序、不做名字模糊匹配），从属行按
+    ControlledCorruption → Candidate → Frame → Segment → Work 的外键序删除，
+    v2 Work 先于 v1（v2_of 指向 v1）。
+    """
+    _SEEDED.clear()
+    yield
+    db.init_db()
+    with db.session() as s:
+        seg_ids = [sid for rec in _SEEDED for sid in rec["segs"]]
+        if seg_ids:
+            s.query(ControlledCorruption).filter(
+                ControlledCorruption.segment_id.in_(seg_ids)).delete(synchronize_session=False)
+            s.query(Candidate).filter(
+                Candidate.segment_id.in_(seg_ids)).delete(synchronize_session=False)
+            s.query(Frame).filter(
+                Frame.segment_id.in_(seg_ids)).delete(synchronize_session=False)
+            s.query(Segment).filter(
+                Segment.id.in_(seg_ids)).delete(synchronize_session=False)
+        v2_ids = [rec["v2"] for rec in _SEEDED]
+        v1_ids = [rec["v1"] for rec in _SEEDED]
+        if v2_ids:
+            s.query(Work).filter(Work.id.in_(v2_ids)).delete(synchronize_session=False)
+        if v1_ids:
+            s.query(Work).filter(Work.id.in_(v1_ids)).delete(synchronize_session=False)
+        s.commit()
+    _SEEDED.clear()
 
 
 def _seed_pair(tag: str, *, legacy_title_only: bool = False):
@@ -62,6 +102,7 @@ def _seed_pair(tag: str, *, legacy_title_only: bool = False):
                      integrity='{"src_ok": true}', n_sentences=2, n_chars=len(TEXT))
         s.add(s2)
         s.commit()
+        _SEEDED.append({"v1": v1.id, "v2": v2.id, "segs": [s1.id, s2.id]})
         return v1.id, v2.id, s1.id, s2.id
 
 
