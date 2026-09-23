@@ -126,17 +126,21 @@ def _dashboard(s: Session) -> dict:
 def _corpus(s: Session) -> dict:
     total = _count(s, s.query(Segment))
     src = s.query(Segment.integrity).all()
-    src_ok = src_bad = 0
+    src_ok = src_bad = src_unverified = 0
     for (raw,) in src:
         try:
             d = json.loads(raw or "{}")
         except Exception:
             d = {}
-        if "src_ok" in d:
-            if d.get("src_ok"):
-                src_ok += 1
-            else:
-                src_bad += 1
+        if not isinstance(d, dict):
+            d = {}
+        v = d.get("src_ok")
+        if v is True:                       # 严格口径：只认 JSON true/false
+            src_ok += 1
+        elif v is False:
+            src_bad += 1
+        elif "src_ok" in d or d.get("src_ok_unverified"):
+            src_unverified += 1            # 类型不严/显式未校验态：不算完好也不算判坏
     cleaned = _count(s, s.query(Segment).filter(Segment.text_clean.isnot(None)))
     chars = s.query(func.sum(Segment.n_chars)).scalar() or 0
     works = []
@@ -151,7 +155,8 @@ def _corpus(s: Session) -> dict:
         "chars_total": int(chars),
         "text_cleaned": cleaned,
         "integrity": {"checked": src_ok + src_bad, "src_ok": src_ok, "src_bad": src_bad,
-                      "unchecked": total - src_ok - src_bad},
+                      "src_unverified": src_unverified,
+                      "unchecked": total - src_ok - src_bad - src_unverified},
         "roles": _group_counts(s, Segment.role),
         "seg_versions": _group_counts(s, Segment.seg_version),
         "recent_works": works,
