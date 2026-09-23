@@ -260,6 +260,30 @@ def test_observe_update_fact_layer_only_and_idempotent():
     assert rep3["would_update"] == 0, "幂等：observed 的不再动"
 
 
+def test_main_live_refused_when_lock_held(monkeypatch):
+    """R6 接线回归（9e02916 会审建议项）：--live 在锁被持有时必须
+    SystemExit 拒绝且**未发起任何调用**（run_backfill 不许被触达）。"""
+    from app import live_guard as LG
+    monkeypatch.setenv("K2_ALLOW_LIVE", "1")
+    monkeypatch.setattr(k2b, "LLM_MODE", "real")
+    import preflight_models as PF
+    monkeypatch.setattr(PF, "require_models",
+                        lambda models, source="": None)  # 池预检桩：不查池不烧调用
+    called = {"n": 0}
+
+    def _boom(*a, **k):
+        called["n"] += 1
+        raise AssertionError("锁被持有时 run_backfill 不许被调用")
+    monkeypatch.setattr(k2b, "run_backfill", _boom)
+    monkeypatch.setattr(sys, "argv", ["k2b", "--live",
+                                      "--extractor-model", "probe-model",
+                                      "--limit", "1"])
+    with LG.live_lock("t-other-live"):
+        with pytest.raises(SystemExit, match="互斥守卫"):
+            k2b.main()
+    assert called["n"] == 0
+
+
 def test_stats_rebuild_projection_and_mirror_collapse():
     """K1-B 投影重建（strategy_stats_rebuild，缺失写入方补齐）：verified 才是
     独立证据；镜像经 canonical 回连同根（root_works 只认根）；

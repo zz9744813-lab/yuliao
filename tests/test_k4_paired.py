@@ -417,3 +417,27 @@ def test_channel_changed_marked_on_receipts(tmp_path):
         four2 = k4.run_paired(factory, k4.FxClient(), s, live=False)
     assert all(r["channel_changed"] is False for r in four2["receipts"]), \
         "默认（同通道基线）不得带 channel_changed=true"
+
+
+def test_main_live_refused_when_lock_held(monkeypatch):
+    """R6 接线回归（9e02916 会审建议项）：--live 在锁被持有时 SystemExit
+    且未发起任何场景调用（run_paired 不许被触达）。"""
+    from app import live_guard as LG
+    monkeypatch.setenv("K4_ALLOW_LIVE", "1")
+    monkeypatch.setenv("LG_GATEWAY_BASE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("LG_GATEWAY_API_KEY", "stub-not-used")
+    from app import config as _cfg
+    monkeypatch.setattr(_cfg, "LLM_MODE", "real")
+    called = {"n": 0}
+
+    def _boom(*a, **k):
+        called["n"] += 1
+        raise AssertionError("锁被持有时 run_paired 不许被调用")
+    monkeypatch.setattr(k4, "run_paired", _boom)
+    monkeypatch.setattr(sys, "argv", ["k4", "--live",
+                                      "--writer-model", "a",
+                                      "--verifier-model", "b"])
+    with LG.live_lock("t-other-live"):
+        with pytest.raises(SystemExit, match="互斥守卫"):
+            k4.main()
+    assert called["n"] == 0

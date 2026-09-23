@@ -21,13 +21,11 @@ os.environ["LG_LLM_MODE"] = "mock"
 # 访问门本身由 tests/test_access_gate.py 直接构造 app 单独验证（不走这里）。
 os.environ["REVIEW_NO_AUTH"] = "1"
 
-# R6 守卫（会审 89f779e，app/live_guard.py 的 pytest 侧）：live 实跑进行中
+# R6 守卫（会审 89f779e；9e02916 会审修正：两侧看同一把锁）：live 实跑进行中
 # 拒跑全量 pytest——全绿结论不许被并发 live 污染（2026-09-22 瞬态红教训）。
-# 直查锁文件而不 import app（conftest 纪律：app import 前先设完环境）。
-_live_lock = _TMP / "live_run.lock"
-if _live_lock.exists():
-    raise SystemExit(
-        "[live/pytest 互斥守卫] live 实跑进行中（"
-        + _live_lock.read_text(encoding="utf-8")[:200]
-        + "）——拒绝并发 pytest（R6 纪律）。等 live 结束；若 live 已崩溃"
-          "遗留死锁，人工核实后清除：" + str(_live_lock))
+# 共享单实现（app.live_guard.refuse_if_live_running，损坏锁安全、盯**生产**
+# 锁位 repo/data/live_run.lock——本文件上方已把测试 DATA_DIR 覆写成 _TMP，
+# 盯 config.DATA_DIR 会恰好看不到生产 live 的锁）。env 已设完，此处 import
+# app 安全（与测试模块同序）。
+from app.live_guard import refuse_if_live_running
+refuse_if_live_running("全量 pytest")

@@ -70,3 +70,16 @@ def test_main_empty_models_refused(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["pp", "--models", ","])
     with pytest.raises(SystemExit, match="为空"):
         PP.main()
+
+
+def test_main_default_exits_nonzero_when_blocked(monkeypatch, capsys):
+    """预检闸语义（9e02916 会审建议项）：默认档池外名非空 → exit 2，
+    调用方不必解析 stdout 才能拦死名。"""
+    import preflight_models as PF
+    monkeypatch.setattr(PF, "preflight_block",
+                        lambda models, source="": "m1 不在池内（最接近：mx）")
+    monkeypatch.setattr(sys, "argv", ["pp", "--models", "m1"])
+    with pytest.raises(SystemExit, match="预检失败"):
+        PP.main()
+    out = json.loads(capsys.readouterr().out)
+    assert out["mode"] == "preflight_only" and out["blocked"]

@@ -7,7 +7,8 @@
 
 两档口径：
 - 默认（无 --live）：只做 require_models 池名单预检——**零调用**，报在册
-  与池外名；
+  与池外名；**池外名非空 → exit 2**（预检闸语义，与 require_models 同口径
+  ——调用方不必解析 stdout 才能拦死名，9e02916 会审建议项）；
 - --live + 双闸（POOL_PROBE_ALLOW_LIVE=1 + LG_LLM_MODE=real）：每模型一次
   最小真探（max_tokens=1，temperature=0，purpose=pool_probe——A05 记账），
   报 {model, ok|error, latency_ms, tokens}，超 --slow-ms（默认 30000）标
@@ -76,7 +77,7 @@ def main() -> None:
     if not models:
         raise SystemExit("--models 为空")
     if not a.live:
-        # 默认档：只做池名单预检（零调用），把池外名如实报出
+        # 默认档：只做池名单预检（零调用），池外名非空 → exit 2（预检闸）
         from preflight_models import preflight_block
         blocked = preflight_block(models, source="pool_probe")
         print(json.dumps({"mode": "preflight_only", "probed": 0,
@@ -85,6 +86,9 @@ def main() -> None:
                           "note": "零调用口径；存活真探须 --live + "
                                   "POOL_PROBE_ALLOW_LIVE=1"},
                          ensure_ascii=False, indent=1))
+        if blocked:
+            raise SystemExit(f"[预检失败] 池外名：{blocked}——拒绝放行"
+                             "（预检闸语义，exit 2）")
         return
     if os.environ.get("POOL_PROBE_ALLOW_LIVE") != "1":
         raise SystemExit("--live 需要环境变量 POOL_PROBE_ALLOW_LIVE=1（双闸）")
