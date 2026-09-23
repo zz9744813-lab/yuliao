@@ -190,3 +190,177 @@ def test_freeze_rejects_stale_snapshot(monkeypatch):
     with db.session() as s:
         with pytest.raises(ValueError, match="快照已变化"):
             kq.freeze_package(resp, s)
+
+
+# ── 来源检索策略下限回归（审计 P1「客户端能放宽来源硬拦」对账）────────
+# 口径：excluded_source_types/excluded_uses=并集（只可加不可减）；
+# allowed_text_versions=交集（只可收窄不可放宽）。
+
+def _selected_keys(resp) -> list[str]:
+    return [e["strategy_key"] for e in resp.get("selected", [])]
+
+
+def _rejected_pairs(resp) -> set:
+    return {(r["strategy_key"], r["reason"])
+            for r in resp.get("rejected", [])}
+
+
+def test_caller_cannot_relax_excluded_source_types(seeded):
+    """①调用方传 ["other"] 不能整集替换默认排除集——fixture 仍被拦。"""
+    pol = {"contract_version": 2, "book_id": "WK-α",
+           "semantic_requirements": {},
+           "source_policy": {"excluded_source_types": ["other"]}}
+    with db.session() as s:
+        resp = kq.query_knowledge(pol, s)
+    assert ("J-夹具来源", "excluded_no_evidence") in _rejected_pairs(resp), \
+        resp["rejected"]
+    assert "J-夹具来源" not in _selected_keys(resp)
+
+
+def test_excluded_source_types_union_adds_caller_items(seeded):
+    """并集语义的「加」侧：调用方新增排除类型生效（附加排除），且
+    默认集不被替换——fixture 路径在同一 policy 下依旧拦截。"""
+    from app.models import (ExpressionStrategyV2, StrategyInstance,
+                            Work, WorkSource)
+    try:
+        with db.session() as s:
+            s.add(Work(id="WK-OT", title="其他来源书", source="test"))
+            s.flush()
+            s.add(WorkSource(work_id="WK-OT", canonical_work_id="WK-OT",
+                             source_type="other", text_version="corpus-v1",
+                             purpose_basis="t", identity_purposes=[],
+                             license_purposes=[], license_basis=None,
+                             metadata_status="verified", metadata_basis="t"))
+            s.add(ExpressionStrategyV2(
+                id="ESV2-OT", strategy_key="O-其他来源", version=1,
+                abstract_operation="x", invariants=[], effect_hypothesis="x",
+                failure_modes=[], status="verified", source="seed",
+                scope="WORK", scope_ids=["WK-OT"], scope_basis="t",
+                observation_status="observed", effect_status="pilot_verified"))
+            s.add(StrategyInstance(
+                id="SI-OT1", strategy_id="ESV2-OT", strategy_version=1,
+                work_id="WK-OT", segment_id="SEG-ot", frame_id=None,
+                text_version="corpus-v1", span_start=0, span_end=10,
+                evidence_text="x", evidence_sha256="0" * 64,
+                conditions_observed={}, observed_content="",
+                extractor_model="t", status="verified"))
+            s.commit()
+            # 不加附加排除：other 来源计入合格证据（证明附加项真的生效）
+            refs0, n0, _ = kq._evidence_for(s, "ESV2-OT", {})
+            assert n0 == 1 and refs0, (refs0, n0)
+            pol = {"source_policy": {"excluded_source_types": ["other"]}}
+            refs1, n1, st1 = kq._evidence_for(s, "ESV2-OT", pol)
+            assert n1 == 0 and not refs1, (refs1, n1)
+            assert "SI-OT1:excluded_source_type:other" in st1, st1
+            # 默认集不被调用方集合替换：fixture 冒充路径仍拦
+            refs2, n2, st2 = kq._evidence_for(s, "ESV2-J", pol)
+            assert n2 == 0 and not refs2, (refs2, n2)
+            assert "SI-J1:excluded_source_type:fixture" in st2, st2
+    finally:
+        with db.session() as s:
+            s.query(StrategyInstance).filter_by(id="SI-OT1").delete(
+                synchronize_session=False)
+            s.query(ExpressionStrategyV2).filter_by(id="ESV2-OT").delete(
+                synchronize_session=False)
+            s.query(WorkSource).filter_by(work_id="WK-OT").delete(
+                synchronize_session=False)
+            s.query(Work).filter_by(id="WK-OT").delete(
+                synchronize_session=False)
+            s.commit()
+
+
+def test_empty_source_policy_matches_default(seeded):
+    """②传空 source_policy / 不传——与默认行为完全一致（含 fixture 仍拦）。"""
+    pol = {"contract_version": 2, "book_id": "WK-α",
+           "semantic_requirements": {"节奏": "短句", "视角": "限知"}}
+    with db.session() as s:
+        d = kq.query_knowledge(pol, s)
+        e = kq.query_knowledge({**pol, "source_policy": {}}, s)
+    assert _selected_keys(d) == _selected_keys(e), (d, e)
+    assert _rejected_pairs(d) == _rejected_pairs(e)
+    assert ("J-夹具来源", "excluded_no_evidence") in _rejected_pairs(e)
+
+
+def test_allowed_text_versions_outside_default_gives_empty(seeded):
+    """③默认外版本 ⇒ 交集空集 ⇒ 全部实例 stripped（text_version 理由）、
+    查询空结果；调用方把默认外版本混进集合也放宽不了。
+
+    口径注：stripped 理由里的版本号是**实例自身的 text_version**
+    （app/knowledge_query.py 剥落行 f"{ins.id}:text_version:{ins.text_version}"），
+    不是调用方点名的版本；调用方点名的 corpus-v0 不会出现在理由里——
+    这正是「调用方取值范围不参与封底判定」的观测面。
+    """
+    with db.session() as s:
+        refs, n, stripped = kq._evidence_for(
+            s, "ESV2-A",
+            {"source_policy": {"allowed_text_versions": ["corpus-v0"]}})
+        assert refs == [] and n == 0, (refs, n)
+        assert stripped == ["SI-A1:text_version:corpus-v1",
+                            "SI-A2:text_version:corpus-v1"], stripped
+        assert all("corpus-v0" not in r for r in stripped), stripped
+        # 混入默认外版本不放宽：生效集仍是交集（这里是 corpus-v1 一项）
+        resp = kq.query_knowledge(
+            {"contract_version": 2, "book_id": "WK-α",
+             "semantic_requirements": {},
+             "source_policy": {"allowed_text_versions":
+                               ["corpus-v1", "corpus-v9"]}}, s)
+    assert resp["status"] == "matched", resp["selected"]
+    assert _selected_keys(resp), "收窄到 corpus-v1 后仍有合格证据可匹配"
+
+
+def test_caller_cannot_widen_text_versions_beyond_default(seeded):
+    """放宽攻击面：库里造一条默认外版本（corpus-v9）实例，调用方把该版本
+    写进 allowed_text_versions 也进不了合格集（交集封顶于服务端默认）。"""
+    from app.models import StrategyInstance
+    ins = StrategyInstance(
+        id="SI-TV9", strategy_id="ESV2-A", strategy_version=2,
+        work_id="WK-α", segment_id="SEG-tv9", frame_id=None,
+        text_version="corpus-v9", span_start=30, span_end=40,
+        evidence_text="x", evidence_sha256="0" * 64,
+        conditions_observed={}, observed_content="", extractor_model="t",
+        status="verified")
+    try:
+        with db.session() as s:
+            s.add(ins)
+            s.commit()
+            # 基线：默认口径下默认外版本本就被拦
+            refs0, _, st0 = kq._evidence_for(s, "ESV2-A", {})
+            assert all(r["instance_id"] != "SI-TV9" for r in refs0)
+            assert "SI-TV9:text_version:corpus-v9" in st0, st0
+            # 放宽尝试：调用方点名要 corpus-v9 ⇒ 交集为空 ⇒ 连老证据也全拦
+            refs1, n1, st1 = kq._evidence_for(
+                s, "ESV2-A",
+                {"source_policy": {"allowed_text_versions": ["corpus-v9"]}})
+            assert n1 == 0 and refs1 == [], (refs1, n1)
+            assert "SI-TV9:text_version:corpus-v9" in st1, st1
+    finally:
+        with db.session() as s:
+            s.query(StrategyInstance).filter_by(id="SI-TV9").delete(
+                synchronize_session=False)
+            s.commit()
+
+
+def test_excluded_uses_additive_semantics(seeded):
+    """④excluded_uses=附加禁用用途：命中者被拦（acc-07 同口径），
+    且附加排除不误伤无该用途的其他来源。"""
+    pol = {"contract_version": 2, "book_id": "WK-α",
+           "semantic_requirements": {"节奏": "短句", "视角": "限知"},
+           "source_policy": {"excluded_uses": ["benchmark_source"]}}
+    with db.session() as s:
+        resp = kq.query_knowledge(pol, s)
+    assert ("M-授权用途", "excluded_no_evidence") in _rejected_pairs(resp), \
+        resp["rejected"]
+    assert "A-短句加速" in _selected_keys(resp), resp["selected"]
+
+
+def test_capabilities_reports_source_policy_floor(seeded):
+    """capabilities 如实报出服务端封底口径（并集/交集语义说明）。"""
+    resp = client.get("/knowledge/capabilities")
+    assert resp.status_code == 200
+    floor = resp.json()["source_policy_floor"]
+    assert floor["excluded_source_types"] == \
+        sorted(kq.DEFAULT_EXCLUDED_SOURCE_TYPES)
+    assert floor["allowed_text_versions"] == \
+        sorted(kq.DEFAULT_ALLOWED_TEXT_VERSIONS)
+    assert "union" in floor["semantics"]["excluded_source_types"]
+    assert "intersection" in floor["semantics"]["allowed_text_versions"]
