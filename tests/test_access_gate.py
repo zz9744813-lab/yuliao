@@ -69,7 +69,12 @@ def _client(host: str = "127.0.0.1", token: str | None = "TOK"):
 
 
 # ── ① 本机免鉴权 ──────────────────────────────────────────────
-def test_localhost_bypasses_auth():
+def test_localhost_bypasses_auth(monkeypatch):
+    # R2（2026-09-23 审计残留）：loopback 免令牌已从隐式默认改为显式
+    # opt-in——本用例测的是「开关打开时本机直连免令牌」这条既有契约，
+    # 故须显式设 LG_LOCAL_BYPASS=1。默认（无开关）时 loopback 需令牌
+    # 的回归钉在 tests/test_remote_caps_budget.py。
+    monkeypatch.setenv("LG_LOCAL_BYPASS", "1")
     assert _client("127.0.0.1").get("/").status_code == 200
     assert _client("::1").get("/").status_code == 200
 

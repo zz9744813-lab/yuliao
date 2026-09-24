@@ -1,7 +1,8 @@
 """FastAPI 薄层 + 最小 Web 控制台。
 
 启动：uvicorn app.main:app --reload --port 8787
-控制台：http://127.0.0.1:8787/  （无鉴权，仅本机使用）
+控制台：http://127.0.0.1:8787/  （鉴权见 app/access.py：loopback 免令牌需
+显式 LG_LOCAL_BYPASS=1，默认本机访问也需令牌）
 
 主要端点：
   POST /corpus/import-inbox | import-distiller | import-file
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import threading
@@ -44,7 +46,8 @@ _STATIC = Path(__file__).resolve().parent / "static"
 # 前端源码留在仓库根、不混进应用包；挂载点见下方 /lab 路由。
 _WEBSRC = Path(__file__).resolve().parent.parent / "websrc"
 
-# 远程访问门：本机直连免鉴权；经隧道/代理的请求需令牌（见 app/access.py）。
+# 远程访问门：经隧道/代理的请求需令牌；loopback 免令牌只在显式
+# LG_LOCAL_BYPASS=1 时开启（R2，2026-09-23：不再隐式默认，见 app/access.py）。
 # 未配置令牌时不做任何事，本机使用行为完全不变。
 access.install(app)
 
@@ -296,6 +299,84 @@ class RunIn(BaseModel):
     stages: list[str] | None = None   # 引擎阶段子集（如 ["plan","extract"]）；None=全部
 
 
+# ── R1（审计残留 2026-09-23）：实验 run 的**全局预算闸** ─────────
+# 单请求上限（ExperimentIn 全量上限）挡不住费用放大：持令牌者可以循环
+# 创建/运行顶格实验——等单个实验跑完再发下一个，资源消耗照样无界。
+# 本闸在 run 入口限制**全局并发运行中实验数**，默认 1（最保守：一次只烧
+# 一个实验的钱，审计建议口径）；LG_MAX_RUNNING_EXPERIMENTS 可显式调高，
+# 但解析结果恒 ≥1——预算闸不许被环境变量关掉。
+#
+# 原子性：检查与占用在同一把进程锁内完成，不存在「先查后设」的 TOCTOU
+# 窗口——所有 run 请求串行通过 _budget_acquire，赢家的占用先于任何后来
+# 者的检查。作用域=本进程：serve_remote.sh 只起单 uvicorn 进程（无
+# --workers），进程内计数与真实运行一一对应；进程重启计数归零，而旧后台
+# 线程也随进程消亡，不存在「计数清了但活还在烧」的错位。
+#
+# 归还路径（每条占用恰好归还一次）：
+#   1. claim_run 失败（含 409 竞争输家）→ 立刻归还；
+#   2. claim_run 抛异常 → 归还后原样上抛；
+#   3. 正常启动 → 看护线程 join 后台引擎线程后归还——engine.run 的
+#      finally 必定收尾实验行，join 返回即该 run 已不再执行。看护线程
+#      daemon、不持任何其它资源，不阻塞进程退出。
+# 已知取舍：运行入口有 404/冻结（400）检查在预算闸**之前**，非法请求
+# 不消耗预算；同一实验重跑撞上预算满时会得 429（而非 409）——语义仍
+# 可读（"等当前实验跑完"），不给预算闸开「逐实验豁免」的口子。
+_RUN_BUDGET_LOCK = threading.Lock()
+_budget_active = 0
+
+
+def _budget_max() -> int:
+    raw = (os.environ.get("LG_MAX_RUNNING_EXPERIMENTS") or "").strip()
+    if not raw:
+        return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
+def _budget_active_count() -> int:
+    with _RUN_BUDGET_LOCK:
+        return _budget_active
+
+
+def _budget_acquire() -> bool:
+    global _budget_active
+    with _RUN_BUDGET_LOCK:
+        if _budget_active >= _budget_max():
+            return False
+        _budget_active += 1
+        return True
+
+
+def _budget_release() -> None:
+    global _budget_active
+    with _RUN_BUDGET_LOCK:
+        _budget_active = max(0, _budget_active - 1)
+
+
+def _reset_budget_for_tests() -> None:
+    """测试隔离钩子：把预算计数清零。只许测试调用（归还语义的回归钉在
+    tests/test_remote_caps_budget.py 的 test_budget_released_*）；生产路径
+    不重置——运行中的实验不该被任何隐式动作豁免预算。"""
+    global _budget_active
+    with _RUN_BUDGET_LOCK:
+        _budget_active = 0
+
+
+def _watch_budget_release(t) -> None:
+    """后台 run 结束后归还预算位。测试替身可能返回非 Thread 对象——
+    那种情况没有可 join 的执行体，同步归还（不多占一毫秒）。"""
+    def _w():
+        try:
+            if isinstance(t, threading.Thread):
+                t.join()
+        finally:
+            _budget_release()
+    threading.Thread(target=_w, daemon=True,
+                     name="run-budget-watchdog").start()
+
+
 @app.post("/experiments/{exp_id}/run")
 def run_exp(exp_id: str, body: RunIn | None = None):
     # 2026-09-18 接实验引擎（任务 12）：后台线程跑阶段状态机
@@ -310,19 +391,33 @@ def run_exp(exp_id: str, body: RunIn | None = None):
             # 冻结必须在领取**之前**拒（五轮：先领再拒会把行卡在
             # running+token——engine.run 的冻结检查晚于 API 领取）
             raise HTTPException(400, "experiment 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
+    # R1 全局预算闸：先占位再领取——占位失败 429（不碰领取，零副作用）；
+    # 领取失败/异常立即归还占位（见上方注释的归还路径）。
+    if not _budget_acquire():
+        raise HTTPException(
+            429, f"全局运行预算已满：运行中实验数已达上限 {_budget_max()}"
+                 f"（LG_MAX_RUNNING_EXPERIMENTS，默认 1）。请等当前实验跑完"
+                 f"再试；确需并行请显式调高该环境变量")
     # A07 四轮：**领取即闸**——在请求内做原子领取（旧「先查后启」是竞争
     # 窗口；旧快路径还把 running+NULL-owner 的存量行直接挡回，自动对账
     # 永远走不到）。领到 → 带凭据启动后台线程，响应如实 started；没领到
     # → 409 already_running（不发「已启动」的假响应；五轮：claim 失败先
     # 重核存在性——两步之间被删的实验应报 404 而不是 409）。
     token = new_id("RUN")
-    if not engine.claim_run(exp_id, token):
+    try:
+        claimed = engine.claim_run(exp_id, token)
+    except Exception:
+        _budget_release()
+        raise
+    if not claimed:
+        _budget_release()
         with db.session() as s:
             if not s.get(Experiment, exp_id):
                 raise HTTPException(404, "experiment 不存在")
         raise HTTPException(409, "already_running：执行权被持有（存量卡死排查用 "
                                  "run_experiment.py --list-stuck / --release）")
-    engine.run_experiment_background(exp_id, stages, token=token)
+    t = engine.run_experiment_background(exp_id, stages, token=token)
+    _watch_budget_release(t)   # 后台 run 结束（或替身不可 join）时归还预算位
     return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
 
 

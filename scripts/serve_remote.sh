@@ -2,8 +2,14 @@
 # 一键起「远程批改」服务（2026-09-15）。
 #
 # 起两样东西：
-#   1. uvicorn 绑 0.0.0.0:8787 —— 局域网可访问（本机免鉴权、远程需令牌）
+#   1. uvicorn 绑 0.0.0.0:8787 —— 局域网可访问（远程需令牌）
 #   2. cloudflared 快速隧道    —— 外网可访问（手机流量也行）
+#
+# ⚠ R2（审计残留 2026-09-23）：loopback 免令牌已改为**显式 opt-in**
+#   （LG_LOCAL_BYPASS=1）。本脚本**刻意不设**该开关——起出来的服务对本机
+#   回环访问同样要求令牌；确要本机免令牌时显式：
+#       LG_LOCAL_BYPASS=1 bash scripts/serve_remote.sh
+#   （环境变量会随 nohup 进程继承。）启动摘要里会如实打印绑定面与开关状态。
 #
 # 为什么要用脚本：这两进程隔天会掉；而且后台任务里 `cd A && cmd &` 的 cd
 # 不作用于后续命令，手敲相对路径容易把日志写错地方。
@@ -146,6 +152,16 @@ fi
 
 echo ""
 echo "──────────────────────────────────────────────"
+# R2 启动自检：如实打印绑定面与 loopback 免令牌开关状态。
+# 应用侧（app/access.self_check）打印鉴权面；这里打印它管得到的 --host 绑定面。
+if [ "${LG_LOCAL_BYPASS:-}" = "1" ]; then
+  BYPASS_NOTE="开启（LG_LOCAL_BYPASS=1）——本机直连免令牌（代理头请求仍需令牌）"
+else
+  BYPASS_NOTE="关闭（LG_LOCAL_BYPASS 未设）——本机访问也需令牌"
+fi
+echo " 绑定面 0.0.0.0:$PORT（对外暴露：局域网/隧道可达）"
+echo " 免令牌 $BYPASS_NOTE"
+echo ""
 echo " 本机   http://127.0.0.1:$PORT/"
 echo " 局域网 http://$LANIP:$PORT/"
 if [ -n "$URL" ]; then echo " 外网   $URL/"; else echo " 外网   未取到（看 $LOG）"; fi
