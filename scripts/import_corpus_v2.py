@@ -1,9 +1,19 @@
 """Phase 1.5 语料导入（v2 切分器 + integrity + 语料角色标注）。用法：
-python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明> [--caveats]
+python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明> [--caveats] [--clean]
 
 `--caveats`（显式开关，默认关＝既有行为逐字不变）：按独立核查席三条 caveat
 硬化——卷首元数据剥离并记账、末段截断显式标记（integrity JSON "truncated"）、
 chapter 从章节标题行回填。逻辑在 app/corpus_import_v2.py（纯函数）。
+
+`--clean`（显式开关，默认关＝既有行为逐字不变：落段只写 text，text_clean 留
+NULL）：开时每段落库同时写 `text_clean = clean_rules(ch)`——清洗规则**单源**
+复用 scripts/clean_text.py 的 clean_rules / needs_llm，本脚本不自创第二套。
+规则洗不掉的（仍含拉丁/带调拼音）本步**不送 LLM**：照旧只写规则结果，并在该段
+integrity JSON 里留 `clean_pending_llm: true` 标记（JSON 键，不加新列），
+LLM 还原留给既有 clean_text.py --llm 流程。两条既有路径（partial 续跑 /
+整本重导）写入口径一致且幂等：已提交段不重写；开开关的书全部新段都写
+text_clean，不产生 NULL/空串混用。只影响**新导入**，不回填既有书（既有书锚
+按 text_clean 拼，补写会让锚漂移，属主控授权面）。
 
 中断语义（审计《language-genome-code-audit-20260923》非阻断项）：大书每 BATCH 段
 提交一次，Ctrl-C / 崩溃 / WAL 锁失败都会留下**半本**——旧口径重跑只看 `Work.source`
@@ -11,6 +21,7 @@ chapter 从章节标题行回填。逻辑在 app/corpus_import_v2.py（纯函数
 现在 Work 一落库就带 `import_state: partial`，全部段落写完的**收尾提交**才翻
 `complete`（同一事务，状态与段数不会各说各话）；重跑遇 partial 按 ordinal 续补缺口，
 源文件与库内已有段不一致时清理该书整本重导——两条路径都确定且幂等。"""
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -24,6 +35,26 @@ from app.models import Segment, Work  # noqa: E402
 BATCH = 2000    # 大书分批提交：SQLite 变量数上限 + WAL 锁窗口
 STATE_KEY = "import_state"
 PARTIAL, COMPLETE = "partial", "complete"
+
+_clean_mod = None
+
+
+def _clean_text_mod():
+    """单源加载 scripts/clean_text.py 的清洗口径（clean_rules / needs_llm）。
+
+    --clean 只复用既有规则，绝不在此另写第二套；导不进来就如实报错退出，
+    不允许降级成"不清洗继续导入"（那会静默产出与开关语义相违的 NULL 段）。"""
+    global _clean_mod
+    if _clean_mod is None:
+        try:
+            import clean_text as ct
+        except ModuleNotFoundError:
+            spec = importlib.util.spec_from_file_location(
+                "clean_text", Path(__file__).resolve().parent / "clean_text.py")
+            ct = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(ct)
+        _clean_mod = ct
+    return _clean_mod
 
 
 def _note(role: str, state: str) -> str:
@@ -69,18 +100,26 @@ def _stored_texts(s, work_id: str) -> tuple[dict[int, str], int]:
     return have, dups
 
 
-def import_work(path: str, title: str, role: str, *, caveats: bool = False) -> dict:
+def import_work(path: str, title: str, role: str, *, caveats: bool = False,
+                clean: bool = False) -> dict:
     """导入一本书。返回 {status: imported|resumed|skipped, work_id, total, written}。
 
     分批提交中途炸掉只会留下 `import_state: partial` 的书（下游不得当完整本用），
     下一次重跑补齐缺口；完整本重跑保持既有「已导入过」幂等跳过。
-    caveats=True 时走 app.corpus_import_v2 的三条修复口径（默认 False＝旧行为）。"""
+    caveats=True 时走 app.corpus_import_v2 的三条修复口径（默认 False＝旧行为）。
+    clean=True 时新段同时写 text_clean=clean_rules(text)（单源复用 clean_text.py；
+    规则洗不掉的段 integrity 记 clean_pending_llm 不送 LLM）；默认 False＝旧行为
+    text_clean 留 NULL。已提交段任何路径都不重写（幂等）。"""
     text = _read_text_loose(Path(path))
     prep = corpus_import_v2.prepare_import(text, title=title) if caveats else None
     chunks = prep.chunks if prep is not None else segmenter_v2.make_segments_v2(text)
     total = len(chunks)
     src = f"file:{path}"
     parsed_author = (prep.front_matter.get("author") if prep else None) or None
+    clean_rules = needs_llm = None
+    if clean:
+        ct = _clean_text_mod()
+        clean_rules, needs_llm = ct.clean_rules, ct.needs_llm
     with db.session() as s:
         w = s.query(Work).filter_by(source=src).first()
         if w is not None and (not is_ours(w) or import_state(w) == COMPLETE):
@@ -112,7 +151,7 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False) -> d
         w.note = _note(role, PARTIAL)
         s.flush()
 
-        written = elig = 0
+        written = elig = pending_llm = 0
         for i, ch in enumerate(chunks):
             flags = si.analyze(ch, ordinal=i)
             if prep is not None and prep.last_truncated and i == total - 1:
@@ -121,7 +160,14 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False) -> d
                 elig += 1
             if i in have:                   # 续跑：已提交的段不重写，ordinal 不冲突
                 continue
+            text_clean = None
+            if clean:
+                text_clean = clean_rules(ch)
+                if needs_llm(text_clean):   # 规则修不掉的：本步不送 LLM，只留标记
+                    flags = {**flags, "clean_pending_llm": True}
+                    pending_llm += 1
             s.add(Segment(id=new_id("SEG"), work_id=w.id, ordinal=i, text=ch,
+                          text_clean=text_clean,
                           chapter=prep.chapters[i] if prep is not None else None,
                           n_sentences=0, n_chars=len(ch), seg_version=2,
                           integrity=json.dumps(flags, ensure_ascii=False)))
@@ -137,7 +183,9 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False) -> d
         w.note = _note(role, COMPLETE)      # 收尾提交：状态与全量段落同一事务落定
         s.commit()
         print(f"{title}: v2 段 {total}，合格 {elig}（{elig / max(1, total):.0%}），"
-              f"字数 {len(text)}", flush=True)
+              f"字数 {len(text)}"
+              + (f"，新段 text_clean 已写 {written}（其中 clean_pending_llm {pending_llm}）"
+                 if clean else ""), flush=True)
         return {"status": "resumed" if resuming else "imported", "work_id": w.id,
                 "total": total, "written": written}
 
@@ -145,13 +193,14 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False) -> d
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:]) if argv is None else list(argv)
     caveats = "--caveats" in argv
-    pos = [a for a in argv if a != "--caveats"]
+    clean = "--clean" in argv
+    pos = [a for a in argv if a not in ("--caveats", "--clean")]
     if len(pos) != 3:
         print("用法: python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明> "
-              "[--caveats]", file=sys.stderr)
+              "[--caveats] [--clean]", file=sys.stderr)
         return 2
     db.init_db()
-    import_work(pos[0], pos[1], pos[2], caveats=caveats)
+    import_work(pos[0], pos[1], pos[2], caveats=caveats, clean=clean)
     return 0
 
 
