@@ -37,10 +37,34 @@
   打印最接近的名字，见 `scripts/preflight_models.py`）；累计 20 次调用后失败率 >30%
   当场熔断中止。起因：`data/_dbg/DIAG_rescore_387.md`（名字写错 → 387 条 503 全灭）。
 
+`--scope` 现共四档（default=used，其余三档选取语义与历史逐字一致）：
+
+- `used`：审查/劣化用到的段（Candidate ∪ ControlledCorruption 引用的段）；
+- `all-frames`：所有抽过 L 帧的段；
+- `bench`：role == 'benchmark' 的基准段；
+- `nonbench`（审计 P0 主线 1 的检查面）：**K2 非基准试点供给池**——候选 =
+  `role != 'benchmark'`（判据是「不等于」，NULL/train 都算非基准）**且**所属
+  作品在 `work_sources` 登记为合规人类语料（`human_fiction` / 前缀
+  `production_nonbenchmark_*`；判定单源复用 `scripts/k2_extract_backfill.py` 的
+  `nonbenchmark_compliant_source`，不许另写一套，import 不到即 fail-closed
+  报错退出）**且**来源类型不命中 K2 侧同源排除集
+  `app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES`（值 = fixture / synthetic
+  / commentary；与 K2 侧同源，单源复用同一常量，import 不到即 fail-closed）**且**
+  `text_clean` 非空。与 `k2_extract_backfill --source-scope nonbenchmark` 的段宇宙
+  **逐字一致**（白名单 + 排除集双闸同判据）——把这条供给面纳入 source_check 的补查
+  通道，不放松任何既有门（src_ok 幂等/严格布尔口径照旧）。
+
+`--work-id <WK-...>`：把范围**收窄**到指定作品（可重复参数，或逗号分隔）。
+收窄是唯一允许的方向：结果恒 ⊆ 该 scope 自己的选取集，绝不用它扩宽到
+不合规来源（给不合规/无关 work_id = 空集，不报错也不放行）。
+
 用法：
     python scripts/source_check.py --scan
     python scripts/source_check.py --run --scope used --conc 8
     python scripts/source_check.py --run --scope all-frames --conc 8
+    python scripts/source_check.py --run --scope nonbench --conc 8
+    python scripts/source_check.py --run --scope nonbench \
+        --work-id WK-dc90993434e9 --conc 8
 """
 from __future__ import annotations
 
@@ -55,15 +79,32 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from sqlalchemy import or_
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
 from app.gateway import bind_experiment, chat  # noqa: E402
-from app.models import Candidate, ControlledCorruption, Frame, Segment  # noqa: E402
+from app.models import Candidate, ControlledCorruption, Frame, Segment, WorkSource  # noqa: E402
 from app import config  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：模型名预检
+import k2_extract_backfill as k2b  # noqa: E402  # K2 试点来源口径唯一入口（单源复用，import 不到即 fail-closed）
+
+# nonbench 排除集与 K2 侧同源（单源复用）：k2_extract_backfill 经
+# `from app import knowledge_query as KQ` 消费 `DEFAULT_EXCLUDED_SOURCE_TYPES`
+# （见其 k3_evidence_preview 的来源闸），source_check 复用同一对象，绝不另写一套；
+# import 不到（或 KQ 缺该常量）即 fail-closed 报错退出。
+from app import knowledge_query as _KQ  # noqa: E402  # K2 侧同源入口（与 k2_extract_backfill 同一引用）
+try:
+    NONBENCH_EXCLUDED_SOURCE_TYPES = _KQ.DEFAULT_EXCLUDED_SOURCE_TYPES
+except AttributeError as _e:
+    raise RuntimeError(
+        "无法单源复用 K2 侧排除集常量 "
+        "(app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES)："
+        f"{_e}。nonbench 口径必须与 K2 同源，已 fail-closed 退出，禁止另写一套。"
+    ) from _e
 
 PV = "source_integrity_v1"
 # 判完整性要细读，用稳的模型；但**允许被调度覆盖**：夜间要把第一阶段也分派到
@@ -223,8 +264,29 @@ def check_one(text: str, exp_id: str | None = None) -> dict | None:
     return parse_json(r.text)
 
 
-def targets(scope: str) -> list[str]:
-    """scope：used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；bench=基准段。"""
+def parse_work_ids(raw) -> list[str]:
+    """`--work-id` 展开：可重复参数、可逗号分隔，去首尾空白、去重，保序返回。
+
+    空输入 → []（= 不收窄）。不合规/无关 work_id 交给 targets() 做纯交集，
+    只收窄不放宽——绝不用它扩宽到不合规来源。
+    """
+    out: list[str] = []
+    for chunk in raw or []:
+        for tok in str(chunk).split(","):
+            tok = tok.strip()
+            if tok and tok not in out:
+                out.append(tok)
+    return out
+
+
+def targets(scope: str, *, work_ids: list[str] | None = None) -> list[str]:
+    """scope：used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；
+    bench=基准段；nonbench=K2 非基准试点供给池（合规人类语料 + role!=benchmark
+    + 来源不命中 K2 侧同源排除集 fixture/synthetic/commentary + text_clean 非空，
+    来源判据与白名单/排除集单源复用 k2_extract_backfill → app.knowledge_query）。
+
+    work_ids：把范围**收窄**到指定作品——与 scope 选取集做纯交集（⊆），
+    收窄是唯一允许的方向。None/[] = 不收窄，结果与改动前逐字一致。"""
     with db.session() as s:
         if scope == "used":
             ids = {r[0] for r in s.query(Candidate.segment_id).distinct()}
@@ -232,11 +294,41 @@ def targets(scope: str) -> list[str]:
         elif scope == "all-frames":
             ids = {r[0] for r in s.query(Frame.segment_id).filter(
                 Frame.granularity == "L").distinct()}
+        elif scope == "nonbench":
+            # 与 k2_extract_backfill.segment_universe(source_scope='nonbenchmark')
+            # 逐字一致（双闸同判据，绝不另写一套）：
+            # ① 段 role 显式「不等于 benchmark」（NULL 亦算非基准——SQL 明写
+            #    or_(IS NULL, !=)，避免 `!=` 在 SQL 里把 NULL 吞掉的口径漂移）；
+            # ② 所属作品在 work_sources 登记为合规人类语料（白名单
+            #    nonbenchmark_compliant_source，单源复用 k2b，不另写）；
+            # ③ 排除集（fixture/synthetic/commentary）——单源复用 K2 侧同源常量
+            #    app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES（k2b 经 KQ 同源
+            #    消费），与 K2 侧逐字一致；
+            # ④ text_clean 非空（与抽取侧 `(text_clean or '').strip()` 同闸）。
+            reg = {ws.work_id: ws for ws in s.query(WorkSource).all()}
+            compliant = {wid for wid, ws in reg.items()
+                         if k2b.nonbenchmark_compliant_source(ws.source_type)
+                         and (ws.source_type or "") not in NONBENCH_EXCLUDED_SOURCE_TYPES}
+            cand = s.query(Segment.id, Segment.text_clean).filter(
+                Segment.work_id.in_(compliant),
+                or_(Segment.role.is_(None), Segment.role != "benchmark")).all()
+            ids = {r[0] for r in cand if (r[1] or "").strip()}
         else:
             from app.models import Segment as S
             ids = {r[0] for r in s.query(S.id).filter(S.role == "benchmark")}
-        rows = [(x.id, x.text_clean or x.text, x.integrity) for x in
-                s.query(Segment).filter(Segment.id.in_(ids)).all()]
+        # `ids` 可能很大（nonbench 在全量合规池上可达数十万段）——
+        # `id IN (...)` 一次绑定会撞 SQLite 变量数上限（实测 394k 变量
+        # OperationalError: too many SQL variables），按块分次取，语义不变
+        # （只做集合选取，块序不影响 out）。小集合 = 单块 = 与改动前一模一样。
+        rows = []
+        for i in range(0, len(ids), 500):
+            part = sorted(ids)[i:i + 500]
+            q = s.query(Segment).filter(Segment.id.in_(part))
+            if work_ids:
+                # 只收窄：与 scope 选取集做交集（子集），扩宽路径在此不存在
+                q = q.filter(Segment.work_id.in_(set(work_ids)))
+            rows.extend((x.id, x.text_clean or x.text, x.integrity)
+                        for x in q.all())
     out = []
     for sid, text, integ in rows:
         try:
@@ -255,7 +347,8 @@ def targets(scope: str) -> list[str]:
 
 
 def run(scope: str = "used", conc: int = 8, limit: int = 0,
-        ids: list[str] | None = None, exp_id: str | None = None) -> dict:
+        ids: list[str] | None = None, exp_id: str | None = None,
+        work_ids: list[str] | None = None) -> dict:
     blocked = _preflight()
     if blocked:
         print(f"[预检失败] 模型名 `{MODEL}` 用不了，未开跑：{blocked}")
@@ -303,10 +396,13 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                 _stat["unverified"] += 1   # 存量值类型不严：按未校验计，且必须重查
             todo.append((sid, text))
     else:
-        todo = targets(scope)
+        todo = targets(scope, work_ids=work_ids)
     if limit:
         todo = todo[:limit]
-    print(f"待检查 {len(todo)} 段（scope={scope}，已检查跳过 {_stat['skip']}）")
+    label = f"scope={scope}"
+    if work_ids:
+        label += f"，work_id 收窄 {len(set(work_ids))} 本"
+    print(f"待检查 {len(todo)} 段（{label}，已检查跳过 {_stat['skip']}）")
     if not todo:
         return {**dict(_stat), "aborted": False}
 
@@ -419,7 +515,25 @@ def main() -> None:
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--scope", default="used",
-                    choices=("used", "all-frames", "bench"))
+                    choices=("used", "all-frames", "bench", "nonbench"),
+                    help=("段选取口径（默认 %(default)s=现状不变）："
+                          "used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；"
+                          "bench=role=='benchmark' 的基准段；"
+                          "nonbench=K2 非基准试点供给池——段 role != 'benchmark'"
+                          "（NULL 也算非基准，判据是「不等于」）且所属作品在 "
+                          "work_sources 登记为合规人类语料（human_fiction / "
+                          "production_nonbenchmark_*，判定单源复用 "
+                          "scripts/k2_extract_backfill.py 的 "
+                          "nonbenchmark_compliant_source，import 不到即 "
+                          "fail-closed 报错退出）且来源类型不命中 K2 侧同源排除集 "
+                          "DEFAULT_EXCLUDED_SOURCE_TYPES（fixture / synthetic / "
+                          "commentary，与 K2 侧同源、单源复用 app.knowledge_query，"
+                          "import 不到即 fail-closed）且 text_clean 非空。"))
+    ap.add_argument("--work-id", action="append", default=[],
+                    help=("把范围收窄到指定作品（WK-…，可重复参数或逗号分隔）。"
+                          "收窄是唯一允许的方向：结果恒 ⊆ 该 scope 自己的选取集，"
+                          "绝不用它扩宽到不合规来源（给不合规/无关 work_id = "
+                          "空集，不报错也不放行）。"))
     ap.add_argument("--conc", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
@@ -428,7 +542,8 @@ def main() -> None:
         scan()
         return
     if args.run:
-        res = run(scope=args.scope, conc=args.conc, limit=args.limit)
+        res = run(scope=args.scope, conc=args.conc, limit=args.limit,
+                  work_ids=parse_work_ids(args.work_id))
         print(json.dumps(res, ensure_ascii=False))
         if res.get("aborted"):
             sys.exit(2)     # 预检没过 / 失败率熔断：非零退出，别让夜间窗口静默空转
