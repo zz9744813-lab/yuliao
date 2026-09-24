@@ -9,6 +9,17 @@
 口径（从 k2_contrast_extract 单源继承，不臆造）：
 - op 集合 / 标签映射 / 策略键：import 该模块的 OPS / label_of /
   LABEL_STRATEGY；每对 strategy_key 由 label_of(op) 唯一决定；
+- **来源合规门（2026-09-24 派工「来源门」）**：人类侧逐段查 work_sources，
+  只收合规人类语料——口径与 K2 试点通道/K3 证据侧**同源**：
+  `source_type ∈ {human_fiction} ∪ 前缀 production_nonbenchmark_`
+  （import 自 scripts/k2_extract_backfill，唯一判定入口
+  nonbenchmark_compliant_source，不自创第二套口径），且
+  `text_version ∈ DEFAULT_ALLOWED_TEXT_VERSIONS`（import 自
+  app/knowledge_query，与 K3 证据侧同源）；fixture/synthetic/commentary
+  与无登记行一律排除。被排除来源逐来源留痕（work_id/source_type/
+  text_version/reason/n_segments 写进返回结构 skips.excluded_sources 与
+  CLI 输出，不静默丢）——K3 硬排 fixture/synthetic/commentary，不合规
+  来源的对即使过门也永远成不了 K3 可用证据，取它们纯属浪费。
 - 人类侧段筛选**对着六道门反向设计**：命中任一信号词表（解释/心理/节拍/
   修饰/门1 双侧词表）的段不入池——人类原文不得自带改动信号，否则不构成
   对照；长度窗 [80, 350]（门3 比值 [1.2,6.0] × writer 指令 1.5~2.5 倍）；
@@ -31,6 +42,9 @@
         --on expression_strategies_v2 \
         --writer-base http://127.0.0.1:4000/v1 --writer-model mc22-flash \
         --out <path>/k2_pairs_20260924.json --ledger <path>/k2pairs_ledger.jsonl
+
+    # 零调用预演（不调 writer、不读密钥、不写 --out）：逐来源合格/排除明细
+    python scripts/k2_pairs_gen.py --dry-run --n-per-op 12 --out <path>/x.json
 """
 from __future__ import annotations
 
@@ -42,6 +56,8 @@ import json
 import os
 import sys
 from pathlib import Path
+
+from sqlalchemy import func                           # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -56,6 +72,14 @@ _spec.loader.exec_module(k2c)
 
 from app import db                                    # noqa: E402
 from app.models import Segment, Work, WorkSource      # noqa: E402
+# 来源合规口径**单源**：白名单常量与判定函数直接 import 自
+# scripts/k2_extract_backfill.py（K2 试点通道口径），text_version 白名单
+# 直接 import 自 app/knowledge_query.py（K3 证据侧 DEFAULT_ALLOWED_TEXT_VERSIONS）
+# ——不自创第二套口径；tests 钉住「字面量漂移即红」。
+from k2_extract_backfill import (                     # noqa: E402
+    NONBENCHMARK_SOURCE_TYPES, NONBENCHMARK_SOURCE_TYPE_PREFIX,
+    nonbenchmark_compliant_source)
+from app.knowledge_query import DEFAULT_ALLOWED_TEXT_VERSIONS  # noqa: E402
 
 KEY_FILE = Path("F:/Hermes/secrets/litellm_master_key.txt")
 
@@ -69,6 +93,14 @@ HUMAN_FORBIDDEN = tuple(sorted(set(
 
 SEG_MIN_CHARS, SEG_MAX_CHARS = 80, 350
 DEFAULT_SCAN = 20_000     # 每 op 最多扫描段数（43.8 万行库上的确定性上限）
+
+# 来源合规门的排除理由码（skips.excluded_sources[].reason，可核对）：
+REASON_NO_ROW = "no_work_source_row"                  # 无登记行
+REASON_BAD_TYPE = "source_type_not_compliant"         # fixture/synthetic/commentary 等
+REASON_BAD_TEXT_VERSION = "text_version_not_allowed"  # 空/ test-fixture 等白名单外
+
+# text_version 白名单**单源**继承 K3 证据侧（app/knowledge_query），不本地重定义
+ALLOWED_TEXT_VERSIONS = DEFAULT_ALLOWED_TEXT_VERSIONS
 
 # 按 op 定向的 writer 指令（对着门 0/1/3/4/5 断言逐条反推）：
 # S1（add_interpretation / add_psych_narration）——重写并插入「解释/心理」
@@ -137,11 +169,52 @@ def _clean(seg_text: str) -> str:
     return t
 
 
-def human_pool(s, *, n: int, scan_limit: int) -> list[dict]:
-    """确定性人类侧段池：role≠benchmark、text_clean 在长度窗内、六门信号
-    词全零命中、可派生非空 scene_keys。按 (work_id, ordinal) 序扫描取前 n。"""
+def _source_verdict(s, wid: str, cache: dict) -> tuple:
+    """逐来源合规判定（每 work_id 只查一次 work_sources）。
+    返回 (ok, reason, source_type, text_version)；口径唯一入口：
+    nonbenchmark_compliant_source（K2 试点通道同源）+
+    DEFAULT_ALLOWED_TEXT_VERSIONS（K3 证据侧同源）。"""
+    if wid in cache:
+        return cache[wid]
+    reg = s.query(WorkSource).filter_by(work_id=wid).first()
+    if reg is None:
+        v = (False, REASON_NO_ROW, "", "")
+    elif not nonbenchmark_compliant_source(reg.source_type):
+        v = (False, REASON_BAD_TYPE, reg.source_type or "",
+             reg.text_version or "")
+    elif (reg.text_version or "") not in ALLOWED_TEXT_VERSIONS:
+        v = (False, REASON_BAD_TEXT_VERSION, reg.source_type or "",
+             reg.text_version or "")
+    else:
+        v = (True, "", reg.source_type or "", reg.text_version or "")
+    cache[wid] = v
+    return v
+
+
+def _trace_bump(trace: dict, wid: str, verdict: tuple, *,
+                pool_eligible: bool = False) -> None:
+    ok, reason, st, tv = verdict
+    e = trace.get(wid)
+    if e is None:
+        e = trace[wid] = {"work_id": wid, "source_type": st,
+                          "text_version": tv, "reason": "",
+                          "n_segments_scanned": 0, "n_pool_eligible": 0}
+    e["n_segments_scanned"] += 1
+    if not ok:
+        e["reason"] = reason          # 同一 work 判定恒定
+    elif pool_eligible:
+        e["n_pool_eligible"] += 1
+
+
+def human_pool(s, *, n: int, scan_limit: int):
+    """确定性人类侧段池：**来源合规门**（work_sources 逐段查，不合规即
+    跳过并留痕）+ role≠benchmark、text_clean 在长度窗内、六门信号词全零
+    命中、可派生非空 scene_keys。按 (work_id, ordinal) 序扫描取前 n。
+    返回 (pool, trace)——trace 为逐来源明细 dict[work_id → 计数字段]，
+    排除/合格都不静默丢。"""
     out: list[dict] = []
-    tv_cache: dict[str, str] = {}
+    trace: dict[str, dict] = {}
+    verdict_cache: dict[str, tuple] = {}
     rows = (s.query(Segment.id, Segment.work_id, Segment.ordinal,
                     Segment.text_clean, Segment.role)
             .filter(Segment.text_clean.isnot(None))
@@ -153,6 +226,10 @@ def human_pool(s, *, n: int, scan_limit: int) -> list[dict]:
         scanned += 1
         if scanned > scan_limit:
             break
+        ok, reason, st, tv = verdict = _source_verdict(s, wid, verdict_cache)
+        if not ok:
+            _trace_bump(trace, wid, verdict)      # 来源不合规：留痕即跳
+            continue
         t = _clean(tclean)
         if role == "benchmark":
             continue
@@ -163,12 +240,30 @@ def human_pool(s, *, n: int, scan_limit: int) -> list[dict]:
         keys = derive_scene_keys(t)
         if not keys:
             continue
-        if wid not in tv_cache:
-            reg = s.query(WorkSource).filter_by(work_id=wid).first()
-            tv_cache[wid] = (reg.text_version or "") if reg else ""
+        _trace_bump(trace, wid, verdict, pool_eligible=True)
         out.append({"segment_id": sid, "work_id": wid, "text": t,
-                    "text_version": tv_cache[wid], "scene_keys": keys})
-    return out
+                    "text_version": tv, "scene_keys": keys})
+    return out, trace
+
+
+def trace_report(trace: dict) -> dict:
+    """逐来源留痕 → 可核对的排除/合格明细（按 work_id 确定性排序）。
+    excluded_sources 条目形态即任务书规定的
+    {work_id, source_type, text_version, reason, n_segments}。"""
+    entries = sorted(trace.values(), key=lambda e: e["work_id"])
+    return {
+        "excluded_sources": [
+            {"work_id": e["work_id"], "source_type": e["source_type"],
+             "text_version": e["text_version"], "reason": e["reason"],
+             "n_segments": e["n_segments_scanned"]}
+            for e in entries if e["reason"]],
+        "eligible_sources": [
+            {"work_id": e["work_id"], "source_type": e["source_type"],
+             "text_version": e["text_version"],
+             "n_segments_scanned": e["n_segments_scanned"],
+             "n_pool_eligible": e["n_pool_eligible"]}
+            for e in entries if not e["reason"]],
+    }
 
 
 def read_writer_key() -> str:
@@ -247,13 +342,25 @@ def generate(s, *, n_per_op: int, writer, model: str, cache_dir: Path,
     writer=callable(instruction, human) -> ai_text（生产传 call_writer 封装，
     测试注入假 writer——不联网）。幂等：缓存命中不调 writer。"""
     pairs, events = [], []
+    merged_trace: dict[str, dict] = {}
     for op in k2c.OPS:
-        pool = human_pool(s, n=n_per_op, scan_limit=scan_limit)
+        pool, trace = human_pool(s, n=n_per_op, scan_limit=scan_limit)
+        # 扫描对每 op 确定性重复（同库同序），逐来源明细各来源取首份
+        for wid, e in trace.items():
+            merged_trace.setdefault(wid, dict(e))
         if len(pool) < n_per_op:
-            raise SystemExit(f"[k2_pairs_gen] 人类侧段池不足：op={op} 需要 "
-                             f"{n_per_op}，实得 {len(pool)}（扫描上限 "
-                             f"{scan_limit}，禁词过滤后无信号段不足）——"
-                             "如实失败，不凑数")
+            excl = trace_report(merged_trace)["excluded_sources"]
+            detail = ""
+            if excl:
+                head = "; ".join(f"{e['work_id']}={e['reason']}"
+                                 for e in excl[:10])
+                detail = f"：{head}{'等' if len(excl) > 10 else ''}"
+            raise SystemExit(
+                f"[k2_pairs_gen] 人类侧合规段池不足：op={op} 需要 "
+                f"{n_per_op}，实得 {len(pool)}（扫描上限 {scan_limit}，"
+                f"来源合规门排除 {len(excl)} 个不合规来源{detail}；"
+                "禁词过滤后无信号段不足）——如实失败，不凑数、"
+                "不降级到不合规来源")
         for item in pool:
             human = item["text"]
             h_sha = hashlib.sha256(human.encode("utf-8")).hexdigest()
@@ -298,6 +405,7 @@ def generate(s, *, n_per_op: int, writer, model: str, cache_dir: Path,
             for e in events:
                 e["ts"] = datetime.datetime.now().isoformat(timespec="seconds")
                 f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    rep = trace_report(merged_trace)
     return {"n_pairs": len(pairs),
             "n_writer_calls": sum(1 for e in events
                                   if e["event"] == "writer_call"),
@@ -305,7 +413,31 @@ def generate(s, *, n_per_op: int, writer, model: str, cache_dir: Path,
                                 if e["event"] == "cache_hit"),
             "by_op": {op: sum(1 for p in pairs if p["op"] == op)
                       for op in k2c.OPS},
+            "skips": {"excluded_sources": rep["excluded_sources"]},
+            "eligible_sources": rep["eligible_sources"],
             "pairs": pairs}
+
+
+def source_census(s) -> list[dict]:
+    """逐 work_source 登记行的来源普查（dry-run 诊断用，只 SELECT）：
+    合规来源里 text_clean 全空的（如尚未跑清洗的试点源）在段池查询中
+    零行出现——不查这一层就看不见「合格却缺席」。"""
+    out = []
+    for reg in s.query(WorkSource).order_by(WorkSource.work_id).all():
+        ok = (nonbenchmark_compliant_source(reg.source_type)
+              and (reg.text_version or "") in ALLOWED_TEXT_VERSIONS)
+        n_seg = s.query(func.count(Segment.id)).filter(
+            Segment.work_id == reg.work_id).scalar()
+        n_clean = s.query(func.count(Segment.id)).filter(
+            Segment.work_id == reg.work_id,
+            Segment.text_clean.isnot(None)).scalar()
+        out.append({"work_id": reg.work_id,
+                    "source_type": reg.source_type or "",
+                    "text_version": reg.text_version or "",
+                    "compliant": bool(ok),
+                    "n_segments": int(n_seg or 0),
+                    "n_text_clean": int(n_clean or 0)})
+    return out
 
 
 def main() -> None:
@@ -313,6 +445,9 @@ def main() -> None:
     ap.add_argument("--n-per-op", type=int, default=12, dest="n_per_op")
     ap.add_argument("--on", default="expression_strategies_v2",
                     help="策略来源表名（当前协议仅 expression_strategies_v2）")
+    ap.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="零调用预演：不调 writer、不读密钥、不写 --out，"
+                         "只打印逐来源合格/排除明细与人类侧池容量")
     ap.add_argument("--writer-base", default="", dest="writer_base")
     ap.add_argument("--writer-model", default="", dest="writer_model")
     ap.add_argument("--out", required=True, help="输出对 JSON（已存在即拒）")
@@ -327,6 +462,26 @@ def main() -> None:
                          f"{a.on}）——当前协议的唯一策略来源")
     if a.n_per_op < 1:
         raise SystemExit("--n-per-op 须 ≥1")
+    if a.dry_run:
+        # 零调用路径：无 writer 参数、无密钥、不落对文件——来源门明细照出
+        db.init_db()
+        with db.session() as s:
+            pool, trace = human_pool(s, n=a.n_per_op, scan_limit=a.scan_limit)
+            rep = trace_report(trace)
+            by_work: dict[str, int] = {}
+            for item in pool:
+                by_work[item["work_id"]] = by_work.get(item["work_id"], 0) + 1
+            print(json.dumps(
+                {"dry_run": True, "n_per_op": a.n_per_op,
+                 "n_ops": len(k2c.OPS),
+                 "pool_size_per_op": len(pool),
+                 "pool_sufficient": len(pool) >= a.n_per_op,
+                 "pool_by_work": dict(sorted(by_work.items())),
+                 "skips": rep["excluded_sources"],
+                 "eligible_sources": rep["eligible_sources"],
+                 "source_census": source_census(s)},
+                ensure_ascii=False, indent=1))
+        return
     if not (a.writer_base and a.writer_model):
         raise SystemExit("须给 --writer-base 与 --writer-model（AI 侧生成"
                          "走真实 writer 通道；离线路径仅供测试注入）")
@@ -345,12 +500,17 @@ def main() -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(
         {"n_pairs": result["n_pairs"], "by_op": result["by_op"],
+         "skips": result["skips"],
+         "eligible_sources": result["eligible_sources"],
          "pairs": result["pairs"]}, ensure_ascii=False, indent=1),
         encoding="utf-8")
     print(json.dumps({"n_pairs": result["n_pairs"],
                       "n_writer_calls": result["n_writer_calls"],
                       "n_cache_hits": result["n_cache_hits"],
-                      "by_op": result["by_op"], "out": str(out_path),
+                      "by_op": result["by_op"],
+                      "skips": result["skips"],
+                      "eligible_sources": result["eligible_sources"],
+                      "out": str(out_path),
                       "ledger": str(ledger) if ledger else ""},
                      ensure_ascii=False, indent=1))
 

@@ -10,6 +10,14 @@
    更强的口径，不放宽任何门）；
 ⑤ writer 不可达时如实报错退出（SystemExit 非零），绝不伪造 AI 侧数据。
 
+来源合规门增钉（派工任务书「来源门」2026-09-24，同样全离线假 writer）：
+⑥ fixture/synthetic/commentary/无登记行四种不合规来源全部被排除，
+   excluded_sources 留痕带可核对 reason；
+⑦ 合规来源（human_fiction 与 production_nonbenchmark_*）正常进池；
+⑧ text_version 不在 K3 白名单（test-fixture / 空值）被排除；
+⑨ 合规常量与 scripts/k2_extract_backfill.py 源码字面量单源一致，漂移即红；
+⑩ 合规段池不足 n 时 fail-closed（SystemExit），绝不回退到不合规来源。
+
 纪律：测试从不联网、从不执行 CLI --live；人类侧文本来自种子段（模拟库内
 现成分段），AI 侧来自假 writer（不编造"人类文本"、不伪造 writer 故障行为）。
 """
@@ -221,3 +229,168 @@ def test_writer_unreachable_fails_closed(seeded, tmp_path):
                          model="fake", cache_dir=tmp_path / "c2",
                          ledger=None)
     assert not out.exists(), "writer 挂后绝不许产出对文件"
+
+
+# ── 来源合规门增钉（⑥~⑩，任务书「来源门」2026-09-24）─────────────────
+
+BIG = 10 ** 6   # 测试库行数量级远小于它：pool 即全库合格段（计数精确）
+
+
+def _seed_src_work(s, *, source_type=None, text_version=None,
+                   register=True, n_seg=2, title="t-k2src"):
+    """造一个来源登记形态指定的作品（段文本用无信号基线 HUMAN_TEXT），
+    返回 work_id。source_type=None 且 register=True ⇒ 登记行 source_type
+    列 NOT NULL，故 register=False 才表达「无登记行」。"""
+    w = Work(title=title, source="test:k2src")
+    s.add(w)
+    s.flush()
+    for i in range(n_seg):
+        s.add(Segment(work_id=w.id, ordinal=i, text=HUMAN_TEXT,
+                      text_clean=HUMAN_TEXT, role=None,
+                      n_sentences=3, n_chars=len(HUMAN_TEXT)))
+    if register:
+        s.add(WorkSource(work_id=w.id, canonical_work_id=w.id,
+                         source_type=source_type, text_version=text_version,
+                         purpose_basis="test", identity_purposes=["research"],
+                         license_purposes=[], license_basis="test",
+                         metadata_status="verified", metadata_basis="test"))
+    s.commit()
+    return w.id
+
+
+def _pool_and_excluded(s):
+    pool, trace = k2g.human_pool(s, n=BIG, scan_limit=BIG)
+    rep = k2g.trace_report(trace)
+    return pool, rep["excluded_sources"], rep["eligible_sources"]
+
+
+def test_source_gate_excludes_noncompliant_four_forms(tmp_path):
+    """⑥ fixture / synthetic / commentary / 无登记行四种不合规来源全部
+    被排除，且 excluded_sources 留痕 work_id/source_type/reason/n_segments
+    可核对（不静默丢）。"""
+    db.init_db()
+    with db.session() as s:
+        w_fix = _seed_src_work(s, source_type="fixture",
+                               text_version="test-fixture")
+        w_syn = _seed_src_work(s, source_type="synthetic",
+                               text_version="corpus-v1")
+        w_com = _seed_src_work(s, source_type="commentary",
+                               text_version="corpus-v2-mirror")
+        w_noreg = _seed_src_work(s, register=False)
+        pool, excluded, _eligible = _pool_and_excluded(s)
+    by_wid = {e["work_id"]: e for e in excluded}
+    # 四种来源都留痕，理由码逐一对得上
+    assert by_wid[w_fix]["reason"] == k2g.REASON_BAD_TYPE
+    assert by_wid[w_fix]["source_type"] == "fixture"
+    assert by_wid[w_syn]["reason"] == k2g.REASON_BAD_TYPE
+    assert by_wid[w_syn]["source_type"] == "synthetic"
+    assert by_wid[w_com]["reason"] == k2g.REASON_BAD_TYPE
+    assert by_wid[w_com]["source_type"] == "commentary"
+    assert by_wid[w_noreg]["reason"] == k2g.REASON_NO_ROW
+    # 逐来源段数留痕（各 2 段全部被排除）
+    for wid in (w_fix, w_syn, w_com, w_noreg):
+        assert by_wid[wid]["n_segments"] == 2
+    # 池内零命中：不合规来源的 segment_id 一个都不许进池
+    assert not ({it["work_id"] for it in pool}
+                & {w_fix, w_syn, w_com, w_noreg})
+
+
+def test_source_gate_admits_both_compliant_forms(tmp_path):
+    """⑦ 合规来源两种形态（精确值 human_fiction 与前缀
+    production_nonbenchmark_*）正常进池，合格明细带 text_version。"""
+    db.init_db()
+    with db.session() as s:
+        w_hf = _seed_src_work(s, source_type="human_fiction",
+                              text_version="corpus-v1")
+        w_pb = _seed_src_work(s, source_type="production_nonbenchmark_k2v2",
+                              text_version="corpus-v2-mirror")
+        pool, _excluded, eligible = _pool_and_excluded(s)
+    assert (pool and eligible), "前置：本用例的合规段必须在池里"
+    got_hf = [it for it in pool if it["work_id"] == w_hf]
+    got_pb = [it for it in pool if it["work_id"] == w_pb]
+    assert len(got_hf) == 2 and len(got_pb) == 2
+    assert all(it["text_version"] == "corpus-v1" for it in got_hf)
+    assert all(it["text_version"] == "corpus-v2-mirror" for it in got_pb)
+    by_wid = {e["work_id"]: e for e in eligible}
+    assert by_wid[w_hf]["n_pool_eligible"] == 2
+    assert by_wid[w_pb]["source_type"] == "production_nonbenchmark_k2v2"
+    assert by_wid[w_pb]["n_pool_eligible"] == 2
+
+
+def test_source_gate_text_version_whitelist(tmp_path):
+    """⑧ source_type 合规但 text_version 不在 K3 白名单（test-fixture /
+    空值）一律排除，留痕 reason=text_version_not_allowed。"""
+    db.init_db()
+    with db.session() as s:
+        w_tvx = _seed_src_work(s, source_type="human_fiction",
+                               text_version="test-fixture")
+        w_tve = _seed_src_work(s, source_type="human_fiction",
+                               text_version="")
+        pool, excluded, _eligible = _pool_and_excluded(s)
+    by_wid = {e["work_id"]: e for e in excluded}
+    assert by_wid[w_tvx]["reason"] == k2g.REASON_BAD_TEXT_VERSION
+    assert by_wid[w_tvx]["text_version"] == "test-fixture"
+    assert by_wid[w_tve]["reason"] == k2g.REASON_BAD_TEXT_VERSION
+    assert not ({it["work_id"] for it in pool} & {w_tvx, w_tve})
+
+
+def test_source_constants_single_source_no_drift():
+    """⑨ 常量单源漂移即红：本模块的合规口径必须逐字等于
+    scripts/k2_extract_backfill.py 源码里的字面量（直接读文件比对，
+    不 import 后自比自），且判定入口就是 backfill 的那个函数；
+    text_version 白名单就是 K3 的 DEFAULT_ALLOWED_TEXT_VERSIONS。"""
+    import re
+    import ast
+    src = (ROOT / "scripts" / "k2_extract_backfill.py").read_text(
+        encoding="utf-8")
+    m_t = re.search(
+        r"^NONBENCHMARK_SOURCE_TYPES\s*=\s*frozenset\((\{[^}]*\})\)",
+        src, re.M)
+    m_p = re.search(
+        r'^NONBENCHMARK_SOURCE_TYPE_PREFIX\s*=\s*["\']([^"\']*)["\']',
+        src, re.M)
+    assert m_t and m_p, "k2_extract_backfill 常量声明形态变了——两边同步核查"
+    assert set(ast.literal_eval(m_t.group(1))) == \
+        set(k2g.NONBENCHMARK_SOURCE_TYPES), "来源类型白名单漂移"
+    assert m_p.group(1) == k2g.NONBENCHMARK_SOURCE_TYPE_PREFIX, \
+        "合规前缀漂移"
+    # 判定入口唯一：k2_pairs_gen 不另写第二套判定（函数就住在 backfill）
+    assert k2g.nonbenchmark_compliant_source.__module__ == \
+        "k2_extract_backfill"
+    assert k2g.nonbenchmark_compliant_source("fixture") is False
+    assert k2g.nonbenchmark_compliant_source("human_fiction") is True
+    assert k2g.nonbenchmark_compliant_source(
+        "production_nonbenchmark_x") is True
+    # text_version 白名单与 K3 证据侧同一对象（同源，不复制字面量）
+    from app import knowledge_query as kq
+    assert k2g.ALLOWED_TEXT_VERSIONS is kq.DEFAULT_ALLOWED_TEXT_VERSIONS
+
+
+def test_compliant_pool_short_fails_closed_no_fallback(tmp_path):
+    """⑩ 合规源不足 n 时 fail-closed：SystemExit 非零、writer 一次都不调、
+    绝不回退到不合规来源凑数（fixture 段就在库里也不取）。"""
+    db.init_db()
+    with db.session() as s:
+        w_fix = _seed_src_work(s, source_type="fixture",
+                               text_version="test-fixture", n_seg=4)
+    calls = {"n": 0}
+
+    def counting_writer(ins, hum):
+        calls["n"] += 1
+        return _fake_writer(ins, hum)
+    with db.session() as s:
+        with pytest.raises(SystemExit, match="不足") as ei:
+            k2g.generate(s, n_per_op=BIG, writer=counting_writer,
+                         model="fake", cache_dir=tmp_path / "c3",
+                         ledger=None)
+    assert calls["n"] == 0, "池不足发生在调 writer 之前——一次都不许调"
+    msg = str(ei.value)
+    assert "来源合规门排除" in msg, "失败信息必须留痕不合规来源被排除"
+    assert not (tmp_path / "c3").exists(), "失败路径不留缓存半成品"
+    # 不回退的正面核对：同一库上逐段验池——fixture 段零进池且留痕在案
+    with db.session() as s:
+        pool, excluded, _eligible = _pool_and_excluded(s)
+    assert not [it for it in pool if it["work_id"] == w_fix], \
+        "失败重试也休想从 fixture 源取段"
+    assert any(e["work_id"] == w_fix
+               and e["reason"] == k2g.REASON_BAD_TYPE for e in excluded)
