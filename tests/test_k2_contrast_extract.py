@@ -14,10 +14,10 @@
    混合 op（跨标签证据形态混入同一对）必须被拒。
 8. 门4 anti-copy / 门5 cross-strategy（二次独立审查 REVISE 修法）：human 侧
    全文被 ai 侧**连续包含**（照抄+贴标签）必须被拒且理由含 `anti-copy` 与
-   命中片段长度；两条判据（ai 以 human 全文为前缀 / 剔标点后归一包含且
-   ≥ min_copy_len）各有一条对应用例；本方与对方策略特征词表同时命中必须
-   被拒且理由含 `cross-strategy`。审查席两个反例（照抄+贴标签 / 逐字引用
-   后接无关延展）逐字入回归，必须被拦。
+   命中片段长度；两条判据（**剔标归一后** ai 以 human 全文为前缀/后缀、
+   归一包含且 ≥ min_copy_len）各有一条对应用例；本方与对方策略特征词表
+   同时命中必须被拒且理由含 `cross-strategy`。审查席两个反例（照抄+贴标签
+   / 逐字引用后接无关延展）逐字入回归，必须被拦。
 9. 旁路账本：live 落库时完整配对（含 AI 侧原文、pair_id、op 两个标签、
    逐门结果与拒绝理由）逐对追加写入 JSONL（路径参数，默认 k2_pairs.jsonl）；
    dry-run 不写账本；不改任何既有表结构。
@@ -25,6 +25,11 @@
     锚定到场景（句内含 scene_keys 指称或 她/他/它/自己 回指）——C 型
     （不提名跑题）必须被拒；D 型（复述人名跑题）在机械口径下可锚定、
     拦不住，xfail 钉成显式残余；E 型真摊开必须仍放行。
+11. 门4 R1 复审（REVIEW_k2_anticopy_v2）：判据①原用**原文** startswith，
+    一个前导空格/全角空格或"标签在前、照抄在后"即逃逸（B2/B3/B4 假阴性，
+    漏洞范围=剔标后 <40 字的短 human）。修法：判据①改**归一前/后缀**
+    （不设长度容错）+ 剔标用 str.isspace()（堵 U+3000/NBSP）。B1/B6/B7
+    保持 REJECT；B5（归一中部一字扰动）为连续包含口径固有残余，xfail 钉住。
 
 纪律：测试**从不**执行 CLI --live 开放路径（那是真落库）；库函数
 run_contrast(live=True) 只对 conftest 的临时 sqlite 用。
@@ -89,8 +94,8 @@ SCENES_LEDGER = {"沈默", "临江城"}
 
 # —— 二次独立审查 REVISE 反例（文本逐字取自审查席反例描述）——
 # 反例1（贴标签式假对照）：ai 侧 = human 侧逐字全文 + 尾缀一句万能标签。
-# human 侧取 林昭把杯子放下…（36 字）——短于 min_copy_len=40，仍须因
-# "ai 以 human 全文为前缀开头且其后直接接标签句"被判拒（判据①）。
+# human 侧取 林昭把杯子放下…（36 字、剔标 31）——短于 min_copy_len=40，
+# 仍须因"归一后 ai 以 human 全文为前缀（R1 复审后判据①口径）"被判拒。
 CE1_TAG = "然后她忽然笑了一下，其实她心里明白，说到底不过是懒得再提。"
 CE1_AI = HUMAN_S1 + CE1_TAG
 # 反例2（引用后跑题式）：逐字引用后接无关延展。延展不含对方策略词表，
@@ -103,6 +108,21 @@ CE2_AI = HUMAN_S1 + CE2_EXT
 # 40，使其能走"归一包含"分支（而非 36 字反例1 走的前缀分支）。
 HUMAN_LONG = ("林昭把杯子放下，没接话。窗外有人喊了一嗓子，她朝那边看了一眼，"
               "还是没说。廊下的灯笼晃了两晃，她把袖口拢紧了些。")
+
+# —— R1 复审（REVIEW_k2_anticopy_v2，主控实跑复现）：判据①原文 startswith
+# 假阴性。缺陷构造 B1–B7 共用标签句 T（含 其实/因为/说到底，锚定含 她，
+# 不碰 S2 词表——拦截归因干净，只有门4 能动它）：
+#   B1  H+T                 原文前缀即拦（基线，改前后均 REJECT）
+#   B2  " "+H+T             一个半角空格打断原文前缀 ⇒ 改前 ACCEPT（假阴性）
+#   B3  "\u3000"+H+T        全角空格：旧 _PUNCT_CHARS 不含 U+3000 ⇒ 同漏
+#   B4  T+H                 标签在前、照抄在后：非前缀且剔标 31<40 ⇒ 同漏
+#   B5  AI 侧一字扰动+T     归一中部被打断 ⇒ 口径固有残余，xfail 钉住
+#       （主控校正：扰动必须在 ai 侧；放在 human 侧时 ai 仍是精确前缀，
+#        判据①本就拦得住，属假残余）
+#   B6  " "+HUMAN_LONG+T    剔标 48≥40 由判据②兜住（改前后均 REJECT）
+#   B7  human=" "+H / ai=" "+H+T   改前原文前缀仍命中 ⇒ REJECT 保持
+# 修法：判据①改归一前/后缀（不设长度容错）+ _strip_punct 用 isspace。
+ANTICOPY_T = "其实她累了，因为再说也没用，说到底不过是懒得提。"
 
 # —— 三型探针（主控实跑 2026-09-23，k2_probe3：C/D 在旧门0 下均 ACCEPT，
 # 即旧门0 只验形态不验所指）——门0 追加「新增句场景锚定」断言后的归属：
@@ -512,6 +532,83 @@ def test_anti_copy_min_copy_len_overridable(monkeypatch):
     monkeypatch.setattr(k2c, "MIN_COPY_LEN", 40)
     ok, why = k2c.gate_anti_copy(p)
     assert ok and why == [], why
+
+
+# ------------------------- 门4 R1 复审：归一前/后缀（B1–B7 判定归属）
+def test_anticopy_b1_raw_prefix_still_rejected():
+    # B1 基线：逐字照抄+尾缀标签。改前判据①（原文前缀）即拦，改后归一口径
+    # 必须保持 REJECT（gate_anti_copy 与 gate_pair 两级都验）。
+    p = _pair(k2c.S1_KEY, HUMAN_S1, HUMAN_S1 + ANTICOPY_T)
+    ok, why = k2c.gate_anti_copy(p)
+    assert not ok and any("anti-copy" in r for r in why), f"B1 gate_anti_copy: {why}"
+    ok2, why2 = k2c.gate_pair(p)
+    assert not ok2 and any("anti-copy" in r for r in why2), f"B1 gate_pair: {why2}"
+
+
+def test_anticopy_b2_b3_leading_whitespace_rejected():
+    # B2 头部半角空格 / B3 头部全角空格（U+3000）：原文 startswith 不命中
+    # （=改前逃逸口），归一（isspace 剔尽 Unicode 空白）后 a_norm 仍以
+    # h_norm 为前缀 ⇒ 必须 REJECT。
+    h_norm = k2c._strip_punct(HUMAN_S1)
+    assert k2c._strip_punct("\u3000x\u00a0y\t") == "xy", \
+        "剔标口径必须按 isspace 覆盖全角空格/NBSP 等全部 Unicode 空白"
+    for label, lead in (("B2", " "), ("B3", "\u3000")):
+        ai = lead + HUMAN_S1 + ANTICOPY_T
+        assert not ai.startswith(HUMAN_S1), f"{label} 原文前缀不命中（逃逸口）"
+        assert k2c._strip_punct(ai).startswith(h_norm), f"{label} 归一前缀应命中"
+        p = _pair(k2c.S1_KEY, HUMAN_S1, ai)
+        ok, why = k2c.gate_anti_copy(p)
+        assert not ok and any("anti-copy" in r for r in why), f"{label} gate_anti_copy: {why}"
+        ok2, why2 = k2c.gate_pair(p)
+        assert not ok2 and any("anti-copy" in r for r in why2), f"{label} gate_pair: {why2}"
+
+
+def test_anticopy_b4_label_first_copy_suffix_rejected():
+    # B4 标签在前、照抄在后：判据①非原文前缀、判据②剔标 31<40 兜不住
+    # （改前 gate_pair ACCEPT）；归一**后缀**口径必须拦，理由点名后缀。
+    ai = ANTICOPY_T + HUMAN_S1
+    p = _pair(k2c.S1_KEY, HUMAN_S1, ai)
+    assert k2c._strip_punct(ai).endswith(k2c._strip_punct(HUMAN_S1))
+    ok, why = k2c.gate_anti_copy(p)
+    assert not ok and any("anti-copy" in r and "后缀" in r for r in why), why
+    ok2, why2 = k2c.gate_pair(p)
+    assert not ok2 and any("anti-copy" in r for r in why2), f"B4 gate_pair: {why2}"
+
+
+@pytest.mark.xfail(reason="已知残余（R1 复审 B5）：**AI 侧**归一全文中部一字扰动"
+                          "（没→没有）打断归一连续包含——前/后缀与子串两条判据"
+                          "同时落空即逃逸。作者明确拒绝 LCS 模糊匹配（会误杀合法"
+                          "扩写），钉为显式残余，不许为此上容错。"
+                          "主控 2026-09-23 校正：本用例原构造把扰动放在 **human 侧**"
+                          "（human=HUMAN_LONG 改「把袖口→将袖口」、ai=human+T），"
+                          "此时 ai 相对 human 仍是**精确前缀**，判据①本就拦得住 ⇒ "
+                          "恒不逃逸、改后 XPASS，是**假残余**（构造错误，非口径极限）。"
+                          "真实 B5 必须把扰动放在 **ai 侧**。")
+def test_anticopy_b5_single_char_perturbation_is_known_residual():
+    # B5（主控校正后的真实构造）：human 剔标 48≥40；**ai 侧**在 human 归一
+    # 全文中部换一字（没接话→没有接话，与合法 S1 正例同形）再贴标签句。
+    # 理想口径应拒（逐字照抄只换一字仍是贴标签），但连续包含口径拦不住
+    # ⇒ xfail 钉住。此形与合法 S1 正例（AI_S1 同款首句改写）在一切机械
+    # 口径下不可分，故属口径固有极限，不得为此上模糊容错。
+    human = HUMAN_LONG
+    ai = human.replace("没接话", "没有接话", 1) + ANTICOPY_T
+    # 钉死构造：ai 不以 human 归一全文为前缀，也不含 human 归一全文
+    assert not k2c._strip_punct(ai).startswith(k2c._strip_punct(human))
+    assert k2c._strip_punct(human) not in k2c._strip_punct(ai)
+    p = _pair(k2c.S1_KEY, human, ai, op=k2c.OP_ADD_INTERPRETATION)
+    ok, why = k2c.gate_pair(p)
+    assert not ok and any("anti-copy" in r for r in why),         "B5（AI 侧中部一字扰动+贴标签）理想上应被 anti-copy 拒——当前口径拦不住"
+
+
+def test_anticopy_b6_b7_long_and_padded_still_rejected():
+    # B6 长 human（剔标 48≥40）带前导空格：改前判据②兜住、改后归一前缀亦
+    # 拦（双保险，必须保持 REJECT）；B7 两侧同带前导空格：照抄+贴标签同拒。
+    p6 = _pair(k2c.S1_KEY, HUMAN_LONG, " " + HUMAN_LONG + ANTICOPY_T)
+    ok6, why6 = k2c.gate_pair(p6)
+    assert not ok6 and any("anti-copy" in r for r in why6), f"B6: {why6}"
+    p7 = _pair(k2c.S1_KEY, " " + HUMAN_S1, " " + HUMAN_S1 + ANTICOPY_T)
+    ok7, why7 = k2c.gate_pair(p7)
+    assert not ok7 and any("anti-copy" in r for r in why7), f"B7: {why7}"
 
 
 # ------------------------------- 门5：跨策略互斥（cross-strategy）
