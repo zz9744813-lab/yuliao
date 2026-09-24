@@ -21,23 +21,50 @@ os.environ["LG_LLM_MODE"] = "mock"
 # 访问门本身由 tests/test_access_gate.py 直接构造 app 单独验证（不走这里）。
 os.environ["REVIEW_NO_AUTH"] = "1"
 
-# R6 守卫（会审 89f779e；9e02916 会审修正：两侧看同一把锁）：live 实跑进行中
-# 拒跑全量 pytest——全绿结论不许被并发 live 污染（2026-09-22 瞬态红教训）。
-# 共享单实现（app.live_guard，损坏锁安全、盯**生产**锁位
-# repo/data/live_run.lock——本文件上方已把测试 DATA_DIR 覆写成 _TMP，
-# 盯 config.DATA_DIR 会恰好看不到生产 live 的锁）。env 已设完，此处 import
-# app 安全（与测试模块同序）。
-#
-# 残留窗口收口（审计 P1 余项，2026-09-23）：上面只查不持锁——检查通过后、
-# 全量 pytest 跑完前，另一个 --live 仍可启动并与之重叠，无人拦截。故检锁
-# 通过后**整轮持锁**：收集期在生产锁位获取 purpose="pytest" 的锁，atexit
-# 释放（正常/异常退出、键盘中断都走 atexit；只删自己的锁——回读 pid+
-# purpose 比对）。live 侧进入时 O_EXCL 同一锁位必失败 → 两方向互斥闭环。
+# R6 live/pytest 互斥守卫（2026-09-23 审计 P1 收口：路径错位 + 整轮持锁）：
+# - 与 live 侧同一跨进程互斥协议（app.live_guard：O_EXCL 原子取锁 + 回读
+#   pid/purpose 保守释放，只删自己的锁）、同一固定锁路径——由
+#   app/config.py 单点导出（config.prod_lock_path()：默认 repo/
+#   data/live_run.lock，LG_LOCK_DIR 显式覆盖时两侧同时跟随）。上方覆写的
+#   LG_DATA_DIR 临时目录**不是**观察/持锁目标——pytest 盯自己临时目录的锁
+#   恰好看不到生产 live 的锁，即 P1「守卫形同虚设」的错位根源。
+# - pytest_configure 取锁（live 已持锁则 fail-fast 拒跑且**不**持锁——绝不
+#   删 live 的锁）、整轮持有，pytest_sessionfinish 释放；atexit 兜底异常
+#   退出路径（释放幂等，重复调用不会误删继任者的锁）。
+# - 只用既有 pytest hook：pluggy 会把 conftest 命名空间里 `pytest_*` 开头
+#   的名字一律当钩子名校验，自定义名（上一版 pytest_running_lock）直接
+#   PluginValidationError exit 3——守卫辅助函数不得用该前缀。
+import pytest
+
 from app.live_guard import refuse_if_live_running, whole_run_lock
 
-refuse_if_live_running("全量 pytest")
-# 注意：conftest 命名空间里 `pytest_*` 开头的名字会被 pluggy 当钩子校验
-# （非注册钩子 → PluginValidationError，exit 3）——守卫函数名必须避开该前缀。
-_pytest_guard = whole_run_lock("全量 pytest")
-_pytest_guard.__enter__()
-atexit.register(_pytest_guard.__exit__, None, None, None)
+_run_guard = None
+
+
+def _release_run_guard() -> None:
+    global _run_guard
+    guard, _run_guard = _run_guard, None
+    if guard is not None:
+        guard.__exit__(None, None, None)
+
+
+def pytest_configure(config) -> None:
+    """整轮取锁：本会话开始时（收集前）检锁并持有生产锁位。
+
+    拒跑出口用 pytest.exit（规范出口：打印原因 + 指定 returncode），不用裸
+    SystemExit——裸 SystemExit 从 pytest_configure 冒泡时的退出码/输出行为
+    不受 pytest 保证（实测一轮子进程 pytest 竟 exit 0 静默放行，方向 B 失归；
+    pytest.exit 即使未被特判也会以 INTERNALERROR 非零收场，绝不静默）。"""
+    global _run_guard
+    try:
+        refuse_if_live_running("全量 pytest")
+        _run_guard = whole_run_lock("全量 pytest")
+        _run_guard.__enter__()
+    except SystemExit as e:
+        pytest.exit(str(e) or "live/pytest 互斥守卫拒绝重叠", returncode=2)
+    atexit.register(_release_run_guard)
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """整轮结束释放（内部只删自己的锁；未持锁时为 no-op）。"""
+    _release_run_guard()

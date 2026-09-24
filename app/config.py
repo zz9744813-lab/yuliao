@@ -14,6 +14,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("LG_DATA_DIR", str(ROOT / "data")))
 
+# ── R6 live/pytest 互斥锁路径的单点导出（2026-09-23 审计 P1 收口）────────
+# live 侧（app/live_guard.live_lock）与 pytest 侧（tests/conftest 整轮持锁）
+# **只许引用本节**，禁止各自拼路径。同一跨进程互斥协议（O_EXCL 原子创建 +
+# pid/purpose 回读保守释放）、同一固定锁路径：
+# - prod_lock_path()：pytest 侧观察/整轮持有的**生产锁位**——默认
+#   repo/data/live_run.lock，**不随测试进程覆写的 LG_DATA_DIR 漂移**
+#   （P1 路径错位的根源正是 pytest 盯了自己临时目录的锁）；
+# - live_lock_path()：live 进程自身锁位——缺省随本进程 DATA_DIR（生产 live
+#   不改 LG_DATA_DIR，即同一 ROOT/data 位，与 pytest 侧同锁）；
+# - LG_LOCK_DIR：显式改锁目录的**唯一旋钮**，两侧同时跟随——子进程/协议
+#   测试用它隔离到临时目录，绝不误碰真实生产锁。
+LOCK_FILE_NAME = "live_run.lock"
+
+
+def _lock_dir_override() -> str:
+    return (os.environ.get("LG_LOCK_DIR") or "").strip()
+
+
+def prod_lock_path() -> Path:
+    """固定生产锁路径（pytest 侧口径）：LG_LOCK_DIR 显式覆盖 > ROOT/data。"""
+    ov = _lock_dir_override()
+    return (Path(ov) if ov else ROOT / "data") / LOCK_FILE_NAME
+
+
+def live_lock_path() -> Path:
+    """live 进程口径锁路径：LG_LOCK_DIR 显式覆盖 > 本进程 DATA_DIR。"""
+    return Path(_lock_dir_override() or str(DATA_DIR)) / LOCK_FILE_NAME
+
 
 def _load_dotenv(path: Path) -> None:
     if not path.exists():

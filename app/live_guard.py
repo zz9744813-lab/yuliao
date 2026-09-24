@@ -7,26 +7,32 @@
 「live 实跑与全量 pytest 禁止同机并发窗重叠，守卫机制待落」。本模块即
 该守卫：live_run.lock 锁文件互斥。
 
-**两侧看同一把锁（9e02916 会审严重项修正）**：
+**两侧看同一把锁（9e02916 会审严重项修正；2026-09-23 审计 P1 收口：路径
+由 app/config.py 单点导出）**：
+- 锁路径协议唯一定义在 app/config.py（LOCK_FILE_NAME / prod_lock_path() /
+  live_lock_path()，LG_LOCK_DIR 为两侧同时跟随的隔离覆盖旋钮）——本模块与
+  conftest 只引用，不各自拼路径；
 - live 侧（k2_extract_backfill / k4_paired_scenes / pool_probe 的 --live）：
-  持锁于本进程 config.DATA_DIR（生产默认=仓库 data/）；
-- pytest 侧（tests/conftest.py）：**显式盯生产锁位** prod_lock_path()
-  （仓库 data/live_run.lock）——conftest 会把测试库 DATA_DIR 覆写成临时
-  目录，若盯 config.DATA_DIR 则恰好看不到生产 live 的锁（守卫对要防的
-  场景盲视）。两侧口径由 test_live_guard 的路径不变式钉死。
-- **pytest 侧整轮持锁（残留窗口收口）**：conftest 收集期先检锁
-  （refuse_if_live_running），再在生产锁位获取 purpose="pytest" 的锁并
-  持有到整轮结束（atexit 释放，异常/键盘中断也走 atexit；只删自己的
-  锁）。此前只查不持——检查通过后、全量 pytest 跑完前，另一个 --live
-  仍可启动并与之重叠，无人拦截——已修。
+  持锁于 config.live_lock_path()（生产默认=仓库 data/）；
+- pytest 侧（tests/conftest.py）：**盯生产锁位** prod_lock_path()——conftest
+  会把测试库 DATA_DIR 覆写成临时目录，若盯 config.DATA_DIR 则恰好看不到
+  生产 live 的锁（守卫对要防的场景盲视，即 P1 错位）。两侧口径由
+  test_live_guard / test_live_guard_mutex 的路径不变式钉死。
+- **pytest 侧整轮持锁（2026-09-23 审计 P1 收口）**：conftest 在
+  pytest_configure 先检锁（refuse_if_live_running，live 持锁则本次拒跑且
+  不持锁），取锁成功则在生产锁位持有 purpose="pytest" 的锁**整轮**，
+  pytest_sessionfinish 释放（atexit 兜底异常路径；释放回读比对 pid+
+  purpose，只删自己的锁）。此前只查不持——检查通过后、全量 pytest 跑完前，
+  另一个 --live 仍可启动并与之重叠，无人拦截——已修。
 
 边界（如实声明，逐条与代码对应）：
 - 已覆盖：live↔live（同一锁位 O_EXCL 原子互斥）；live↔pytest **两方
-  向**——pytest 持锁期间 live 进入 O_EXCL 必失败被拒；live 持锁期间
-  pytest 收集期 fail-fast 拒跑。
-- 残留窄窗 1（pytest 启动前）：pytest 进程启动到 conftest 持锁之间存
-  在窄窗。互斥本身不破——谁先到谁拿锁、后到方被拒；但若 live 先拿锁，
-  pytest 本次启动作废（收集期 SystemExit），需重排。
+  向**跨进程互斥（2026-09-23 由 tests/test_live_guard_mutex.py 子进程钉
+  死）——pytest 持锁期间 live 进入 O_EXCL 必失败被拒；live 持锁期间
+  pytest 在 pytest_configure fail-fast 拒跑。
+- 残留窄窗 1（pytest 启动前）：pytest 进程启动到 pytest_configure 持锁之
+  间存在窄窗。互斥本身不破——谁先到谁拿锁、后到方被拒；但若 live 先拿
+  锁，pytest 本次启动作废（configure 期 SystemExit），需重排。
 - 残留窄窗 2：自定义 LG_DATA_DIR 的 live 进程锁在别处，不在 pytest 侧
   观察窗内（pytest 盯生产锁位）。
 - 释放边界：atexit 覆盖正常/异常退出与键盘中断；**进程被硬杀**
@@ -69,14 +75,19 @@ PYTEST_LOCK_PURPOSE = "pytest"
 
 
 def lock_path() -> Path:
-    """live 进程口径：本进程 config.DATA_DIR 下的锁位。"""
+    """live 进程口径：锁位由 app.config 单点导出（live_lock_path()——本进程
+    config.DATA_DIR 下；LG_LOCK_DIR 显式覆盖时优先）——本模块不再自拼路径。"""
     from app import config
-    return Path(config.DATA_DIR) / "live_run.lock"
+    return config.live_lock_path()
 
 
 def prod_lock_path() -> Path:
-    """生产锁位（仓库默认 DATA_DIR=data/）——pytest 侧的观察目标。"""
-    return Path(__file__).resolve().parent.parent / "data" / "live_run.lock"
+    """生产锁位（pytest 侧观察/整轮持锁目标）——由 app.config.prod_lock_path()
+    单点导出：默认 repo/data/live_run.lock，不随测试进程覆写的 LG_DATA_DIR
+    漂移（2026-09-23 审计 P1「路径错位」的钉法）；LG_LOCK_DIR 显式覆盖时
+    两侧（本函数与 lock_path()）同时跟随，协议测试据此隔离到临时目录。"""
+    from app import config
+    return config.prod_lock_path()
 
 
 def _info_at(p: Path) -> dict | None:
@@ -191,9 +202,10 @@ def whole_run_lock(context: str = "全量 pytest", *, watch: Path | None = None)
     先检 live 锁（fail-fast 拒跑），再在同一锁位获取 purpose="pytest"
     的锁持有到 yield 结束——live 侧 O_EXCL 同一锁位必失败被拒，两方向
     互斥闭环。释放口径与 live 相同：回读 pid+purpose 只删自己的锁。
-    watch 缺省=**生产锁位** prod_lock_path()（pytest 侧口径：conftest
-    已把测试 DATA_DIR 覆写成临时目录，盯 config.DATA_DIR 会看不到生产
-    live 的锁）；测试隔离时显式传 watch，绝不写真实生产锁位。"""
+    conftest 在 pytest_configure 进入、pytest_sessionfinish 退出（atexit
+    兜底）。watch 缺省=**生产锁位** prod_lock_path()（app.config 单点导出，
+    不随 conftest 覆写的测试 DATA_DIR 漂移）；测试隔离时显式传 watch 或
+    设 LG_LOCK_DIR，绝不写真实生产锁位。"""
     p = prod_lock_path() if watch is None else watch
     refuse_if_live_running(context, watch=p)
     info = {"purpose": PYTEST_LOCK_PURPOSE, "pid": os.getpid(),
