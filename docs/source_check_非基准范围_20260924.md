@@ -55,11 +55,28 @@ F:/Hermes/hermes-agent/venv/Scripts/python.exe scripts/clean_text.py --rules --d
 ⇒ 覆汉缺的是**回填**（`text_clean` 从正文复制 + `src_ok` 复核打标），**不是重洗**；
 此前的"补洗会让锚漂移"顾虑**已被实跑证据推翻**。是否开跑仍待朱十一拍板。
 
-## 4. ⚠️ 已知口径差（主控发现，已另派独立任务修）
+## 4. ⚠️ 口径差（**主控 2026-09-24 19:0x 更正：本条前提为假，已撤回**）
 
-`source_check --scope nonbench` 目前**不过滤** `source_type ∈ {fixture, synthetic, commentary}`，
-而 K2 侧 `segment_universe(source_scope='nonbenchmark')` **排除**这三类。
-实测差异即上表第 3 行：`--work-id WK-0d48cc2e`（fixture）在本 scope 命中 **7 段**，K2 侧会全排。
+> **更正声明**：本节原称「本 scope 不过滤 fixture/synthetic/commentary，会把 fixture
+> 段算进来（`--work-id WK-0d48cc2e` 命中 7 段）」——**该结论错误，是主控测量口径
+> 错误**，现予撤回并留痕（不删原文口径，改标为已推翻）。
+>
+> 主控只读复核（真库 `data/language_genome.db`，两版代码分别 import 后跑真实
+> `targets("nonbench")`）：
+> - `nonbenchmark_compliant_source` 是**白名单**（`human_fiction` / 前缀
+>   `production_nonbenchmark_*`），对 `fixture` / `synthetic` / `commentary`
+>   恒为 `False` ⇒ 这些来源**从未进入** compliant 集合，也就从未进过 nonbench 池。
+> - 两版 compliant 作品集**逐项相等**（7 本，双向差集为空）；
+>   `WK-0d48cc2e` / `WK-648c2920` 两本 fixture 作品在两版中**都不在池内**。
+> - 「7 段」是**原始段计数**（该作品 `role=NULL` 且 `text_clean` 非空的段数），
+>   被误当成 `--scope nonbench --work-id` 的**选中数**写进了本表——即
+>   把「库里有多少段」当成了「scope 选了多少段」。
+>
+> 结论：`source_check --scope nonbench` 与 K2 侧 `segment_universe('nonbenchmark')`
+> 在真库上**选中集合本来就完全一致**，不存在「把 fixture 算进来」的风险。
+> 后续 `fix/nonbench-source-type`（提交见 merge 记录）的真实价值是
+> **口径镜像 + 防御性双闸 + 单源复用钉死**（防未来出现「前缀命中白名单却属合成
+> 派生」的异常来源类型被放开），**不是行为修复**。
 
-⇒ 直接拿本 scope 结果当 K2 试点供给，**会把 fixture 段算进来**。
-已派 `lg-fix-nonbench-srctype-parity`（worktree `nonbench-srctype`）对齐到单源口径。
+原表（口径已更正，数值仅作历史留痕）：`--work-id WK-0d48cc2e` 的 **7** 是**原始段数**，
+不是本 scope 的选中数；本 scope 对 fixture 作品的选中数（两版一致）为 **0**。

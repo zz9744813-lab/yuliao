@@ -47,9 +47,12 @@
   作品在 `work_sources` 登记为合规人类语料（`human_fiction` / 前缀
   `production_nonbenchmark_*`；判定单源复用 `scripts/k2_extract_backfill.py` 的
   `nonbenchmark_compliant_source`，不许另写一套，import 不到即 fail-closed
-  报错退出）**且** `text_clean` 非空。与 `k2_extract_backfill --source-scope
-  nonbenchmark` 的段宇宙同判据——把这条供给面纳入 source_check 的补查通道，
-  不放松任何既有门（src_ok 幂等/严格布尔口径照旧）。
+  报错退出）**且**来源类型不命中 K2 侧同源排除集
+  `app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES`（值 = fixture / synthetic
+  / commentary；与 K2 侧同源，单源复用同一常量，import 不到即 fail-closed）**且**
+  `text_clean` 非空。与 `k2_extract_backfill --source-scope nonbenchmark` 的段宇宙
+  **逐字一致**（白名单 + 排除集双闸同判据）——把这条供给面纳入 source_check 的补查
+  通道，不放松任何既有门（src_ok 幂等/严格布尔口径照旧）。
 
 `--work-id <WK-...>`：把范围**收窄**到指定作品（可重复参数，或逗号分隔）。
 收窄是唯一允许的方向：结果恒 ⊆ 该 scope 自己的选取集，绝不用它扩宽到
@@ -88,6 +91,20 @@ from app.models import Candidate, ControlledCorruption, Frame, Segment, WorkSour
 from app import config  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：模型名预检
 import k2_extract_backfill as k2b  # noqa: E402  # K2 试点来源口径唯一入口（单源复用，import 不到即 fail-closed）
+
+# nonbench 排除集与 K2 侧同源（单源复用）：k2_extract_backfill 经
+# `from app import knowledge_query as KQ` 消费 `DEFAULT_EXCLUDED_SOURCE_TYPES`
+# （见其 k3_evidence_preview 的来源闸），source_check 复用同一对象，绝不另写一套；
+# import 不到（或 KQ 缺该常量）即 fail-closed 报错退出。
+from app import knowledge_query as _KQ  # noqa: E402  # K2 侧同源入口（与 k2_extract_backfill 同一引用）
+try:
+    NONBENCH_EXCLUDED_SOURCE_TYPES = _KQ.DEFAULT_EXCLUDED_SOURCE_TYPES
+except AttributeError as _e:
+    raise RuntimeError(
+        "无法单源复用 K2 侧排除集常量 "
+        "(app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES)："
+        f"{_e}。nonbench 口径必须与 K2 同源，已 fail-closed 退出，禁止另写一套。"
+    ) from _e
 
 PV = "source_integrity_v1"
 # 判完整性要细读，用稳的模型；但**允许被调度覆盖**：夜间要把第一阶段也分派到
@@ -265,7 +282,8 @@ def parse_work_ids(raw) -> list[str]:
 def targets(scope: str, *, work_ids: list[str] | None = None) -> list[str]:
     """scope：used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；
     bench=基准段；nonbench=K2 非基准试点供给池（合规人类语料 + role!=benchmark
-    + text_clean 非空，来源判定单源复用 k2_extract_backfill）。
+    + 来源不命中 K2 侧同源排除集 fixture/synthetic/commentary + text_clean 非空，
+    来源判据与白名单/排除集单源复用 k2_extract_backfill → app.knowledge_query）。
 
     work_ids：把范围**收窄**到指定作品——与 scope 选取集做纯交集（⊆），
     收窄是唯一允许的方向。None/[] = 不收窄，结果与改动前逐字一致。"""
@@ -278,14 +296,19 @@ def targets(scope: str, *, work_ids: list[str] | None = None) -> list[str]:
                 Frame.granularity == "L").distinct()}
         elif scope == "nonbench":
             # 与 k2_extract_backfill.segment_universe(source_scope='nonbenchmark')
-            # 同判据（单源复用 nonbenchmark_compliant_source，绝不另写一套）：
+            # 逐字一致（双闸同判据，绝不另写一套）：
             # ① 段 role 显式「不等于 benchmark」（NULL 亦算非基准——SQL 明写
             #    or_(IS NULL, !=)，避免 `!=` 在 SQL 里把 NULL 吞掉的口径漂移）；
-            # ② 所属作品在 work_sources 登记为合规人类语料；
-            # ③ text_clean 非空（与抽取侧 `(text_clean or '').strip()` 同闸）。
+            # ② 所属作品在 work_sources 登记为合规人类语料（白名单
+            #    nonbenchmark_compliant_source，单源复用 k2b，不另写）；
+            # ③ 排除集（fixture/synthetic/commentary）——单源复用 K2 侧同源常量
+            #    app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES（k2b 经 KQ 同源
+            #    消费），与 K2 侧逐字一致；
+            # ④ text_clean 非空（与抽取侧 `(text_clean or '').strip()` 同闸）。
             reg = {ws.work_id: ws for ws in s.query(WorkSource).all()}
             compliant = {wid for wid, ws in reg.items()
-                         if k2b.nonbenchmark_compliant_source(ws.source_type)}
+                         if k2b.nonbenchmark_compliant_source(ws.source_type)
+                         and (ws.source_type or "") not in NONBENCH_EXCLUDED_SOURCE_TYPES}
             cand = s.query(Segment.id, Segment.text_clean).filter(
                 Segment.work_id.in_(compliant),
                 or_(Segment.role.is_(None), Segment.role != "benchmark")).all()
@@ -502,7 +525,10 @@ def main() -> None:
                           "production_nonbenchmark_*，判定单源复用 "
                           "scripts/k2_extract_backfill.py 的 "
                           "nonbenchmark_compliant_source，import 不到即 "
-                          "fail-closed 报错退出）且 text_clean 非空。"))
+                          "fail-closed 报错退出）且来源类型不命中 K2 侧同源排除集 "
+                          "DEFAULT_EXCLUDED_SOURCE_TYPES（fixture / synthetic / "
+                          "commentary，与 K2 侧同源、单源复用 app.knowledge_query，"
+                          "import 不到即 fail-closed）且 text_clean 非空。"))
     ap.add_argument("--work-id", action="append", default=[],
                     help=("把范围收窄到指定作品（WK-…，可重复参数或逗号分隔）。"
                           "收窄是唯一允许的方向：结果恒 ⊆ 该 scope 自己的选取集，"

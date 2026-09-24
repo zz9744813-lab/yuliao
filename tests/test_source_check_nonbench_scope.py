@@ -324,3 +324,83 @@ def test_cli_scope_choices_and_help_write_semantics(monkeypatch, capsys):
     assert "fail-closed" in flat
     # --work-id 只收窄的语义写死在 help
     assert "WK" in flat and "收窄" in flat and "⊆" in flat
+
+
+# ── ⑤ 对齐 K2 排除集（fixture/synthetic/commentary）新增三条回归 ────────
+
+def test_nonbench_fixture_excluded_via_work_id_narrow():
+    """对齐 K2 排除集：即便用 --work-id 把范围收窄到某个 fixture 作品，
+    该作品段也不得进 nonbench 池——空集、不报错、绝不借收窄放行。"""
+    db.init_db()
+    with db.session() as s:
+        wid_fx = _seed_work(s, source_type="fixture", label="t-ex-fx")
+        sid_fx = _seed_seg(s, wid_fx, role="train")
+        # 对照：合规人类源，证明收窄机制本身工作、且没把非 fixture 一并误伤
+        wid_h = _seed_work(s, source_type="human_fiction", label="t-ex-h")
+        sid_h = _seed_seg(s, wid_h, role="train")
+        s.commit()
+    # 收窄到 fixture 作品：空集 + 不报错
+    assert sc.targets("nonbench", work_ids=[wid_fx]) == []
+    # 收窄到合规作品：正常返回其段（证明非 fixture 不被误伤）
+    assert {x[0] for x in sc.targets("nonbench", work_ids=[wid_h])} == {sid_h}
+    # 全集 nonbench 也不含该 fixture 段
+    assert sid_fx not in {x[0] for x in sc.targets("nonbench")}
+
+
+def test_nonbench_compliant_human_corpus_still_selected():
+    """对齐 K2 正向面：加了排除集后，合规人类语料（human_fiction）的非基准段
+    仍一律进池——正向面不收紧（与独立参考实现逐项相等）。"""
+    db.init_db()
+    with db.session() as s:
+        wid_h = _seed_work(s, source_type="human_fiction", label="t-pos-h")
+        s_train = _seed_seg(s, wid_h, role="train")
+        s_null = _seed_seg(s, wid_h, role=None)
+        wid_pb = _seed_work(s, source_type="production_nonbenchmark_k2v2",
+                            label="t-pos-pb")
+        s_pb = _seed_seg(s, wid_pb, role="train")
+        # 排除集里的反面源：即便 text_clean 非空、role 非基准，也不得进池
+        wid_fx = _seed_work(s, source_type="fixture", label="t-pos-fx")
+        s_fx = _seed_seg(s, wid_fx, role="train")
+        wid_sy = _seed_work(s, source_type="synthetic", label="t-pos-sy")
+        s_sy = _seed_seg(s, wid_sy, role="train")
+        wid_cm = _seed_work(s, source_type="commentary", label="t-pos-cm")
+        s_cm = _seed_seg(s, wid_cm, role="train")
+        s.commit()
+    todo = {x[0] for x in sc.targets("nonbench")}
+    # 正向面：human_fiction（train + NULL）与 production_nonbenchmark_* 都进
+    assert {s_train, s_null, s_pb} <= todo
+    # 排除集反面：fixture / synthetic / commentary 一律不进（即便 role/clean 合规）
+    assert s_fx not in todo and s_sy not in todo and s_cm not in todo
+    # 与独立参考实现（白名单 + 排除集同判据）逐项相等（非重叠数据下与白名单参考一致）
+    assert todo == _ref_nonbench_ids()
+
+
+def test_nonbench_exclusion_single_source_no_drift():
+    """对齐 K2 排除集单源复用、漂移即红：直读 app/knowledge_query.py 与
+    scripts/k2_extract_backfill.py 字面量，比对 source_check 运行时常量，
+    且 source_check 不得另写一套排除集。"""
+    from app import knowledge_query as _app_kq
+    # 1) 规范排除集：app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES
+    kq_src = (ROOT / "app" / "knowledge_query.py").read_text(encoding="utf-8")
+    m = re.search(
+        r"DEFAULT_EXCLUDED_SOURCE_TYPES\s*=\s*frozenset\(\s*\{([^}]*?)\}\s*\)",
+        kq_src)
+    assert m, "app/knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES 声明形态变了"
+    kq_excluded = set(ast.literal_eval("{" + m.group(1) + "}"))
+    assert kq_excluded == {"fixture", "synthetic", "commentary"}
+    # 2) source_check 单源复用同一对象（不是拷贝、不是另写）——is 同一即同源
+    assert sc.NONBENCH_EXCLUDED_SOURCE_TYPES is _app_kq.DEFAULT_EXCLUDED_SOURCE_TYPES, \
+        "source_check 未单源复用 app.knowledge_query 的排除集"
+    # 3) K2 侧（k2_extract_backfill）消费的就是同一个常量（同源链不断）
+    k2_src = (ROOT / "scripts" / "k2_extract_backfill.py").read_text(
+        encoding="utf-8")
+    assert re.search(r'from app import knowledge_query as KQ', k2_src), \
+        "k2_extract_backfill 的 KQ 入口形态变了——同源链断裂"
+    assert "KQ.DEFAULT_EXCLUDED_SOURCE_TYPES" in k2_src, \
+        "k2_extract_backfill 未经由 KQ.DEFAULT_EXCLUDED_SOURCE_TYPES 同源消费"
+    # 4) source_check 本体不得出现第二套排除集字面量（单源：第二处即红）
+    sc_src = (ROOT / "scripts" / "source_check.py").read_text(encoding="utf-8")
+    assert '{"fixture", "synthetic", "commentary"}' not in sc_src, \
+        "source_check 另写了排除集字面量——违反单源复用"
+    assert re.search(r'frozenset\(\{\s*"fixture"', sc_src) is None, \
+        "source_check 另定义了排除集 frozenset——违反单源复用"
