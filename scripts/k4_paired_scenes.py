@@ -25,6 +25,18 @@ rollback 再记失败，不留半成品会话态。
                                                    # 10 场离线预演（零配额）
     python scripts/k4_paired_scenes.py --live --writer-model m1 \
         --verifier-model m2     # 拍板后：K4_ALLOW_LIVE=1 + 本命令即真跑
+
+审计整改（P0 主线第 2 条，2026-09-24）：世界可配（--book-id，默认 WK-K4 行为
+不变）；新增**只读预检** `--preflight`（零生成调用、零库写）——查 work_sources
+是否登记该 book_id、并调 K3 只读 query_knowledge 判断 A 臂包是否非空，打印可核对
+JSON，未登记/空包即非零退出。--live 路径叠加同一道闸（仅 LLM_MODE=real 时生效，
+mock 不烧钱故跳过以保双闸测试）：过闸才许起真实调用，否则拒绝起跑、零真实调用。
+禁止用未登记 WK-K4 虚构场景把空包对照当真跑证据。
+
+    python scripts/k4_paired_scenes.py --preflight \
+        --book-id WK-dc90993434e9   # 只读预检：WK-K4 默认也行
+    python scripts/k4_paired_scenes.py --live --book-id WK-dc90993434e9 \
+        --writer-model m1 --verifier-model m2   # 过闸才真跑
 """
 from __future__ import annotations
 
@@ -73,16 +85,17 @@ def scenes_for(n: int) -> list:
     return specs
 
 
-def build_world() -> World:
-    return World(book_id="WK-K4", revision=0, characters={"lin": "林穗"},
+def build_world(book_id: str = "WK-K4") -> World:
+    return World(book_id=book_id, revision=0, characters={"lin": "林穗"},
                  facts={"coins": Fact(value=3, visible_to=["lin"]),
                         "received": Fact(value=0, visible_to=["lin"])},
                  rules=[])
 
 
 def build_plan(scene_id, revision, before, after, idem, *,
-               fact="coins", goal=None, desc=None) -> ScenePlan:
-    return ScenePlan(book_id="WK-K4", scene_id=scene_id,
+               fact="coins", goal=None, desc=None,
+               book_id: str = "WK-K4") -> ScenePlan:
+    return ScenePlan(book_id=book_id, scene_id=scene_id,
                      idempotency_key=idem, expected_revision=revision,
                      pov="lin",
                      goal=goal if goal is not None else f"支付一枚钱（{scene_id}）",
@@ -92,6 +105,62 @@ def build_plan(scene_id, revision, before, after, idem, *,
                               description=desc if desc is not None else "支付一枚钱",
                               changes=[Change(fact=fact, before=before,
                                              after=after)])])
+
+
+def build_a_arm_policy(book_id: str) -> dict:
+    """A 臂知识包 policy——与 app/scene_runtime/knowledge_v2.frozen_package_for_scene
+    逐字一致的 policy 构造（knowledge_v2 不可改，这里照抄唯一入口；book_id 仅入
+    参 echo，query_knowledge 为全库只读查询，不按 book_id 收窄——故「A 臂非空」
+    取决于 work_sources 登记 + 全库有 verified 策略两条）。plan_sha256 在
+    query_knowledge 侧不参与过滤，预检无需复算 digest。"""
+    from app.knowledge import PACKAGE_CONTRACT_VERSION
+    s0 = SCENES[0]
+    plan = build_plan(s0[0], s0[1], s0[2], s0[3], s0[4], book_id=book_id)
+    return {"contract_version": PACKAGE_CONTRACT_VERSION,
+            "book_id": plan.book_id, "branch_id": plan.branch_id,
+            "scene_id": plan.scene_id,
+            "semantic_requirements": {"goal": plan.goal, "pov": plan.pov,
+                                     "style": plan.style},
+            "limits": {"context_items": 3}}
+
+
+def preflight_world(book_id: str, s) -> dict:
+    """只读预检（零生成调用、零库写）：
+    - 查 work_sources 是否登记该 book_id；
+    - 调 K3 只读 query_knowledge 判断该世界 A 臂包是否非空；
+    返回可核对 dict：book_id / registered / k3_status / selected_ids /
+    n_techniques / empty_reason。不抛异常、不退出——退出决策交给调用方。
+
+    这是闸，不是提示：registered=False 或 k3_status!="matched" 即「A 臂空」，
+    调用方（--preflight / --live）必须据此非零退出，绝不允许把空包对照当真跑
+    证据（审计 P0 主线第 2 条禁的动作）。"""
+    from app import knowledge_query as kq
+    from app.models import WorkSource, ExpressionStrategyV2
+    from app.knowledge import PACKAGE_CONTRACT_VERSION
+    registered = s.query(WorkSource).filter(
+        WorkSource.work_id == book_id).first() is not None
+    resp = kq.query_knowledge(build_a_arm_policy(book_id), s)
+    selected = resp.get("selected") or []
+    selected_ids = [e.get("strategy_id") for e in selected]
+    k3_status = resp.get("status")
+    n_techniques = len(selected)
+    empty_reason = None
+    if not registered:
+        empty_reason = (f"world_not_registered:work_sources 无 book_id="
+                        f"{book_id} 的登记行（K4 必须先用有登记、可匹配的真实"
+                        f"试点世界，禁止用未登记 WK-K4 虚构场景当真跑证据）")
+    elif k3_status != "matched":
+        # 真实根因：全库策略状态分布（eligible_statuses 只认 verified）
+        dist = {}
+        for (st,) in s.query(ExpressionStrategyV2.status).all():
+            dist[st] = dist.get(st, 0) + 1
+        verified = dist.get("verified", 0)
+        empty_reason = (f"empty_package:k3_status={k3_status}；全库策略状态"
+                        f"分布={dist}，verified={verified}（eligible_statuses "
+                        f"只认 verified ⇒ A 臂知识包恒空，无合格证据可进包）")
+    return {"book_id": book_id, "registered": registered,
+            "k3_status": k3_status, "selected_ids": selected_ids,
+            "n_techniques": n_techniques, "empty_reason": empty_reason}
 
 
 class FxClient:
@@ -268,6 +337,13 @@ def main() -> None:
                          "--scenes 10，派生规则见 scenes_for）")
     ap.add_argument("--live", action="store_true",
                     help="真实调用（拍板后）：K4_ALLOW_LIVE=1 + LLM_MODE=real")
+    ap.add_argument("--preflight", action="store_true",
+                    help="只读预检（零生成调用、零库写）：查 book_id 是否在 "
+                         "work_sources 登记、并调 K3 只读 query_knowledge 判断"
+                         "该世界 A 臂包是否非空；未登记或空包 → 非零退出")
+    ap.add_argument("--book-id", default="WK-K4",
+                    help="世界 id（默认 WK-K4，行为逐字不变）；须为有登记、"
+                         "可匹配的真实试点世界（如 production_nonbenchmark_* 源）")
     ap.add_argument("--writer-model", default="")
     ap.add_argument("--verifier-model", default="")
     ap.add_argument("--channel-changed", action="store_true",
@@ -280,6 +356,18 @@ def main() -> None:
     if a.out and Path(a.out).exists():
         raise SystemExit(f"--out 已存在：{a.out}——不静默覆盖上次实验产物，"
                          "换新目录（方案「新实验目录」纪律）")
+    # === 只读预检（独立模式）：零生成调用、零库写，打印可核对 JSON ===
+    if a.preflight:
+        with db.session() as s:
+            pre = preflight_world(a.book_id, s)
+        print(json.dumps(pre, ensure_ascii=False, indent=1))
+        if not pre["registered"] or pre["k3_status"] != "matched":
+            raise SystemExit(
+                f"[preflight] 拒绝（非零退出）：{pre['empty_reason']} "
+                f"（book_id={a.book_id}, k3_status={pre['k3_status']}）")
+        print(f"[preflight] 通过：book_id={a.book_id} 已登记，A 臂包非空"
+              f"（n_techniques={pre['n_techniques']}）")
+        return
     if a.live:
         if os.environ.get("K4_ALLOW_LIVE") != "1":
             raise SystemExit("--live 需要环境变量 K4_ALLOW_LIVE=1（双闸："
@@ -295,6 +383,19 @@ def main() -> None:
     with (live_lock("k4_paired_scenes") if a.live
           else contextlib.nullcontext()):
         if a.live:
+            from app import config as _cfg
+            # 预检闸仅在「确实会发起真实调用」时生效（LLM_MODE=real）：
+            # mock 环境下 GatewayClient 本就拒构（RuntimeFault），不会烧钱，
+            # 故跳过预检以免破坏离线/双闸测试；真实试点侧必须过闸才能起跑——
+            # 世界未登记 或 A 臂空（无 verified 策略）即拒绝，零真实调用。
+            if getattr(_cfg, "LLM_MODE", "mock") == "real":
+                with db.session() as s:
+                    pre = preflight_world(a.book_id, s)
+                if not pre["registered"] or pre["k3_status"] != "matched":
+                    raise SystemExit(
+                        f"[preflight] 拒绝 --live 起跑（非零退出，零真实调用）："
+                        f"{pre['empty_reason']}（book_id={a.book_id}, "
+                        f"k3_status={pre['k3_status']}）")
             from app.scene_runtime.client import GatewayClient
             client = GatewayClient(a.writer_model, a.verifier_model)
         else:
