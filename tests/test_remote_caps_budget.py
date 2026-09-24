@@ -79,7 +79,7 @@ def _wait_budget_free(timeout: float = 5.0) -> bool:
 
 @pytest.fixture(autouse=True)
 def _budget_clean():
-    """每例前后：预算计数清零（测试隔离）；EXP-RB* 行清掉（共享测试库
+    """每例前后：预算计数清零（测试隔离）；EXP-RCAP* 行清掉（共享测试库
     不留残行）。预算位的归还语义本身由 test_budget_released_* 显式钉住。"""
     api._reset_budget_for_tests()
     yield
@@ -88,9 +88,26 @@ def _budget_clean():
     # 不建库，teardown 直接查 experiments 表会 ERROR（no such table）——
     # 清残行前先 init_db（幂等 create_all，与 _seed 同口径）。
     db.init_db()
+    # 2026-09-24 主控修：本文件旧用 LIKE "EXP-RB%" 清残行，与
+    # test_random_batch/test_review_batch 的 EXP-RB1/EXP-RB10/EXP-RB42 同前缀
+    # 撞车——那些实验行带 frames/candidates/review_items 子行，删父行触发
+    # FOREIGN KEY constraint failed（全量 pytest 12 例 teardown ERROR），
+    # 且属跨测试互删。修法：①本文件专用命名空间 EXP-RCAP*；②清残行前先删
+    # 子行（父行无子行时为空操作），避免任何残留子行再撞 FK。
+    _CHILD_TABLES = ("frames", "candidates", "judge_runs", "review_items",
+                     "report_files", "controlled_corruptions")
     with db.session() as s:
-        for r in s.query(Experiment).filter(Experiment.id.like("EXP-RB%")).all():
-            s.delete(r)
+        ids = [r.id for r in s.query(Experiment).filter(
+            Experiment.id.like("EXP-RCAP%")).all()]
+        if ids:
+            from sqlalchemy import text as _text
+            for tbl in _CHILD_TABLES:
+                for eid in ids:
+                    s.execute(_text(f"DELETE FROM {tbl} WHERE experiment_id = :e"),
+                              {"e": eid})
+            for eid in ids:
+                s.execute(_text("DELETE FROM experiments WHERE id = :e"),
+                          {"e": eid})
         s.commit()
 
 
@@ -121,10 +138,10 @@ def test_budget_under_limit_starts(client, monkeypatch):
     """未超限正常：占位 → 领取 → started；计数=1。"""
     monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)
     hold = _Hold(monkeypatch)
-    _seed("EXP-RBU1")
-    r = client.post("/experiments/EXP-RBU1/run", json={})
+    _seed("EXP-RCAPU1")
+    r = client.post("/experiments/EXP-RCAPU1/run", json={})
     assert r.status_code == 200 and r.json()["status"] == "started", r.text[:300]
-    assert hold.started and hold.started[0][0] == "EXP-RBU1"
+    assert hold.started and hold.started[0][0] == "EXP-RCAPU1"
     assert api._budget_active_count() == 1
     hold.hold.set()
 
@@ -134,14 +151,14 @@ def test_budget_over_limit_429_zero_side_effect(client, monkeypatch):
     零副作用——不领取、不启动、实验行原样。"""
     monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)
     hold = _Hold(monkeypatch)
-    _seed("EXP-RBO1")
-    _seed("EXP-RBO2")
-    assert client.post("/experiments/EXP-RBO1/run", json={}).status_code == 200
-    r = client.post("/experiments/EXP-RBO2/run", json={})
+    _seed("EXP-RCAPO1")
+    _seed("EXP-RCAPO2")
+    assert client.post("/experiments/EXP-RCAPO1/run", json={}).status_code == 200
+    r = client.post("/experiments/EXP-RCAPO2/run", json={})
     assert r.status_code == 429, f"应 429，实得 {r.status_code}: {r.text[:300]}"
     assert "预算" in r.text and "上限" in r.text, "拒收原因必须可读"
     assert len(hold.started) == 1, "超限请求不得启动后台 run"
-    row = _exp_row("EXP-RBO2")
+    row = _exp_row("EXP-RCAPO2")
     assert row.status == "created" and row.run_owner is None, \
         "预算闸拒绝必须发生在领取之前（零副作用）"
     hold.hold.set()
@@ -152,7 +169,7 @@ def test_budget_not_bypassed_under_concurrency(client, monkeypatch):
     恰好 cap 个成功，其余 429；成功者的实验行 running、失败者原样。"""
     monkeypatch.setenv("LG_MAX_RUNNING_EXPERIMENTS", "2")
     hold = _Hold(monkeypatch)
-    ids = [f"EXP-RBC{i}" for i in range(6)]
+    ids = [f"EXP-RCAPC{i}" for i in range(6)]
     for eid in ids:
         _seed(eid)
     barrier = threading.Barrier(6)
@@ -191,12 +208,12 @@ def test_budget_released_after_run_finishes(client, monkeypatch):
     新 run 可再次启动（预算只漏不进=服务永久拒绝新实验，必须钉死）。"""
     monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)
     hold = _Hold(monkeypatch)
-    _seed("EXP-RBR1")
-    _seed("EXP-RBR2")
-    assert client.post("/experiments/EXP-RBR1/run", json={}).status_code == 200
+    _seed("EXP-RCAPR1")
+    _seed("EXP-RCAPR2")
+    assert client.post("/experiments/EXP-RCAPR1/run", json={}).status_code == 200
     hold.hold.set()
     assert _wait_budget_free(), "后台 run 结束后预算位必须归还"
-    r = client.post("/experiments/EXP-RBR2/run", json={})
+    r = client.post("/experiments/EXP-RCAPR2/run", json={})
     assert r.status_code == 200, f"归还后新 run 应可启动: {r.text[:300]}"
     hold.hold.set()
 
@@ -206,17 +223,17 @@ def test_budget_released_when_claim_fails(client, monkeypatch):
     竞争输家就把预算永久占掉一格。"""
     monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)
     hold = _Hold(monkeypatch)
-    _seed("EXP-RBL1", status="running")
+    _seed("EXP-RCAPL1", status="running")
     with db.session() as s:
-        s.get(Experiment, "EXP-RBL1").run_owner = "RUN-holder"
+        s.get(Experiment, "EXP-RCAPL1").run_owner = "RUN-holder"
         s.commit()
-    r = client.post("/experiments/EXP-RBL1/run", json={})
+    r = client.post("/experiments/EXP-RCAPL1/run", json={})
     assert r.status_code == 409 and "already_running" in r.text, r.text[:300]
     assert len(hold.started) == 0
     assert api._budget_active_count() == 0, "claim 失败必须立刻归还预算位"
     # 归还后正常路径可用
-    _seed("EXP-RBL2")
-    assert client.post("/experiments/EXP-RBL2/run", json={}).status_code == 200
+    _seed("EXP-RCAPL2")
+    assert client.post("/experiments/EXP-RCAPL2/run", json={}).status_code == 200
     hold.hold.set()
 
 
@@ -224,12 +241,12 @@ def test_budget_blocked_requests_leave_counter_untouched(client, monkeypatch):
     """连续超限请求不得让计数漂移（拒绝路径不碰计数）。"""
     monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)
     hold = _Hold(monkeypatch)
-    _seed("EXP-RBD1")
+    _seed("EXP-RCAPD1")
     for i in range(2, 5):
-        _seed(f"EXP-RBD{i}")
-    assert client.post("/experiments/EXP-RBD1/run", json={}).status_code == 200
+        _seed(f"EXP-RCAPD{i}")
+    assert client.post("/experiments/EXP-RCAPD1/run", json={}).status_code == 200
     for i in range(2, 5):
-        r = client.post(f"/experiments/EXP-RBD{i}/run", json={})
+        r = client.post(f"/experiments/EXP-RCAPD{i}/run", json={})
         assert r.status_code == 429
         assert api._budget_active_count() == 1, "拒绝不得增减计数"
     hold.hold.set()
