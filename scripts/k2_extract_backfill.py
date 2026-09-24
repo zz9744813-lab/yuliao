@@ -17,7 +17,17 @@
     段数、入池段的 role 分布写进汇总 skips）。
     K3 侧（app/knowledge_query.py）排除 benchmark 段是**硬口径**：本驱动一行
     不改、不放宽，只加抽取侧供给；报告里的 `k3_preview` 是同源的**只读预演**，
-    用来看「抽到的能不能进 K3」，不参与任何过滤决策。
+    用来看「抽到的能不能进 K3」，不参与任何过滤决策。K3 可达预演是**两段口径**
+    （2026-09-24 钉死：旧版只报来源闸上界，对信心 hypothesis/UNCERTAIN 的真库
+    报出 33703/33703 的乐观假象，见 docs/K3_可达预演口径_20260924.md）：
+    · `upper_bound`（=`would_reach_k3`，字段保留）：**来源闸可达上界**，明确
+      「上界，未含 scope/status/预算闸」；
+    · `would_pass`：**真判据预演**——对抽到的每对 (strategy, work, segment) 逐个
+      走 `app.knowledge_query` 的真函数（`eligible_statuses`/`ELIGIBLE_OBSERVATION`/
+      `_scope_matches`/`_condition_pipeline`；来源闸按 `_evidence_for` 单实例块
+      同序同常量求 would-be 实例），报 would_pass_scope/status/all 与逐闸剔除
+      分桶。**关键纪律：预演只引用 K3 真函数与常量（import 复用），绝不复制
+      常量、绝不另写主流程判定**；K3 侧缺的可复用入口如实记录为缺口（见交付文档）。
   排序=(ordinal, work_id) 跨作品交错；WORK/AUTHOR/GENRE 经 work_sources
   登记解析到所属作品的段，GLOBAL/UNCERTAIN 空身份=**该口径下**的试点全集
   （仍受 limit/预算闸约束）。
@@ -324,21 +334,119 @@ def build_queues(s, *, strategy_keys: tuple | None = None,
     return queues, stats
 
 
-def k3_evidence_preview(s, queues: dict) -> dict:
-    """**只读预演** K3 的来源闸（app/knowledge_query._evidence_for 的同一顺序、
-    同一常量）：回答「抽到的实例能不能进 K3」，不参与本驱动任何过滤决策，
-    也不改 K3 一行、不放宽任何门槛（K3 排除 benchmark 段是硬口径）。
+def _k3_source_gate(segment, text_version, *, work_source=None) -> str | None:
+    """would-be 实例的**来源闸**（返回 None=过闸，否则理由串）。
 
-    桶键 = (work_id, 段 role 是否 benchmark)；镜像去重/区间合并属 K3 统计层，
-    本预演不复制（只报来源闸命中数，宁少猜不多口径）。"""
+    K3 侧唯一按实例判来源闸的入口是 `app.knowledge_query._evidence_for`
+    （行 234–288）：它只对**已落库**的 StrategyInstance 求值，对「抽到但还没
+    落库」的 pair 没有按段/按假设实例的可复用入口（本文件模块文档「缺口」项
+    里如实记录）。为钉死预演与 K3 同源，这里按 `_evidence_for` 单实例块的
+    **同一顺序**（行 270–279）与**同一常量**（只 import，不复制）求 would-be
+    实例的判定，理由串格式与 `_evidence_for.stripped` 逐字一致：
+    no_registry → benchmark_source → excluded_source_type:.. → excluded_use
+    → text_version:..。若 K3 日后把该块升为公开入口，改调它、删掉本镜像。"""
     from app import knowledge_query as KQ
+    ws = work_source
+    if ws is None:
+        return "no_registry"
+    if (segment.role or "") == BENCHMARK_ROLE:
+        return "benchmark_source"
+    if ws.source_type in KQ.DEFAULT_EXCLUDED_SOURCE_TYPES:
+        return f"excluded_source_type:{ws.source_type}"
+    if set(ws.license_purposes or []) & KQ.DEFAULT_EXCLUDED_USES:
+        return "excluded_use"
+    if text_version not in KQ.DEFAULT_ALLOWED_TEXT_VERSIONS:
+        return f"text_version:{text_version}"
+    return None
+
+
+def k3_would_pass(s, strategy, segment, text_version, *,
+                  work_source=None, gate_cache: dict | None = None) -> dict:
+    """**真判据预演（单对）**：对 (strategy, work, segment) 走 `app.knowledge_query`
+    的真函数求「抽到并落 verified 实例后，能不能进 K3 的候选」：
+
+    - status 闸：`strategy.status in eligible_statuses(version)` 且
+      `observation_status in ELIGIBLE_OBSERVATION`（即 query_knowledge 候选
+      预筛，行 381–384）→ `would_pass_status`；
+    - scope 闸：`_scope_matches(s, strategy, {"book_id": work_id})`（真函数，
+      行 291–312）→ `would_pass_scope`；
+    - condition 管道：`_condition_pipeline(s, strategy.id, {})`（真函数，
+      行 315–344；预演无 semantic_requirements，空 dict 保守求值，记录在理由）
+      → `would_pass_condition`；
+    - 来源闸：`_k3_source_gate`（`_evidence_for` 单实例块同序同常量）→
+      `would_pass_source`；
+    - `would_pass_all` = 四闸 AND（该对抽到即可能被 K3 选中）。
+
+    剔除原因逐闸分桶进 `reasons`（一对可进多桶；原因串与 `_evidence_for`/
+    `_scope_matches`/`_condition_pipeline` 的一致，如 `excluded_scope_uncertain`、
+    `status_not_eligible`、`benchmark_source`、`text_version:xxx`）。
+
+    `gate_cache`：跨对复用的判定 memo（key 按 strategy.id / (strategy.id,
+    work_id)，值按该策略/该对策略×作品求）——把同一策略逐对的 DB 查询压到
+    每策略一次 / 每(策略,作品)一次，只应在同一次预览的相同策略循环内使用。
+    """
+    from app import knowledge_query as KQ
+    cache = {} if gate_cache is None else gate_cache
+    status_key = f"status:{strategy.id}"
+    if status_key not in cache:
+        cache[status_key] = (
+            strategy.status in KQ.eligible_statuses(strategy.version)
+            and strategy.observation_status in KQ.ELIGIBLE_OBSERVATION)
+    status_ok = cache[status_key]
+    scope_key = f"scope:{strategy.id}:{segment.work_id}"
+    if scope_key not in cache:
+        cache[scope_key] = KQ._scope_matches(
+            s, strategy, {"book_id": segment.work_id})
+    scope_verdict = cache[scope_key]
+    cond_key = f"cond:{strategy.id}"
+    if cond_key not in cache:
+        cache[cond_key] = KQ._condition_pipeline(s, strategy.id, {})[0]
+    cond_reason = cache[cond_key]
+    src_reason = _k3_source_gate(segment, text_version,
+                                 work_source=work_source)
+    reasons = []
+    if not status_ok:
+        reasons.append("status_not_eligible")
+    if scope_verdict != "pass":
+        reasons.append(scope_verdict)
+    if cond_reason:
+        reasons.append(cond_reason)
+    if src_reason:
+        reasons.append(src_reason)
+    return {"would_pass_status": status_ok,
+            "would_pass_scope": scope_verdict == "pass",
+            "would_pass_condition": cond_reason is None,
+            "would_pass_source": src_reason is None,
+            "would_pass_all": (status_ok and scope_verdict == "pass"
+                               and cond_reason is None and src_reason is None),
+            "reasons": reasons}
+
+
+def k3_evidence_preview(s, queues: dict) -> dict:
+    """**只读预演**：K3 可达口径（两段，2026-09-24 钉死——见
+    docs/K3_可达预演口径_20260924.md：旧版只复刻来源闸，对真库报出
+    「可达 33703」而 K3 真身 selected=0 的乐观假象）：
+
+    ① `upper_bound`（**来源闸可达上界**，字段 `would_reach_k3` 保留兼容）：
+    `_evidence_for` 同一顺序、同一常量判来源闸（benchmark 剔除 / source_type /
+    license 用途 / text_version），**明确注记「上界，未含 scope/status/预算闸」**；
+    ② `would_pass`（**真判据预演**）：对抽到的 (strategy, work, segment) 逐个走
+    `app.knowledge_query` 的真函数（见 `k3_would_pass`）——报 would_pass_status /
+    would_pass_scope / would_pass_all 并把逐闸剔除原因分桶（如
+    `excluded_scope_uncertain`、`status_not_eligible`、`benchmark_source`、
+    `text_version:xxx`）。
+
+    两段是同一pair宇宙（都 = 队列里所有 pending 对，`pairs` 恒等），改前
+    `would_reach_k3` 的数字仍然一样——变的只是它被正确标注为**上界**，且
+    旁边多了会照实报 0 的 `would_pass`。不参与本驱动过滤决策，不改 K3 一行。"""
+    from app import knowledge_query as KQ
+    reg = _registry_by_work(s)
     buckets: dict[tuple[str, bool], int] = {}
     for q in queues.values():
         for it in q:
             seg = it["segment"]
             key = (seg.work_id, (seg.role or "") == BENCHMARK_ROLE)
             buckets[key] = buckets.get(key, 0) + 1
-    reg = _registry_by_work(s)
     stripped: dict[str, int] = {}
     reach = 0
     for (wid, is_bench), n in sorted(buckets.items()):
@@ -357,9 +465,48 @@ def k3_evidence_preview(s, queues: dict) -> dict:
             reach += n
             continue
         stripped[reason] = stripped.get(reason, 0) + n
-    return {"pairs": sum(buckets.values()), "would_reach_k3": reach,
+    n_pairs = sum(buckets.values())
+
+    gate_cache: dict = {}
+    wp = {"pairs": 0, "would_pass_status": 0, "would_pass_scope": 0,
+          "would_pass_condition": 0, "would_pass_source": 0,
+          "would_pass_all": 0, "reasons": {}}
+    for q in queues.values():
+        for it in q:
+            seg = it["segment"]
+            v = k3_would_pass(s, it["strategy"], seg, it["text_version"],
+                              work_source=reg.get(seg.work_id),
+                              gate_cache=gate_cache)
+            wp["pairs"] += 1
+            for k in ("would_pass_status", "would_pass_scope",
+                      "would_pass_condition", "would_pass_source",
+                      "would_pass_all"):
+                wp[k] += int(v[k])
+            for r in v["reasons"]:
+                wp["reasons"][r] = wp["reasons"].get(r, 0) + 1
+    wp["reasons"] = dict(sorted(wp["reasons"].items()))
+    wp["note"] = ("真判据预演：逐对走 K3 真函数（eligible_statuses+"
+                  "ELIGIBLE_OBSERVATION/_scope_matches/_condition_pipeline）与 "
+                  "_evidence_for 单实例块同序同常量（would-be 实例，不落库）；"
+                  "would_pass_all=status∧scope∧condition∧source 全过=该对抽到即"
+                  "可能被 K3 选中。逐闸剔除原因分桶（一对可进多桶）。预算闸"
+                  "（candidate_cap/context_items 等）与去重/排序是查询级聚合，"
+                  "非单对可判，以 query_knowledge 为准。")
+    upper_bound = {
+        "label": "来源闸可达上界",
+        "upper_bound": True,
+        "pairs": n_pairs,
+        "would_reach_k3": reach,
+        "stripped": dict(sorted(stripped.items())),
+        "note": ("上界：只复刻来源闸（benchmark 剔除/source_type/license/"
+                 "text_version），未含 status 闸（eligible_statuses/"
+                 "ELIGIBLE_OBSERVATION）、scope 闸（_scope_matches）、condition"
+                 " 管道（_condition_pipeline）与预算闸——真判据见 would_pass。"),
+    }
+    return {"pairs": n_pairs, "would_reach_k3": reach,
             "stripped": dict(sorted(stripped.items())),
-            "note": "只读预演，与 K3 同源常量；本驱动不改不放宽 K3 口径"}
+            "upper_bound": upper_bound, "would_pass": wp,
+            "note": "只读预演，与 K3 同源（import 复用真函数/常量）；本驱动不改不放宽 K3 口径"}
 
 
 def _round_robin(queues: dict, limit: int) -> list:
@@ -409,7 +556,8 @@ def run_backfill(s, client, *, limit: int = DEFAULT_LIMIT, max_calls: int = 20,
     picked = _round_robin(queues, limit)
     if dry_run:
         # 预演三查（主控核对「为什么 82 条全是 benchmark」的口径依据）：
-        # 候选来源数 / 合格段数 / 可配对总数 + 每个被排除来源的原因 + K3 可达预演
+        # 候选来源数 / 合格段数 / 可配对总数 + 每个被排除来源的原因 + K3
+        # 可达预演（两段：upper_bound 来源闸上界 + would_pass 真判据预演）
         report["would_attempt"] = len(picked)
         report["k3_preview"] = k3_preview
         return report
@@ -536,14 +684,18 @@ def main() -> None:
     print(json.dumps(rep, ensure_ascii=False, indent=1))
     if rep.get("mode") == "dry_run":
         k3 = rep["k3_preview"]
+        wp = k3["would_pass"]
         print(f"[k2_extract_backfill] scope={rep['source_scope']} "
               f"候选来源={rep['n_candidate_sources']} "
               f"合格段={rep['skips']['n_eligible_segments']} "
               f"可配对={rep['n_pending_pairs']} "
               f"排除来源={rep['skips']['n_sources_excluded']} "
               f"（明细见 skips.excluded_sources）"
-              f" | K3 可达预演={k3['would_reach_k3']}/{k3['pairs']} "
-              f"剔除={k3['stripped']}")
+              f" | K3 可达预演={k3['would_reach_k3']}/{k3['pairs']}"
+              f"(来源闸上界，未含 scope/status/预算闸) 剔除={k3['stripped']}"
+              f" | 真判据预演 would_pass_all={wp['would_pass_all']}/{wp['pairs']}"
+              f" pos:scope={wp['would_pass_scope']} status={wp['would_pass_status']}"
+              f" 否决={wp['reasons']}")
 
 
 
