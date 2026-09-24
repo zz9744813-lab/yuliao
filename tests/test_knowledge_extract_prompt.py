@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest  # 用于 ② 串味负例的 xfail 已知缺口钉死
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -128,3 +130,173 @@ def test_output_gate_still_rejects_fake_span():
     assert r["status"] == "unverified" and r["reason"] == "output_gate"
     # repair_span 救不了不存在的子串：find < 0 原样返回，门照拦
     assert r["raw"]["evidence_text"] == "伪造的原文"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 多策略误归类负例组（审计 P1 第 3 条后半句：用多策略负例测归类）
+#
+# 离线、零真实调用：夹具回什么模型就"说"什么——本组钉的是
+# extract_segment 在**当前实现下**的归类行为，绝不修改实现去迎合期望。
+# 关键事实：当前三道门（预算/输出/证据）只核 span 逐字 + 字段完整，
+# 从不比对 observed_content 与策略抽象操作的语义 →
+# "串味"（给 B 的定义、observed_content 却描述 C）现状照常放行。
+# ═══════════════════════════════════════════════════════════════════
+
+# 三条彼此可区分的抽象操作策略——借以制造"串味"：
+#   B = 少动作直给疑问（本组要验的目标）
+#   C = 铺陈渲染（环境景物层层叠加烘托）——与 B 在表层文本上可重叠
+#   A = 环境微变替代情绪描写（沿用文件顶部 DEF）
+MULTI_TEXT = ("窗外的雨忽然停了。他没抬头，指节敲了敲桌沿，"
+              "低声问：你打算瞒我到几时？")
+
+DEF_B = {
+    "abstract_operation": "少动作直给疑问：以极简动作配合一句短问直戳，不给铺陈",
+    "invariants": ["动作极简", "必须含一句短问", "不给铺陈渲染"],
+    "effect_hypothesis": "读者被短问直接击中，情绪无缓冲",
+    "failure_modes": ["短问与上下文无关时成突兀"],
+}
+DEF_C = {
+    "abstract_operation": "铺陈渲染：以层层环境景物叠加烘托情绪",
+    "invariants": ["环境景物叠加", "情绪靠烘托不靠直说"],
+    "effect_hypothesis": "情绪被景物浸透，余味更长",
+    "failure_modes": ["景物与情绪无关联时成堆砌"],
+}
+
+
+def _extract_text(text, client, *, strategy_id="ESV2-x", strategy_def=None):
+    """本组专用抽取入口（允许自定义 text 与 strategy_def；不复用顶部
+    _extract 以免改动其既定语义）。"""
+    return KE.extract_segment(
+        client, strategy_id=strategy_id, strategy_version=1,
+        work_id="w1", segment_id="seg1", text=text, text_version="tv1",
+        budget=_budget(), strategy_def=strategy_def)
+
+
+def test_multistrategy_positive_B_verified_by_its_def():
+    """①正例：给 B 的定义，夹具回一条 B 的真实实例（逐字子串 + 合法
+    offset）→ 应 verified。证明"给定义后正例仍走通"，与 ②③ 对照。
+    变异推演：回退 strategy 注入 → 本例仍绿（注入只补输入不改归类），
+    故本例主要价值是给 ② 串味问题提供"正确归类长啥样"的基线。"""
+    span = "指节敲了敲桌沿，低声问：你打算瞒我到几时？"
+    i = MULTI_TEXT.find(span)
+    reply = {"text": json.dumps(
+        {"span_start": i, "span_end": i + len(span),
+         "evidence_text": span,
+         "observed_content": "极简动作（敲桌沿）配合一句直戳的短问，"
+                             "不给任何铺陈，正是 B 的少动作直给疑问"},
+        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
+    c = _Capture(reply=reply)
+    r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    assert r["status"] == "verified"
+    # payload 确实带上了 B 的四字段
+    p = c.calls[0]["payload"]
+    assert p["strategy"]["abstract_operation"] == DEF_B["abstract_operation"]
+    assert p["strategy"]["invariants"] == DEF_B["invariants"]
+    assert p["strategy"]["effect_hypothesis"] == DEF_B["effect_hypothesis"]
+    assert p["strategy"]["failure_modes"] == DEF_B["failure_modes"]
+
+
+def test_multistrategy_positive_C_verified_by_its_def():
+    """①补充：给 C 的定义，夹具回 C 的真实实例（雨停景物烘托）→ verified。
+    同一段文本既含 B 可抽的短问、也含 C 可抽的景物烘托——分类正确与否
+    取决于 observed_content 是否对应所给策略；当前实现不看 observed_content，
+    所以 ② 才会把"描述 C 的回复"照常放行（verified）。"""
+    span = "窗外的雨忽然停了。"
+    i = MULTI_TEXT.find(span)
+    reply = {"text": json.dumps(
+        {"span_start": i, "span_end": i + len(span),
+         "evidence_text": span,
+         "observed_content": "雨停的景物被点出，不直说情绪而靠烘托，"
+                             "正是 C 的铺陈渲染"},
+        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
+    c = _Capture(reply=reply)
+    r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-C", strategy_def=dict(DEF_C))
+    assert r["status"] == "verified"
+
+
+def test_crossflavor_currently_passes_known_gap():
+    """②串味负例——**实际行为钉死**（不许改实现迎合期望）：
+    给 B 的定义（少动作直给疑问），但夹具 observed_content 描述的是另一条
+    策略 C（铺陈渲染），span 仍逐字合法。当前实现只核对 span 逐字 + 字段
+    完整、从不比对 observed_content 与策略语义 → 实际放行（verified）。
+    本例如实钉住该行为。这是已知缺口，期望行为见
+    test_crossflavor_should_be_blocked（xfail 钉住，注明机械口径为何不可分）。"""
+    span = "窗外的雨忽然停了。"
+    i = MULTI_TEXT.find(span)
+    reply = {"text": json.dumps(
+        {"span_start": i, "span_end": i + len(span),
+         "evidence_text": span,
+         "observed_content": "此处铺陈渲染到位：雨停的景物被层层叠加，"
+                             "烘托出欲说还休的情绪，是 C 策略的典型体现"},
+        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
+    c = _Capture(reply=reply)
+    r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    # 实际行为：放行（现状）
+    assert r["status"] == "verified"
+    # 钉子：payload 带的是 B 的定义，而 observed_content 描述的是 C——
+    # 离线机械口径下实现无法发现这处串味（这就是缺口所在）
+    assert c.calls[0]["payload"]["strategy"]["abstract_operation"] == \
+        DEF_B["abstract_operation"]
+    assert "铺陈渲染" in r["observed_content"]
+
+
+@pytest.mark.xfail(strict=True,
+    reason="已知缺口：机械口径无法区分串味。observed_content 与策略抽象操作"
+           "的语义对齐需要模型判（或人工复审），零真实调用下不可分；现状放行。"
+           "strict=True：一旦实现能拦下、本例变 XPASS，套件会红，强制移除 xfail "
+           "并更新交付，防止「悄悄修了又不说」。")
+def test_crossflavor_should_be_blocked():
+    """②串味负例——**期望行为**（当前未实现，xfail 钉住）：
+    给 B 的定义、observed_content 却描述 C → 应当 unverified（拦下）。
+    当前实现做不到，故本例预期失败（xfail）。一旦引入模型判据或人工复审门，
+    本例将转为通过，届时须删除该 xfail 并据实改写交付文档。"""
+    span = "窗外的雨忽然停了。"
+    i = MULTI_TEXT.find(span)
+    reply = {"text": json.dumps(
+        {"span_start": i, "span_end": i + len(span),
+         "evidence_text": span,
+         "observed_content": "此处铺陈渲染到位：雨停的景物被层层叠加，"
+                             "烘托出欲说还休的情绪，是 C 策略的典型体现"},
+        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
+    c = _Capture(reply=reply)
+    r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    # 期望行为：串味应被拦下
+    assert r["status"] == "unverified"
+
+
+def test_empty_vs_defined_def_multi_strategy():
+    """③空定义 vs 有定义差异（多策略场景）：同一段文本 + 同一夹具回复，
+    1) strategy_def=None（旧口径）→ payload 旧形状、system 无"抽象操作"前缀；
+    2) strategy_def=DEF_C → payload 逐字带 C 的四字段、system 有前缀；
+    3) 多策略互不串：给 B 定义时 payload 是 B 的四字段，不是 C 的。
+    证明"给定义"确实改变了发往模型的输入，且多策略各自定义独立。"""
+    span = "窗外的雨忽然停了。"
+    i = MULTI_TEXT.find(span)
+    reply = {"text": json.dumps(
+        {"span_start": i, "span_end": i + len(span),
+         "evidence_text": span, "observed_content": "景物烘托"},
+        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
+
+    # 1) 旧口径（缺省 None）：payload 旧形状、无前缀
+    c0 = _Capture(reply=reply)
+    _extract_text(MULTI_TEXT, c0, strategy_id="ESV2-C", strategy_def=None)
+    assert c0.calls[0]["payload"] == {"strategy_id": "ESV2-C", "text": MULTI_TEXT}
+    assert "抽象操作" not in c0.calls[0]["system"]
+
+    # 2) 新口径：带 C 定义，四字段逐字在 payload
+    cC = _Capture(reply=reply)
+    _extract_text(MULTI_TEXT, cC, strategy_id="ESV2-C", strategy_def=dict(DEF_C))
+    pC = cC.calls[0]["payload"]
+    assert pC["strategy"]["abstract_operation"] == DEF_C["abstract_operation"]
+    assert pC["strategy"]["invariants"] == DEF_C["invariants"]
+    assert pC["strategy"]["effect_hypothesis"] == DEF_C["effect_hypothesis"]
+    assert pC["strategy"]["failure_modes"] == DEF_C["failure_modes"]
+    assert "抽象操作" in cC.calls[0]["system"]
+
+    # 3) 多策略互不串：给 B 定义时 payload 是 B 的四字段，不是 C 的
+    cB = _Capture(reply=reply)
+    _extract_text(MULTI_TEXT, cB, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    assert cB.calls[0]["payload"]["strategy"]["abstract_operation"] == \
+        DEF_B["abstract_operation"]
+    assert cB.calls[0]["payload"]["strategy"]["abstract_operation"] != \
+        DEF_C["abstract_operation"]
