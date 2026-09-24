@@ -23,9 +23,27 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from typing import Any
+
+from sqlalchemy import or_
 
 from . import knowledge as K
 from .models import StrategyInstance
+
+# K2 复审台账标记（审计 P1 第 3 条）：复用 strategy_instances.reviewer_version 列，
+# 不新增/不删列。值语义：REVIEW_MARKER_NEW_DEF = 已按带 strategy_def 的新口径复审；
+# 空（""）或缺 = 未复审（legacy，即审计所说「需复审」的那批）。写后由
+# review_ledger_stats 读，可对账「82 条需复审」的进度。
+REVIEW_MARKER_NEW_DEF = "k2def-v1"
+
+# 输出契约（审计 P1 第 3 条）：要求模型把归类理由放 JSON 末尾字段，
+# 与 strategy_def 一并结构化注入 payload（strategy_def 非空时）。
+OUTPUT_CONTRACT = {
+    "require_fields": ["span_start", "span_end", "evidence_text", "observed_content"],
+    "classification_rationale_last": True,
+    "note": "归类理由必须放在 JSON 最后一个字段 classification_rationale，置于末尾；"
+            "整段无实例时仍输出 {\"none\": true}。",
+}
 
 
 class ExtractBudgetExceeded(RuntimeError):
@@ -143,13 +161,16 @@ def extract_segment(client, *, strategy_id: str, strategy_version: int,
     if strategy_def:
         system = ("你抽的是**该抽象操作**的实例，不是这一段在写什么："
                   "只有该处文本确实呈现了下方策略定义的抽象操作时才算实例。"
+                  "输出 JSON 必须在最后增加一个字段 classification_rationale，"
+                  "用一句话说明这处文本为何属于该抽象操作（归类理由置于末尾）。"
                   + system)
     reply = client.invoke(role="extractor",
                          system=system,
                          payload=({"strategy_id": strategy_id, "text": text}
                                   if not strategy_def else
                                   {"strategy_id": strategy_id, "text": text,
-                                   "strategy": strategy_def}),
+                                   "strategy": strategy_def,
+                                   "output_contract": OUTPUT_CONTRACT}),
                          max_tokens=2000, timeout=60)
     budget.spend(int(reply.get("tokens_in", 0)),
                  int(reply.get("tokens_out", 0)))
@@ -166,4 +187,56 @@ def extract_segment(client, *, strategy_id: str, strategy_version: int,
     ev = gate_evidence(clean, text)
     clean.update({"strategy_version": strategy_version, "work_id": work_id,
                   "text_version": text_version, "status": ev})
+    if strategy_def:
+        # 新口径复审标记：复用 reviewer_version 列（不新增列、不改 status）。
+        # 默认路径（strategy_def=None）此处不写入，返回 dict 与现状逐字一致。
+        clean["reviewer_version"] = REVIEW_MARKER_NEW_DEF
     return clean
+
+
+def review_ledger_stats(session) -> dict:
+    """K2 复审台账：strategy_instances 复审进度对账（只读，不改 status、不写库）。
+
+    标记位复用现有 reviewer_version 列（审计 P1 第 3 条，不新增/不删列）：
+      - n_reviewed_new_def = reviewer_version == REVIEW_MARKER_NEW_DEF
+        （已按带 strategy_def 的新口径复审）
+      - n_legacy = reviewer_version 为空/None（未复审）
+    即审计所说「82 条需复审」的进度对账口径：n_legacy 即待复审数。"""
+    q = session.query(StrategyInstance)
+    n_total = q.count()
+    n_reviewed_new_def = q.filter(
+        StrategyInstance.reviewer_version == REVIEW_MARKER_NEW_DEF).count()
+    n_legacy = q.filter(or_(
+        StrategyInstance.reviewer_version.is_(None),
+        StrategyInstance.reviewer_version == "")).count()
+    return {"n_total": n_total,
+            "n_reviewed_new_def": n_reviewed_new_def,
+            "n_legacy": n_legacy}
+
+
+def persist_instance(session, result: dict) -> "StrategyInstance":
+    """K2 实例唯一写库入口（离线骨架不自动调用——extract_segment 仍是纯函数）。
+
+    把抽取结果落成 strategy_instances 一行；reviewer_version 取 result 里的标记
+    （新口径=REVIEW_MARKER_NEW_DEF，缺省=空=未复审）。status 原样落——
+    **绝不批量改 status**（审计明令禁止用批量改 status 冒充验收）。
+
+    纪律：不连网关、不读密钥、只写一行；与 review_ledger_stats 共用同一标记位
+    （reviewer_version），写后读即可对账。"""
+    inst = StrategyInstance(
+        strategy_id=result["strategy_id"],
+        strategy_version=result.get("strategy_version", 1),
+        work_id=result.get("work_id", ""),
+        segment_id=result.get("segment_id", ""),
+        text_version=result.get("text_version", ""),
+        span_start=int(result["span_start"]),
+        span_end=int(result["span_end"]),
+        evidence_text=result["evidence_text"],
+        evidence_sha256=result.get("evidence_sha256", ""),
+        observed_content=str(result.get("observed_content", "")),
+        extractor_model=result.get("extractor_model", "unknown"),
+        status=result.get("status", "proposed"),
+        reviewer_version=result.get("reviewer_version", ""),
+    )
+    session.add(inst)
+    return inst
