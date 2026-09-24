@@ -67,7 +67,7 @@ Error: Allow Bash to run: rm _probe_tmp.py?
 遗留：`_probe_tmp.py`（一行注释的探针残渣，无执行路径引用它）因 `rm` 被拒
 未能删除，主控可直接删。
 
-**待主控复跑的两组验收命令**（预期不写「预计会通过」，以实跑为准）：
+**待主控复跑的两组验收命令**（预期不写「预计会通过」，以实跑为准）——**已由主控于 2026-09-24 11:2x 实跑，见本文第 4 节：两组全部通过**：
 
 ```bash
 # ① 离线回归 + 既有 caveats 回归
@@ -171,3 +171,49 @@ $ ... scripts/import_corpus_v2.py ... 清洗试点小样2 训练语料
 
 **主控结论**：交付成立（默认口径不变 / 开关口径正确 / 拼音段不送 LLM 且留标记 / 幂等与共存由 8 例离线钉死）；
 worker 遗留的探针残渣 `_probe_tmp.py` 已由主控删除（一行注释，无引用）。worker 侧唯一越界项即该残渣，属收尾瑕疵、非行为缺陷。
+
+## 4. 主控复跑实证（Hermes，2026-09-24 11:24–11:26）
+
+执行代理会话的 `pytest` / `python -m` / `rm` 全被权限面拒绝（第 2 节逐条原文），
+故本地 checks 与临时库真跑由主控在本 worktree 补齐。以下为**实际命令与实际输出**，非预计。
+
+### 4.1 离线回归（既有 caveats 回归一并跑）
+
+```
+$ cd F:/agi/_scratch/worktrees/corpus-v2-textclean
+$ F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest     tests/test_import_v2_textclean.py tests/test_import_v2_caveats.py -q
+...................                                                      [100%]
+19 passed in 1.06s
+```
+
+### 4.2 临时库真跑一本小样（不碰真库、不重导覆汉）
+
+小样落 `F:/agi/_scratch/tmp_clean_demo/demo.txt`（3 段：站点水印+空括号 / 带调拼音 / 干净段），
+`LG_DATA_DIR` 与 `LG_DATABASE_URL` 均指向该临时目录：
+
+```
+$ LG_DATA_DIR=F:/agi/_scratch/tmp_clean_demo   LG_DATABASE_URL='sqlite:///F:/agi/_scratch/tmp_clean_demo/demo.db'   F:/Hermes/hermes-agent/venv/Scripts/python.exe scripts/import_corpus_v2.py   F:/agi/_scratch/tmp_clean_demo/demo.txt 清洗试点小样 训练语料 --clean
+清洗试点小样: v2 段 3，合格 3（100%），字数 166，新段 text_clean 已写 3（其中 clean_pending_llm 1）
+```
+
+落库自检（主控实跑）：
+
+```
+段数 3 | text_clean 非空 3 | clean_pending_llm 1
+水印段洗后: 甲一：他把茶盏搁回去，半天没有说话，外头风声一阵紧过一阵，隔壁屋的灯还亮着。
+拼音段:     丙二：白sè的雾气从河面上lù出来，他神sè平静地看着远处的灯火，站了很久也没有挪动一步。
+断言通过：水印与空括号已洗除
+```
+
+**结论**：开关语义与任务书一致——①默认关＝旧行为（回归钉 ① 绿）；②开时新段
+`text_clean` 全部写入且等于 `clean_rules(text)`（水印 `(手打中文网…)` 与空括号 `()` 实证洗除，
+原文 `text` 列未动）；③规则洗不掉的拼音段保留拼音并如实记 `integrity.clean_pending_llm`
+（计数 1，与文档一致，未静默送 LLM）；④本任务未回填《覆汉》既有段（其 35,974 段
+`text_clean` 仍为 NULL，见第 3 节），无全库 UPDATE、无锚漂移。
+
+### 4.3 越界与残渣核对
+
+- 交付物仅三个声明文件 + 执行代理留下的探针残渣 `_probe_tmp.py`（一行注释，无引用）。
+  主控已核实该文件**不存在于磁盘**（`ls` 报 No such file），工作树 `git status` 干净、
+  无未跟踪残渣，故无残留需要清理。
+- 提交为 `b8c8800`（作者 Hermes，执行代理未 commit/push），基线 `8efa8b6`。
