@@ -162,6 +162,34 @@ DEF_C = {
     "failure_modes": ["景物与情绪无关联时成堆砌"],
 }
 
+# 串味负例的「负例身份」载体：两条串味用例共用同一批正文常量，杜绝某一侧
+# 被悄悄换成正例后测试仍全绿（复审 BLOCK：输入早已不是串味、套件照样全绿）。
+#   OC_CROSS = 描述 C 的正文（喂给 B 的定义即构成串味）
+#   OC_MATCH = 描述 B 的正文（与 positive_B 同源，构成合规对照）
+# 身份判据取自策略定义本身（abstract_operation 冒号前的名字），不硬编码字串。
+OC_CROSS = ("此处铺陈渲染到位：雨停的景物被层层叠加，"
+            "烘托出欲说还休的情绪，是 C 策略的典型体现")
+OC_MATCH = ("极简动作（敲桌沿）配合一句直戳的短问，"
+            "不给任何铺陈，正是 B 的少动作直给疑问")
+
+
+def _name(defn):
+    """从策略定义本身取「抽象操作名」——负例身份 oracle 的判据来源。"""
+    return defn["abstract_operation"].split("：")[0]
+
+
+def _reply(observed_content):
+    """串味用例夹具：span/evidence/offset 固定为 MULTI_TEXT 里逐字合法的
+    景物句，只有 observed_content 随参数变——保证「串味 vs 合规」两条用例
+    除正文外无任何其他差异。"""
+    span = "窗外的雨忽然停了。"
+    i = MULTI_TEXT.find(span)
+    return {"text": json.dumps(
+        {"span_start": i, "span_end": i + len(span),
+         "evidence_text": span, "observed_content": observed_content},
+        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5,
+        "actual_model": "fx"}
+
 
 def _extract_text(text, client, *, strategy_id="ESV2-x", strategy_def=None):
     """本组专用抽取入口（允许自定义 text 与 strategy_def；不复用顶部
@@ -182,8 +210,7 @@ def test_multistrategy_positive_B_verified_by_its_def():
     reply = {"text": json.dumps(
         {"span_start": i, "span_end": i + len(span),
          "evidence_text": span,
-         "observed_content": "极简动作（敲桌沿）配合一句直戳的短问，"
-                             "不给任何铺陈，正是 B 的少动作直给疑问"},
+         "observed_content": OC_MATCH},
         ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
     c = _Capture(reply=reply)
     r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
@@ -220,24 +247,32 @@ def test_crossflavor_currently_passes_known_gap():
     策略 C（铺陈渲染），span 仍逐字合法。当前实现只核对 span 逐字 + 字段
     完整、从不比对 observed_content 与策略语义 → 实际放行（verified）。
     本例如实钉住该行为。这是已知缺口，期望行为见
-    test_crossflavor_should_be_blocked（xfail 钉住，注明机械口径为何不可分）。"""
-    span = "窗外的雨忽然停了。"
-    i = MULTI_TEXT.find(span)
-    reply = {"text": json.dumps(
-        {"span_start": i, "span_end": i + len(span),
-         "evidence_text": span,
-         "observed_content": "此处铺陈渲染到位：雨停的景物被层层叠加，"
-                             "烘托出欲说还休的情绪，是 C 策略的典型体现"},
-        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
-    c = _Capture(reply=reply)
+    test_crossflavor_should_be_blocked（xfail 钉住，注明机械口径为何不可分）。
+
+    负例身份 oracle（复审 BLOCK 的修法）：串味不串味不由散文注释自证，而是
+    1) 判据取自策略定义本身的名字（_name），不硬编码字串；
+    2) 同一 span/evidence/定义下只换正文做合规对照——串味与合规同样放行
+       才是「缺口」，若哪天只放行合规、拦下串味，本例即红。
+    变异推演：把夹具 OC_CROSS 换成 OC_MATCH（M1）→ name_C in observed_content
+    断言失败，本例变红（旧版此处只核"夹具字符串原样透传"，换成正例仍全绿）。"""
+    c = _Capture(reply=_reply(OC_CROSS))
     r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    # 负例身份 oracle：正文确实是「描述 C 而非描述 B」，判据来自定义本身
+    name_B, name_C = _name(DEF_B), _name(DEF_C)
+    assert name_C in r["observed_content"] and name_B not in r["observed_content"]
     # 实际行为：放行（现状）
     assert r["status"] == "verified"
     # 钉子：payload 带的是 B 的定义，而 observed_content 描述的是 C——
     # 离线机械口径下实现无法发现这处串味（这就是缺口所在）
     assert c.calls[0]["payload"]["strategy"]["abstract_operation"] == \
         DEF_B["abstract_operation"]
-    assert "铺陈渲染" in r["observed_content"]
+    # 合规对照：只换 observed_content（span/evidence/定义全同）→ 同样放行。
+    # 「串味」与「合规」在机械口径下不可分，这正是缺口的实证。
+    r_match = _extract_text(MULTI_TEXT, _Capture(reply=_reply(OC_MATCH)),
+                            strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    assert _name(DEF_B) in r_match["observed_content"] \
+        and _name(DEF_C) not in r_match["observed_content"]
+    assert r["status"] == r_match["status"] == "verified"
 
 
 @pytest.mark.xfail(strict=True,
@@ -249,17 +284,15 @@ def test_crossflavor_should_be_blocked():
     """②串味负例——**期望行为**（当前未实现，xfail 钉住）：
     给 B 的定义、observed_content 却描述 C → 应当 unverified（拦下）。
     当前实现做不到，故本例预期失败（xfail）。一旦引入模型判据或人工复审门，
-    本例将转为通过，届时须删除该 xfail 并据实改写交付文档。"""
-    span = "窗外的雨忽然停了。"
-    i = MULTI_TEXT.find(span)
-    reply = {"text": json.dumps(
-        {"span_start": i, "span_end": i + len(span),
-         "evidence_text": span,
-         "observed_content": "此处铺陈渲染到位：雨停的景物被层层叠加，"
-                             "烘托出欲说还休的情绪，是 C 策略的典型体现"},
-        ensure_ascii=False), "tokens_in": 10, "tokens_out": 5, "actual_model": "fx"}
-    c = _Capture(reply=reply)
+    本例将转为通过，届时须删除该 xfail 并据实改写交付文档。
+    前置身份 oracle 与 ② 同源（共用 OC_CROSS）：先确认输入确实串味，
+    再宣称缺口；输入被换成正例时本例的 xfail 声明就失去依据。"""
+    c = _Capture(reply=_reply(OC_CROSS))
     r = _extract_text(MULTI_TEXT, c, strategy_id="ESV2-B", strategy_def=dict(DEF_B))
+    name_B, name_C = _name(DEF_B), _name(DEF_C)
+    assert name_C in r["observed_content"] and name_B not in r["observed_content"]
+    assert c.calls[0]["payload"]["strategy"]["abstract_operation"] == \
+        DEF_B["abstract_operation"]
     # 期望行为：串味应被拦下
     assert r["status"] == "unverified"
 
