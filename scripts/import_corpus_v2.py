@@ -1,5 +1,9 @@
 """Phase 1.5 语料导入（v2 切分器 + integrity + 语料角色标注）。用法：
-python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明>
+python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明> [--caveats]
+
+`--caveats`（显式开关，默认关＝既有行为逐字不变）：按独立核查席三条 caveat
+硬化——卷首元数据剥离并记账、末段截断显式标记（integrity JSON "truncated"）、
+chapter 从章节标题行回填。逻辑在 app/corpus_import_v2.py（纯函数）。
 
 中断语义（审计《language-genome-code-audit-20260923》非阻断项）：大书每 BATCH 段
 提交一次，Ctrl-C / 崩溃 / WAL 锁失败都会留下**半本**——旧口径重跑只看 `Work.source`
@@ -12,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from app import db, segment_integrity as si, segmenter_v2  # noqa: E402
+from app import corpus_import_v2, db, segment_integrity as si, segmenter_v2  # noqa: E402
 from app.corpus import _read_text_loose  # noqa: E402
 from app.ids import new_id  # noqa: E402
 from app.models import Segment, Work  # noqa: E402
@@ -65,15 +69,18 @@ def _stored_texts(s, work_id: str) -> tuple[dict[int, str], int]:
     return have, dups
 
 
-def import_work(path: str, title: str, role: str) -> dict:
+def import_work(path: str, title: str, role: str, *, caveats: bool = False) -> dict:
     """导入一本书。返回 {status: imported|resumed|skipped, work_id, total, written}。
 
     分批提交中途炸掉只会留下 `import_state: partial` 的书（下游不得当完整本用），
-    下一次重跑补齐缺口；完整本重跑保持既有「已导入过」幂等跳过。"""
+    下一次重跑补齐缺口；完整本重跑保持既有「已导入过」幂等跳过。
+    caveats=True 时走 app.corpus_import_v2 的三条修复口径（默认 False＝旧行为）。"""
     text = _read_text_loose(Path(path))
-    chunks = segmenter_v2.make_segments_v2(text)
+    prep = corpus_import_v2.prepare_import(text, title=title) if caveats else None
+    chunks = prep.chunks if prep is not None else segmenter_v2.make_segments_v2(text)
     total = len(chunks)
     src = f"file:{path}"
+    parsed_author = (prep.front_matter.get("author") if prep else None) or None
     with db.session() as s:
         w = s.query(Work).filter_by(source=src).first()
         if w is not None and (not is_ours(w) or import_state(w) == COMPLETE):
@@ -81,12 +88,14 @@ def import_work(path: str, title: str, role: str) -> dict:
             return {"status": "skipped", "work_id": w.id, "total": total, "written": 0}
 
         if w is None:                       # 新书：先落 partial 标记的行，段写完才翻 complete
-            w = Work(id=new_id("WK"), title=title, author=None, source=src,
+            w = Work(id=new_id("WK"), title=title, author=parsed_author, source=src,
                      note=_note(role, PARTIAL))
             s.add(w)
             s.flush()
             have: dict[int, str] = {}
         else:
+            if parsed_author and not w.author:   # 元数据作者回填（仅当原值为空，不覆盖）
+                w.author = parsed_author
             have, dups = _stored_texts(s, w.id)
             stale = dups or any(o >= total or have[o] != chunks[o] for o in have)
             if stale:
@@ -106,11 +115,14 @@ def import_work(path: str, title: str, role: str) -> dict:
         written = elig = 0
         for i, ch in enumerate(chunks):
             flags = si.analyze(ch, ordinal=i)
+            if prep is not None and prep.last_truncated and i == total - 1:
+                flags = {**flags, "truncated": True}   # 末段截断显式标记（JSON 键，非新列）
             if flags["eligible"]:
                 elig += 1
             if i in have:                   # 续跑：已提交的段不重写，ordinal 不冲突
                 continue
             s.add(Segment(id=new_id("SEG"), work_id=w.id, ordinal=i, text=ch,
+                          chapter=prep.chapters[i] if prep is not None else None,
                           n_sentences=0, n_chars=len(ch), seg_version=2,
                           integrity=json.dumps(flags, ensure_ascii=False)))
             written += 1
@@ -118,6 +130,9 @@ def import_work(path: str, title: str, role: str) -> dict:
                 s.commit()
         anchors = {"corpus_role": role, "segmenter": 2,
                    "eligible_rate": round(elig / max(1, total), 3)}
+        if prep is not None:
+            anchors["front_matter"] = prep.front_matter      # 元数据头逐行记账（不静默丢弃）
+            anchors["last_truncated"] = prep.last_truncated
         w.anchors = json.dumps(anchors, ensure_ascii=False)
         w.note = _note(role, COMPLETE)      # 收尾提交：状态与全量段落同一事务落定
         s.commit()
@@ -129,12 +144,14 @@ def import_work(path: str, title: str, role: str) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:]) if argv is None else list(argv)
-    if len(argv) != 3:
-        print("用法: python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明>",
-              file=sys.stderr)
+    caveats = "--caveats" in argv
+    pos = [a for a in argv if a != "--caveats"]
+    if len(pos) != 3:
+        print("用法: python scripts/import_corpus_v2.py <绝对路径> <标题> <角色说明> "
+              "[--caveats]", file=sys.stderr)
         return 2
     db.init_db()
-    import_work(argv[0], argv[1], argv[2])
+    import_work(pos[0], pos[1], pos[2], caveats=caveats)
     return 0
 
 
