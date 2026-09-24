@@ -34,6 +34,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 # 与 tests/test_k2_contrast_extract.py 相同的模块加载序（dataclass 回查
 # sys.modules 的坑），先登记再 exec。
@@ -51,6 +52,7 @@ _spec_c.loader.exec_module(k2c)
 
 from app import db                                        # noqa: E402
 from app.models import Segment, Work, WorkSource          # noqa: E402
+from registry_anchor import anchor as _anchor             # noqa: E402  登记行内容锚同源
 
 # 种子人类侧段：≥80 字（长度窗）、六门信号词全零命中（无信号基线）、
 # 「林昭」出现 3 次（scene_keys 可机械派生）。
@@ -109,6 +111,7 @@ def seeded(tmp_path):
         s.flush()
         s.add(WorkSource(work_id=w.id, canonical_work_id=w.id,
                          source_type="human_fiction", text_version="corpus-v1",
+                         text_sha256=_anchor(s, w.id),
                          purpose_basis="test", identity_purposes=["research"],
                          license_purposes=[], license_basis="test",
                          metadata_status="verified", metadata_basis="test"))
@@ -248,9 +251,15 @@ def _seed_src_work(s, *, source_type=None, text_version=None,
         s.add(Segment(work_id=w.id, ordinal=i, text=HUMAN_TEXT,
                       text_clean=HUMAN_TEXT, role=None,
                       n_sentences=3, n_chars=len(HUMAN_TEXT)))
+    # 锚必须在段可见之后算：SessionLocal 是 autoflush=False，未 flush 的
+    # pending 段不会被 _work_sha256 的查询看到 ⇒ 锚恒 None，登记行带着空锚
+    # 落库，而 clean_tree 的占位登记只补「无登记行」的作品 ⇒ 每条各报一次
+    # anchor_drift（跨文件假红根因的另一半）。
+    s.flush()
     if register:
         s.add(WorkSource(work_id=w.id, canonical_work_id=w.id,
                          source_type=source_type, text_version=text_version,
+                         text_sha256=_anchor(s, w.id),
                          purpose_basis="test", identity_purposes=["research"],
                          license_purposes=[], license_basis="test",
                          metadata_status="verified", metadata_basis="test"))

@@ -92,6 +92,11 @@ def _seed() -> tuple[str, str, dict[str, str]]:
                           n_sentences=1, integrity='{"src_ok": true}')
             s.add(seg)
             s.flush()
+            # 段建在登记之后——按当前库内容重算锚，否则 verify 判 anchor_drift
+            # （登记时锚对应 0 段=NULL，内容一变即漂移；单一哈希来源见
+            # tests/registry_anchor.py）。
+            from registry_anchor import refresh as _refresh
+            _refresh(s, w.id)
             return seg
 
         st = ExpressionStrategyV2(

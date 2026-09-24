@@ -30,6 +30,7 @@ from app.models import (Work, WorkSource,              # noqa: E402
                         ExpressionStrategyV2, StrategyCondition,
                         StrategyInstance, Segment)
 import knowledge_seed as KS                            # noqa: E402
+from registry_anchor import anchor as _anchor          # noqa: E402  登记行内容锚同源
 
 
 def _register_world(s, wid, *, author_id=None,
@@ -45,13 +46,15 @@ def _register_world(s, wid, *, author_id=None,
     ws0 = s.query(WorkSource).filter_by(work_id=wid).first()
     if ws0 is not None:
         ws0.source_type = source_type
+        ws0.text_sha256 = _anchor(s, wid)     # 复用行也要带锚（同源）
         s.flush()
         if author_id is not None:
             ws0.author_id = author_id
             s.flush()
         return wid
     s.add(WorkSource(work_id=wid, canonical_work_id=wid, source_type=source_type,
-                     text_version="corpus-v1", purpose_basis="test",
+                     text_version="corpus-v1", text_sha256=_anchor(s, wid),
+                     purpose_basis="test",
                      identity_purposes=["research"], license_purposes=[],
                      license_basis=None, metadata_status="verified",
                      metadata_basis="test"))

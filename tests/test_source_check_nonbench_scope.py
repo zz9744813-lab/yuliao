@@ -30,11 +30,13 @@ from sqlalchemy import or_ as _or
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import source_check as sc                                    # noqa: E402
 from app import db                                           # noqa: E402
 from app.models import (Candidate, ControlledCorruption,     # noqa: E402
                         Experiment, Frame, Segment, Work, WorkSource)
+from registry_anchor import anchor as _anchor, refresh as _refresh  # noqa: E402
 
 TEXT = "他把茶盏搁回去，半天没有说话，外头风声一阵紧过一阵。"
 
@@ -48,6 +50,7 @@ def _seed_work(s, *, source_type=None, register=True, label="t-scnb") -> str:
     if register:
         s.add(WorkSource(work_id=w.id, canonical_work_id=w.id,
                          source_type=source_type, text_version="corpus-v1",
+                         text_sha256=_anchor(s, w.id),
                          purpose_basis="test", identity_purposes=["research"],
                          license_purposes=[], license_basis="test",
                          metadata_status="verified", metadata_basis="test"))
@@ -61,6 +64,7 @@ def _seed_seg(s, wid, *, role=None, text_clean=TEXT, integrity="{}") -> str:
                   integrity=integrity)
     s.add(seg)
     s.flush()
+    _refresh(s, wid)          # 段建在登记之后——重算锚，别让 work_registry 判漂移
     return seg.id
 
 
