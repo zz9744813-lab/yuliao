@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from fastapi.testclient import TestClient          # noqa: E402
 
 from knowledge_seed import seed_knowledge          # noqa: E402
+from registry_anchor import anchor as _anchor      # noqa: E402  登记行内容锚同源
 from app import db, knowledge_query as kq          # noqa: E402
 from app.main import app                           # noqa: E402
 
@@ -228,6 +229,7 @@ def test_excluded_source_types_union_adds_caller_items(seeded):
             s.flush()
             s.add(WorkSource(work_id="WK-OT", canonical_work_id="WK-OT",
                              source_type="other", text_version="corpus-v1",
+                             text_sha256=_anchor(s, "WK-OT"),
                              purpose_basis="t", identity_purposes=[],
                              license_purposes=[], license_basis=None,
                              metadata_status="verified", metadata_basis="t"))

@@ -25,11 +25,13 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 
 import register_work_sources as REG        # noqa: E402
 import verify_work_registry as VRW          # noqa: E402
 from app import db                         # noqa: E402
 from app.models import Author, Genre, Segment, Work, WorkSource  # noqa: E402
+from registry_anchor import anchor as _anchor  # noqa: E402  单一哈希来源
 
 TXT = "夜风把窗纸吹得鼓了一下，屋里静得能听见灯芯燃烧的声音，他坐着没有说话。"
 
@@ -52,9 +54,9 @@ def _mk(work_id, title, *, v2_of=None, source="file:test", n_segs=2, role=None):
 
 def _reg(work_id, canonical, source_type, *, author_id=None, genre_ids=None,
          license_purposes=None, license_basis=None):
-    """手工造登记行（含内容锚——锚复核必须过）。"""
+    """手工造登记行（含内容锚——锚复核必须过；锚与占位路径同源）。"""
     with db.session() as s:
-        sha, n = VRW._work_sha256(s, work_id)
+        sha = _anchor(s, work_id)
         old = s.query(WorkSource).filter_by(work_id=work_id).first()
         if old:
             s.delete(old)
