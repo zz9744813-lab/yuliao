@@ -223,13 +223,22 @@ def llm_repair_batch(texts: list[str]) -> list[str | None]:
 
 # ── 主流程 ─────────────────────────────────────────────────────
 
-def run_rules(limit: int = 0, only_dirty: bool = False) -> dict:
-    """全库过一遍规则清洗，写 text_clean。"""
+def run_rules(limit: int = 0, only_dirty: bool = False, dry_run: bool = False) -> dict:
+    """全库过一遍规则清洗，写 text_clean。
+
+    dry_run=True：只统计会改多少段，**不写任何行、不 commit**（2026-09-24 主控
+    误伤实录：--rules 分支曾无视 --dry-run 静默覆写生产库 text_clean）。
+    """
     with db.session() as s:
         q = s.query(Segment)
         if limit:
             q = q.limit(limit)
         segs = q.all()
+        if dry_run:
+            # 口径与真跑逐字对齐：真写时每个 text_clean 为空的段都会落一次写，
+            # 预报必须数同一批段——不许"估"。
+            n = sum(1 for seg in segs if not seg.text_clean)
+            return {"dry_run": True, "would_clean": n, "checked": len(segs)}
         n = 0
         for seg in segs:
             if seg.text_clean:
@@ -242,17 +251,23 @@ def run_rules(limit: int = 0, only_dirty: bool = False) -> dict:
     return {"rule_cleaned": n}
 
 
-def polish(limit: int = 0) -> dict:
+def polish(limit: int = 0, dry_run: bool = False) -> dict:
     """对**已清洗文本**再跑一遍规则。
 
     为什么要单独一步：规则表会随样本增加（本轮就补了 `阅读请锁定{　}` 与空花括号），
     而 LLM 还原的结果**不能**用原文重跑规则覆盖（那会把刚还原好的拼音打回去）。
     顺序必须是：规则 → LLM → 规则（polish）。
+
+    dry_run=True：只统计会改多少段，**不写任何行、不 commit**。
     """
     with db.session() as s:
         segs = s.query(Segment).filter(Segment.text_clean.isnot(None)).all()
         if limit:
             segs = segs[:limit]
+        if dry_run:
+            n = sum(1 for seg in segs
+                    if clean_rules(seg.text_clean) != (seg.text_clean or ""))
+            return {"dry_run": True, "would_clean": n, "checked": len(segs)}
         n = 0
         for seg in segs:
             c = clean_rules(seg.text_clean)
@@ -340,7 +355,7 @@ def report() -> None:
     print(f"原始带伪影 {dirty_raw}（{dirty_raw / total:.2%}）；清洗后仍坏 {still}")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--rules", action="store_true")
@@ -350,16 +365,24 @@ def main() -> None:
     ap.add_argument("--conc", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     db.init_db()
     if args.scan or args.report:
         report()
         return
     if args.rules:
+        if args.dry_run:
+            print("DRY-RUN：只统计，未写入任何数据、未 commit —— 以下数字是预报，不是真跑结果")
+            print(json.dumps(run_rules(limit=args.limit, dry_run=True), ensure_ascii=False))
+            return
         print(json.dumps(run_rules(limit=args.limit), ensure_ascii=False))
         report()
         return
     if args.polish:
+        if args.dry_run:
+            print("DRY-RUN：只统计，未写入任何数据、未 commit —— 以下数字是预报，不是真跑结果")
+            print(json.dumps(polish(limit=args.limit, dry_run=True), ensure_ascii=False))
+            return
         print(json.dumps(polish(limit=args.limit), ensure_ascii=False))
         report()
         return
