@@ -32,16 +32,21 @@ REVIEW_merge_plan.md）：靠"事后看文本归类"判 S1/S2（delta_new / delt
   引用了此指称），证明两段写的是同一个场景；空集 ⇒ 拒。
 - 门3 gate_length_ratio：len(ai)/len(human) ∈ [1.2, 6.0]，出界 ⇒ 拒
   （S2 的"注水"必须有可测的密度变化；S1 的"摊开"同理）。
-- 门4 gate_anti_copy（anti-copy 反抄写，独立审查 REVISE 反例1/2）：S1 类对
-  若 human 侧全文被 ai 侧**连续包含** ⇒ 拒（"照抄+贴标签"式假对照）。
-  口径是**连续包含**而非模糊相似（合法扩写本就共享大量子串，LCS 相似度
-  阈值必然误杀）：
-  ① ai 侧以 human 侧全文为前缀开头（其后直接接续标签句）⇒ 拒；
+- 门4 gate_anti_copy（anti-copy 反抄写，独立审查 REVISE 反例1/2；R1 复审
+  加固）：S1 类对若 human 侧全文被 ai 侧**连续包含** ⇒ 拒（"照抄+贴标签"
+  式假对照）。口径是**连续包含**而非模糊相似（合法扩写本就共享大量子串，
+  LCS 相似度阈值必然误杀）：
+  ① ai 侧剔标点归一后以 human 侧归一全文为**前缀或后缀**（归一后
+    `a_norm.startswith(h_norm) or a_norm.endswith(h_norm)` ⇒ 拒，不设
+    长度容错——一个前导空格或"标签在前、照抄在后"都逃不掉）；
   ② human 侧剔标点后全文作为连续子串出现在 ai 侧、且命中长度 ≥
-  MIN_COPY_LEN（默认 40 字，模块常量，测试可覆写——短于该长度的偶合不判
-  照抄）⇒ 拒。理由含 `anti-copy` 与命中片段长度。S2（拆拍/注水）按构造
-  **保留原句**，human 侧本就整段出现在 ai 侧，不适用本门——该形态的双卡
-  风险由门5 拦。
+    MIN_COPY_LEN（默认 40 字，模块常量，测试可覆写——短于该长度的偶合不判
+    照抄）⇒ 拒。剔标口径用 `str.isspace()` 覆盖全部 Unicode 空白
+    （U+3000/NBSP 等），不用 ASCII 空白白名单。理由含 `anti-copy` 与命中
+    片段长度。S2（拆拍/注水）按构造**保留原句**，human 侧本就整段出现在
+    ai 侧，不适用本门——该形态的双卡风险由门5 拦。机械口径的**已知残余**：
+    human 归一全文中部被一字扰动再接标签句，连续包含判据两头落空即逃逸
+    （作者明确拒绝 LCS 模糊匹配——会误杀合法扩写；回归 xfail 钉住）。
 - 门5 gate_cross_strategy（cross-strategy 跨策略互斥，独立审查 REVISE
   反例1 根因）：一对必须**只**在声明的那条策略下放行——用**对方策略**的
   特征词表把 ai 侧再评一遍：本方词表与对方词表**同时**命中 ⇒ 拒（理由带
@@ -110,20 +115,26 @@ MIN_LEN_RATIO = 1.2
 MAX_LEN_RATIO = 6.0
 
 # 门4 反抄写口径（独立审查 REVISE 反例1：ai 侧 = human 侧逐字全文 + 尾缀
-# 标签句）。判据是**连续包含**而非模糊相似——LCS 相似度阈值会误杀合法扩写
-# （同一场景的人名、动作词本就共享大量子串）。两条判据并列，任一命中即拒：
-#   ① ai 侧以 human 侧全文为前缀开头（其后直接接续标签句的典型照抄形态；
-#     反例1 的 human 全文 36 字 < 40，仍由此条判拒——前缀照抄不设长度容错）；
+# 标签句；R1 复审：原文 startswith 一个前导空格即逃逸、"标签在前+照抄在后"
+# 非前缀即逃逸）。判据是**连续包含**而非模糊相似——LCS 相似度阈值会误杀合
+# 法扩写（同一场景的人名、动作词本就共享大量子串）。两条判据并列，任一命中
+# 即拒：
+#   ① ai 侧剔标归一后以 human 侧归一全文为**前缀或后缀**（照抄+贴标签、
+#     贴标签在前、带空白照抄等形态同判；归一后逐字相等即前缀且为后缀，
+#     不设长度容错——反例1 的 human 剔标 31 字 < 40，仍由此条判拒）；
 #   ② human 侧剔标点后全文作为连续子串出现在 ai 侧，且命中长度 ≥
 #     MIN_COPY_LEN（短于该长度的偶合不判照抄）。
+# 已知残余：归一全文**中部**一字扰动 + 短 human，两条判据同时落空即逃逸
+# （拒绝上模糊匹配；回归 xfail 钉住）。
 # 模块常量，测试可整体覆写（monkeypatch 模块属性）。
 MIN_COPY_LEN = 40
 
-# 剔标点字符集（中英常用标点与空白；只影响门4 的包含判定，别处不用）
+# 剔标点字符集（中英常用标点；空白一律按 str.isspace() 剔除，覆盖
+# U+3000/NBSP 等全部 Unicode 空白，不用 ASCII 白名单；
+# 只影响门4 的包含判定，别处不用）
 _PUNCT_CHARS = set(
     "，。！？；：、…—·～（）《》〈〉「」『』“”‘’"
-    ",.;:!?()<>[]{}'\"`~^%|\\"
-    " \t\n\r")
+    ",.;:!?()<>[]{}'\"`~^%|\\")
 
 # ---------------------------------------------------------- 按构造标注
 # 独立审查 REVISE（F:/agi/_scratch/worktrees/mergeplan/REVIEW_merge_plan.md）：
@@ -194,8 +205,11 @@ def _hit_count(text: str, words) -> int:
 
 
 def _strip_punct(text: str) -> str:
-    """剔除标点与空白（门4 口径：只比内容字，逗号差异不算改写）。"""
-    return "".join(ch for ch in (text or "") if ch not in _PUNCT_CHARS)
+    """剔除标点与空白（门4 口径：只比内容字，逗号/空白差异不算改写、也不给
+    照抄留逃逸口）。空白按 str.isspace() 判——U+3000、NBSP 等全部 Unicode
+    空白一并剔除，不用 ASCII 白名单（R1 复审：白名单漏全角空格）。"""
+    return "".join(ch for ch in (text or "")
+                   if ch not in _PUNCT_CHARS and not ch.isspace())
 
 
 def content_tokens(text: str) -> set:
@@ -417,22 +431,29 @@ def gate_anti_copy(pair: ContrastPair) -> tuple[bool, list[str]]:
     的"照抄+贴标签"双卡风险由门5（cross-strategy）拦。
 
     两条判据并列（任一命中即拒，理由含 `anti-copy` 与命中片段长度）：
-    ① ai 侧以 human 侧全文为前缀开头（`ai.startswith(human)`，照抄+贴标签
-      的典型形态，不设长度容错——审查反例1 的 human 全文 36 字 < 40 仍判拒）；
-    ② human 侧剔标点后全文作为连续子串出现在 ai 侧（`h_norm in a_norm`，
-      去掉首尾空白/标点后仍如此），且命中长度 ≥ MIN_COPY_LEN——短于该
-      长度的偶合不判照抄。"""
+    ① 剔标点归一后 ai 侧以 human 侧全文为**前缀或后缀**（`a_norm.startswith
+      (h_norm) or a_norm.endswith(h_norm)`，归一口径：前导/尾随空白与标点
+      差异不打断照抄判定，"标签在前、照抄在后"同判；不设长度容错——审查
+      反例1 的 human 全文 36 字（剔标 31）< 40 仍判拒）；
+    ② human 侧剔标点后全文作为连续子串出现在 ai 侧（`h_norm in a_norm`），
+      且命中长度 ≥ MIN_COPY_LEN——短于该长度的偶合不判照抄。
+
+    已知残余（R1 复审 B5，钉为显式残余）：human 归一全文**中部**被一字
+    扰动再接标签句，两条判据同时落空即逃逸——连续包含口径固有极限，
+    拒绝为此上 LCS 模糊匹配（会误杀合法扩写），回归 xfail 钉住。"""
     if OP_LABEL[pair.op] != "S1":
         return True, []
     h, a = pair.human_text or "", pair.ai_text or ""
     h_norm = _strip_punct(h)
     if not h_norm:
         return False, ["anti-copy 不可判: human_text 剔标后无内容（fail-closed）"]
-    if a.startswith(h):
-        return False, [f"anti-copy 照抄+贴标签: ai 侧以 human 全文为前缀开头"
-                       f"（命中片段 {len(h)} 字，其后直接接续标签句）——"
-                       f"逐字照抄只贴标签，不构成对照"]
-    if h_norm in _strip_punct(a):
+    a_norm = _strip_punct(a)
+    if a_norm.startswith(h_norm) or a_norm.endswith(h_norm):
+        edge = "前缀" if a_norm.startswith(h_norm) else "后缀"
+        return False, [f"anti-copy 照抄+贴标签: ai 侧剔标归一后以 human 全文为"
+                       f"{edge}（原文 {len(h)} 字，归一命中片段 {len(h_norm)} 字"
+                       f"，归一口径不设长度容错）——逐字照抄只贴标签，不构成对照"]
+    if h_norm in a_norm:
         n = len(h_norm)
         if n >= MIN_COPY_LEN:
             return False, [f"anti-copy 照抄+贴标签: human 侧全文作为连续子串"

@@ -15,11 +15,23 @@ strategy_instances 快照**全量重算**——不是第二份真值，重建即
   missing = 其余（proposed 等——当前写入流不产 proposed，恒 0 起步）；
 - counter_examples = contradicts 知识边数（knowledge_links 尚无写入流，
   0 起步，不虚构）；
-- extras.by_root_work = 每根作品 verified 数（集中度的原始事实）。
+- extras.by_root_work = 每根作品 verified 数（集中度的原始事实）；
+- extras.usable_evidence = 按**服务端封底 policy**（空 policy）的 K3 可用
+  证据数（调用方收窄不含）——compute() 直接调 kq._evidence_for(s, id, {})
+  复用 K3 全部剔除链（无登记/基准段/来源类型/用途/文本版本/镜像去重），
+  **不本地复刻**（复审实跑：本地只复刻 benchmark 一道时 SSR 6 vs K3 真实
+  ev_count 2，虚高 3 倍）；计数单位 = 唯一 (根作品, span) 区间，与 K3
+  evidence_count 同口径（非实例数）；
+- extras.benchmark_stripped = 该策略实例中被 K3 以基准段来源
+  （:benchmark_source）剔除的实例数——valid 仍按既有式计（含基准段
+  实例），usable_evidence 与 valid 的差即两套口径的如实差距。
 
 用法：
-    python scripts/strategy_stats_rebuild.py            # dry-run（零库写）
+    python scripts/strategy_stats_rebuild.py            # dry-run（零数据写）
     python scripts/strategy_stats_rebuild.py --apply    # 重建（写库）
+
+注意「零数据写」≠ 零 DDL：main() 会调 db.init_db()，对旧 schema 真库
+可能执行 DDL（建缺失表/列）；dry-run 本身不插/不删/不改任何数据行。
 """
 from __future__ import annotations
 
@@ -34,6 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import db                                    # noqa: E402
+from app import knowledge_query as kq                 # noqa: E402
 from app.models import (ExpressionStrategyV2, StrategyInstance,  # noqa: E402
                         StrategyStats, WorkSource)
 
@@ -77,6 +90,14 @@ def compute(s) -> list[dict]:
         fp_src = "|".join(
             f"{r.id}:{r.status}:{r.span_start}-{r.span_end}:{r.evidence_sha256}"
             for r in rows)
+        # usable_evidence：直接复用 K3 唯一口径（只读查询，不本地复刻剔除
+        # 链）；取第 2 返回值 ev_count——计数单位 = 唯一 (根作品, span) 区间，
+        # 与 K3 evidence_count 同口径。空 policy = 服务端封底默认
+        # （excluded_source_types 并集封底 / allowed_text_versions 交集封顶
+        # 全按 kq.DEFAULT_*），调用方收窄不含——这里是统计投影，如实按
+        # 封底口径报告。benchmark_stripped 从 stripped 的 :benchmark_source
+        # 后缀条目计数。
+        _, ev_count, stripped = kq._evidence_for(s, st.id, {})
         out.append({
             "strategy_id": st.id, "strategy_key": st.strategy_key,
             "strategy_version": st.version,
@@ -86,6 +107,9 @@ def compute(s) -> list[dict]:
             "attempts": len(rows), "valid": n_valid, "rejected": n_rej,
             "missing": len(rows) - n_valid - n_rej, "counter_examples": 0,
             "by_root_work": by_root,
+            "usable_evidence": ev_count,
+            "benchmark_stripped": sum(
+                1 for t in stripped if t.endswith(":benchmark_source")),
             "data_fingerprint": hashlib.sha256(
                 fp_src.encode("utf-8")).hexdigest(),
         })
@@ -110,7 +134,9 @@ def run(apply: bool) -> dict:
                     genres=r["genres"], attempts=r["attempts"],
                     valid=r["valid"], rejected=r["rejected"],
                     missing=r["missing"], counter_examples=0,
-                    extras={"by_root_work": r["by_root_work"]}))
+                    extras={"by_root_work": r["by_root_work"],
+                            "usable_evidence": r["usable_evidence"],
+                            "benchmark_stripped": r["benchmark_stripped"]}))
             s.commit()
             out["applied"] = len(stats)
         return out

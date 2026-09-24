@@ -33,6 +33,44 @@ from .models import (ExpressionStrategyV2, Segment, StrategyCondition,
 # 查询默认只出**合格**知识（方案 §4.4：hypothesis 不自动作为 v2 已验证
 # 查询结果；K3 行「K1/K2 合格知识可用」）
 ELIGIBLE_STATUS = frozenset({"verified"})
+# 按策略版本分桶的合格口径（8→2 卡合并方案 docs/策略卡合并方案_20260923.md：
+# 合并后的 v2 卡须**独立验收**通过才进查询——升格动作发生在上游写侧，
+# 查询侧只读、绝不代为放宽）。
+#
+# 纪律：**hypothesis 不在任何版本的合格集里**，除非上游把该行 status 显式
+# 升格为 verified。两个版本当前同集合 ⇒ 默认口径与合并前逐字一致；分桶
+# 存在的意义是让「v1 老口径」与「v2 已独立验收」在收据里可对账，且日后
+# 任一侧收口/放宽只改这一处（证据侧常量另在 ELIGIBLE_INSTANCE_STATUS，
+# 会审四轮已注明两处口径须同步）。
+ELIGIBLE_STATUS_BY_VERSION: dict[str, frozenset[str]] = {
+    "1": frozenset({"verified"}),
+    "2": frozenset({"verified"}),
+}
+# 库里出现契约外 version（脏数据）时的兜底口径=当前默认口径，不猜放宽
+DEFAULT_ELIGIBLE_VERSION = "1"
+
+
+def eligible_statuses(version: str | int | None = None) -> frozenset[str]:
+    """合格 status 集合（可审计的单一入口；默认=当前口径 {"verified"}）。
+
+    `version=None` → 默认口径（与合并前完全一致）；`version` 为策略行
+    的 version（int 或 str 同物）→ 该版本的口径；契约外版本落到
+    DEFAULT_ELIGIBLE_VERSION 的兜底集合。返回 frozenset——调用方不可
+    就地改这个门禁。"""
+    if version is None:
+        return ELIGIBLE_STATUS
+    return ELIGIBLE_STATUS_BY_VERSION.get(str(version),
+                                          ELIGIBLE_STATUS_BY_VERSION[
+                                              DEFAULT_ELIGIBLE_VERSION])
+
+
+def _norm_versions(versions) -> frozenset[str] | None:
+    """versions 参数归一：None=全部版本（行为不变）；集合按 str 比对。"""
+    if versions is None:
+        return None
+    return frozenset(str(v) for v in versions)
+
+
 ELIGIBLE_OBSERVATION = frozenset({"observed", "replicated"})
 # 证据侧同口径（会审四轮：硬编码 status="verified" 与策略层常量两处口径，
 # 放宽 replicated 时只改一处会静默漏掉另一处）
@@ -306,10 +344,17 @@ def _condition_pipeline(s, strategy_id: int, requirements: dict
     return None, comps, uncertain
 
 
-def query_knowledge(policy: dict, s) -> dict:
+def query_knowledge(policy: dict, s, *,
+                    versions: set[str] | None = None) -> dict:
     """K3-A 主查询：固定过滤顺序，返回 matched/empty/unsupported/unavailable。
 
-    只读：不 commit/add——写入归 K3-B 冻结流程（freeze_package）。"""
+    只读：不 commit/add——写入归 K3-B 冻结流程（freeze_package）。
+
+    `versions`（关键字参数）= 只在这些策略版本里查（如 {"2"} 只取合并后的
+    v2 卡）；**None（不传）= 全部版本，行为与加参前逐字一致**。版本只收窄
+    候选集，不放宽门禁：每个候选仍按**自身版本**的合格集
+    （eligible_statuses(st.version)）判 status，hypothesis 行在任何
+    `versions` 取值下都不出现。"""
     limits = policy.get("limits") or {}
     cap = _as_int(limits.get("candidate_cap", CANDIDATE_CAP_MAX),
                    "candidate_cap")
@@ -332,8 +377,10 @@ def query_knowledge(policy: dict, s) -> dict:
     try:
         snap = fingerprint_knowledge(s)
         requirements = dict(policy.get("semantic_requirements") or {})
+        ver_set = _norm_versions(versions)
         strategies = [r for r in s.query(ExpressionStrategyV2).all()
-                      if r.status in ELIGIBLE_STATUS
+                      if (ver_set is None or str(r.version) in ver_set)
+                      and r.status in eligible_statuses(r.version)
                       and r.observation_status in ELIGIBLE_OBSERVATION]
         rejected, kept = [], []
         for st in strategies:              # ①→⑤ 固定顺序
