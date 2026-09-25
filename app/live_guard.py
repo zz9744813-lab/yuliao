@@ -36,9 +36,17 @@
 - 残留窄窗 2：自定义 LG_DATA_DIR 的 live 进程锁在别处，不在 pytest 侧
   观察窗内（pytest 盯生产锁位）。
 - 释放边界：atexit 覆盖正常/异常退出与键盘中断；**进程被硬杀**
-  （SIGKILL/断电）锁无法自释放，留下含 pid 的完整死锁，不自动清（误清
-  会把真跑叠上去），拒绝信息给出锁路径，人工核实后清除（纪律：宁可
-  拦，不可猜）。
+  （SIGKILL/断电/任务管理器结束/taskkill /F）锁无法自释放，留下含
+  pid 的完整死锁。处置（2026-09-25 事故收口，死 pid 自愈，见
+  docs/live锁死pid自愈_20260925.md）：
+  - 锁内容合法 + 锁内 pid 在本机进程表中**确定不存在** + 锁文件 mtime
+    超过自愈宽限 CORRUPT_LOCK_GRACE_SECONDS → 判定为崩溃残留，记
+    warning 并**自愈接管**（unlink 后 O_EXCL 重建/放行，与损坏锁超宽
+    限同口径）——硬杀残留不再需要人工删锁；
+  - pid 查询失败/权限不足/平台无法核验/pid 仍存在（含被系统复用给无
+    关进程）→ 一律按「有人持有」硬拦，拒绝信息给出锁路径，人工核实
+    后清除。纪律：宁可拦，不可猜——**只有 pid 确定不存在才自愈**，
+    绝不放宽成“看着像残留就删”。
 - 损坏锁处置口径（2026-09-23 收口选定）：锁文件存在但内容不可解析
   （空文件/半截 JSON，典型于 O_EXCL 建文件成功与 json.dump 写完之间进
   程被杀）——宽限期 CORRUPT_LOCK_GRACE_SECONDS（15s）内**按「存在」
@@ -59,6 +67,7 @@
 from __future__ import annotations
 
 import datetime
+import errno
 import json
 import os
 import time
@@ -118,18 +127,94 @@ def _warn_corrupt_stale(p: Path, held: dict) -> None:
         f"按崩溃残留处理（原内容：{held}）：{p}", stacklevel=2)
 
 
-def _acquire_lock(p: Path, info: dict) -> None:
-    """在 p 处 O_EXCL 原子取锁；「损坏且超宽限」的残留锁自愈接管一次。
+def _pid_looks_live(pid: int) -> bool:
+    """pid 在本机进程表中是否（可能）存活。
 
-    被他人持有（含宽限内的损坏锁）→ SystemExit 拒绝，不排队。"""
+    用标准库 os.kill(pid, 0) 做存在性核验（零信号不发信号，纯查进程表；
+    POSIX 与 Windows 均支持，**不新增 psutil 依赖**）。只把**确定不存在**
+    的 pid 判为死亡，其余一律按「存在」拦：
+    - ProcessLookupError / Python 0 号信号查无进程 → 确定不存在（POSIX）；
+    - Windows（OpenProcess 查 pid）：不存在的 pid → OSError errno=EINVAL
+      (22) / winerror=87（ERROR_INVALID_PARAMETER）——实测本机死 pid 与
+      越界 pid 均此表现，故按「确定不存在」处理；存在但受保护的系统 pid
+      → ACCESS_DENIED(5)/EACCES → 按「存在」；
+    - 查询失败/权限不足/平台不支持/pid 超长不可转译（OverflowError）/
+      其它意外 → 一律 True（按存在拦，宁可拦，不可猜）。
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError as e:
+        if e.errno == errno.EINVAL or getattr(e, "winerror", None) == 87:
+            return False                       # Windows 死 pid（表外/已回收）
+        return True                            # ACCESS_DENIED 等 → 存在/不可知
+    except Exception:                          # noqa: BLE001 —— OverflowError 等
+        return True
+    return True
+
+
+def _dead_pid_and_stale(p: Path, info: dict | None) -> bool:
+    """合法 JSON 锁 + 锁内 pid **确定不存在** + 锁文件 mtime 超自愈宽限
+    → 硬杀/断电崩溃残留（2026-09-25 事故收口）。
+
+    防误判条件（与损坏锁超宽限**同口径**，二选一取 mtime 宽限）：
+    - 条件一：pid 在本机进程表中确定不存在——「pid 不存在就不可能有持
+      有者」，这是比损坏锁（无 pid 可核、只能靠 mtime 猜）更强的证据；
+    - 条件二：锁文件 mtime 距现在超过 CORRUPT_LOCK_GRACE_SECONDS。新落
+      盘的锁文件（宽限内）一律按「存在」拦——宁可拦不可猜，避免把刚写
+      完的锁、或刚被人为重现的锁立刻当残留清掉；该宽限与损坏锁共用同
+      一常量，判定行为完全同构。
+    宽限取 mtime 而非 started_at：started_at 是写入方自报时间戳，可随意
+    编造（如锁内写远古时间）且依赖解析；mtime 是文件系统事实，与损坏锁
+    口径的取证完全一致。
+    pid 复用风险（取舍后接受）：pid 被系统复用给无关进程 → 判定偏
+    「存在」→ 只会更保守地拦（不删），绝不误删活锁；「pid 存在但不是
+    我方进程」不另做核验（进程创建时间等需额外系统接口且各有精度问
+    题，宁可不猜）。
+    """
+    if not info or info.get("corrupt_lock"):
+        return False
+    pid = info.get("pid")
+    if not isinstance(pid, int):
+        return False                           # 无 pid 可核 → 交给既有损坏锁口径
+    try:
+        if _pid_looks_live(pid):
+            return False                       # pid 仍存在（含复用）→ 有人持有
+    except Exception:                          # noqa: BLE001 —— 查询抛错 → 按存在
+        return False
+    try:
+        age = time.time() - p.stat().st_mtime
+    except OSError:
+        return False                           # 文件消失/不可 stat → 不删
+    return age > CORRUPT_LOCK_GRACE_SECONDS
+
+
+def _warn_dead_pid_stale(p: Path, held: dict) -> None:
+    warnings.warn(
+        f"[live/pytest 互斥守卫] 死 pid 残留：锁内容合法但 pid "
+        f"{held.get('pid')} 在本机进程表中已不存在、且锁文件超自愈宽限"
+        f"{CORRUPT_LOCK_GRACE_SECONDS:g}s——判定为硬杀/断电崩溃残留，"
+        f"可自愈接管（原内容：{held}）：{p}", stacklevel=2)
+
+
+def _acquire_lock(p: Path, info: dict) -> None:
+    """在 p 处 O_EXCL 原子取锁；「损坏且超宽限」或「死 pid 且超宽限」的
+    残留锁自愈接管一次。
+
+    被他人持有（含宽限内的损坏/死 pid 锁）→ SystemExit 拒绝，不排队。"""
     p.parent.mkdir(parents=True, exist_ok=True)
     for attempt in range(2):
         try:
             fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
             held = _info_at(p)
-            if attempt == 0 and _corrupt_and_stale(p, held):
-                _warn_corrupt_stale(p, held)   # 自愈接管：unlink 后重试一次
+            if attempt == 0 and (_corrupt_and_stale(p, held)
+                                 or _dead_pid_and_stale(p, held)):
+                if _corrupt_and_stale(p, held):
+                    _warn_corrupt_stale(p, held)   # 损坏残留：unlink 后重试一次
+                else:
+                    _warn_dead_pid_stale(p, held)  # 死 pid 残留：unlink 后重试一次
                 try:
                     p.unlink()
                 except FileNotFoundError:
@@ -224,13 +309,19 @@ def refuse_if_live_running(context: str, *, watch: Path | None = None) -> None:
     测试 DATA_DIR 覆写成临时目录，盯 config.DATA_DIR 会看不到生产 live）；
     live 类入口复检自身锁位时传 watch=lock_path()。
     损坏锁：宽限内按「存在」拦（宁可拦不可猜）；超宽限判定为崩溃残留，
-    记 warning 并按「不存在」放行（自愈接管由随后的取锁完成）。"""
+    记 warning 并按「不存在」放行（自愈接管由随后的取锁完成）。
+    死 pid 锁（2026-09-25 收口）：内容合法 + pid 确定不存在 + 超宽限 → 同
+    样判为崩溃残留放行（硬杀残留不再 brick 套件）；pid 查询失败/权限不
+    足/pid 仍存在 → 一律按「存在」拦。"""
     p = prod_lock_path() if watch is None else watch
     held = _info_at(p)
     if held is None:
         return
     if _corrupt_and_stale(p, held):
         _warn_corrupt_stale(p, held)
+        return
+    if _dead_pid_and_stale(p, held):
+        _warn_dead_pid_stale(p, held)
         return
     raise SystemExit(
         f"[live/pytest 互斥守卫] live 实跑进行中（{held}）——拒绝 {context}"
