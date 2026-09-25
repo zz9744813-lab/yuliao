@@ -231,6 +231,14 @@ def evaluate_predicate(condition: StrategyCondition, requirements: dict,
     return "true" if requirements[condition.dimension] == want else "false"
 
 
+def _book_canonical_work_id(s, book_id) -> str | None:
+    if not book_id:
+        return None
+    row = (s.query(WorkSource.canonical_work_id)
+           .filter(WorkSource.work_id == book_id).first())
+    return row[0] if row is not None else None
+
+
 def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, list[str]]:
     """①来源与版本过滤（固定顺序第一步）：取该策略的合格证据区间。
 
@@ -251,6 +259,9 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     reg = {r.work_id: r for r in s.query(WorkSource)
            .filter(WorkSource.work_id.in_(work_ids)).all()} if work_ids else {}
     sp = policy.get("source_policy") or {}
+    require_same_book = sp.get("require_same_book_evidence") is True
+    query_root = (_book_canonical_work_id(s, policy.get("book_id"))
+                  if require_same_book else None)
     # 服务端硬拦下限（审计 P1「客户端能放宽来源硬拦」，2026-09-23）：
     # · 排除集=**并集**（DEFAULT ∪ 调用方集）——调用方传什么都换不掉
     #   fixture/synthetic/commentary 的默认排除，只能在其上附加；
@@ -264,6 +275,7 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     allowed_tv = (DEFAULT_ALLOWED_TEXT_VERSIONS & frozenset(caller_tv)
                   ) if caller_tv else DEFAULT_ALLOWED_TEXT_VERSIONS
     stripped: list[str] = []
+    seen_intervals: set[tuple[str, int, int]] = set()
     intervals: set[tuple[str, int, int]] = set()
     refs: list[dict] = []
     for ins in instances:
@@ -279,8 +291,14 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
         if ins.text_version not in allowed_tv:
             stripped.append(f"{ins.id}:text_version:{ins.text_version}"); continue
         key = (r.canonical_work_id, ins.span_start, ins.span_end)
-        if key in intervals:
+        if key in seen_intervals:
             stripped.append(f"{ins.id}:mirror_dedup"); continue   # 镜像重复不计
+        seen_intervals.add(key)
+        if require_same_book and r.canonical_work_id != query_root:
+            reason = ("query_book_no_registry" if query_root is None
+                      else "cross_work")
+            stripped.append(f"{ins.id}:{reason}")
+            continue
         intervals.add(key)
         refs.append({"instance_id": ins.id, "canonical_work": r.canonical_work_id,
                      "span": [ins.span_start, ins.span_end],
@@ -377,6 +395,7 @@ def query_knowledge(policy: dict, s, *,
     try:
         snap = fingerprint_knowledge(s)
         requirements = dict(policy.get("semantic_requirements") or {})
+        query_root = _book_canonical_work_id(s, policy.get("book_id"))
         ver_set = _norm_versions(versions)
         strategies = [r for r in s.query(ExpressionStrategyV2).all()
                       if (ver_set is None or str(r.version) in ver_set)
@@ -401,7 +420,9 @@ def query_knowledge(policy: dict, s, *,
             comps["evidence_count"] = ev_count
             comps["scope_specificity"] = SCOPE_SPECIFICITY.get(st.scope, 0)
             kept.append({"strategy": st, "refs": refs, "comps": comps,
-                          "uncertain": uncertain})
+                          "uncertain": uncertain,
+                          "roots": sorted({ref["canonical_work"]
+                                           for ref in refs})})
         # ④ 去重：同 key 保最高 version——被挤掉的低版本必须显式落
         # rejected（不然它静默消失，对账少一条）
         by_key: dict[str, dict] = {}
@@ -441,7 +462,15 @@ def query_knowledge(policy: dict, s, *,
                 "score_components": item["comps"],
                 "uncertain_items": item["uncertain"],
                 "evidence": item["refs"],       # 只含 id/根作品/span——无原文
+                "evidence_cross_work": (
+                    query_root is not None
+                    and any(root != query_root for root in item["roots"])),
+                "evidence_root_works": item["roots"],
                 "for_context": False}
+            if query_root is None:
+                entry["evidence_cross_work_note"] = (
+                    "query book WorkSource registration missing; "
+                    "cross-work status not determined")
             if i < ctx_n and chars < max_chars:
                 entry["for_context"] = True
                 chars += len(st.abstract_operation or "")
@@ -498,6 +527,21 @@ def capabilities(s) -> dict:
                         "union：调用方附加禁用用途",
                     "allowed_text_versions":
                         "intersection：实际生效=服务端默认∩调用方集，只可收窄；空/不传=用默认集",
+                }},
+            "evidence_provenance": {
+                "package_fields": {
+                    "evidence_cross_work":
+                        "true 当查询作品登记行的 canonical_work_id 与该策略选中证据的任一根作品不同；缺登记行时为 false",
+                    "evidence_root_works":
+                        "该策略选中证据的 canonical 根作品 id，去重并按字典序排序",
+                    "evidence_cross_work_note":
+                        "查询作品缺 WorkSource 登记行时出现，说明未判跨作品",
+                },
+                "require_same_book_evidence": {
+                    "location": "source_policy.require_same_book_evidence",
+                    "default": False,
+                    "semantics":
+                        "true 时仅保留 canonical 根作品等于查询作品登记根的证据；缺登记行则无可保留证据。false/缺省不增加作品过滤",
                 }}}
 
 
