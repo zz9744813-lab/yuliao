@@ -509,7 +509,10 @@ _BLIND_CAP = 512
 _BLIND_LAST_CAP = 512    # 索引上限**不得大于** _BLIND_CAP：否则留下"rid→已逐出 pid"的悬挂条目
                           # （会审 qwen 席：那种悬挂条目过去会走进 legacy 且照常入库）
 _BLIND_MAP: dict[str, dict] = {}       # presentation_id → entry
-_BLIND_LAST: dict[str, str] = {}       # review_id → 最近一次 presentation_id（老前端不传 pid 时兜底）
+_BLIND_LAST: dict[str, str] = {}       # review_id → 最近一次 presentation_id。
+                                       # 整改后（无 pid ⇒ 409，见 verdict）**不再有读取方**：
+                                       # 猜义路径 _blind_latest 已删，这里只为落盘格式
+                                       # （blind_presentations.json 的 "last" 键）与审计保留。
 _BLIND_LOCK = threading.Lock()
 _BLIND_LOADED_FOR: str | None = None   # 已装载的呈现文件路径（懒加载哨兵，见 _blind_ensure_loaded）
 _SERVE_CURSOR: dict[str, int] = {}   # 批次轮换游标（进程内缓存；真值落盘，见下）
@@ -617,7 +620,8 @@ def _load_cursor(key: str) -> int:
     except FileNotFoundError:
         cur = 0
     except Exception as e:
-        logger.warning("游标文件读不出（%s）：%s，本次从 0 开始", key, e)
+        # 会审建议：告警必须带**文件路径**——只给批次键定位不到是哪个数据目录坏了
+        logger.warning("游标文件读不出（%s，key=%s）：%s，本次从 0 开始", _cursor_file(), key, e)
         cur = 0
     _SERVE_CURSOR[key] = cur
     return cur
@@ -713,18 +717,6 @@ def _blind_get(presentation_id: str) -> dict | None:
     _blind_ensure_loaded()
     with _BLIND_LOCK:
         return _BLIND_MAP.get(presentation_id)
-
-
-def _blind_latest(review_id: str) -> tuple[str | None, dict | None]:
-    """**单次持锁**取出「最近一次呈现」的 pid 与映射。
-
-    会审 glm 席：分两次读（先 pid 再映射）中间若另一请求重端同题，
-    落库的 presentation_id 与真正用于解释的映射就不是同一份，事后甄别会被误导。
-    """
-    _blind_ensure_loaded()
-    with _BLIND_LOCK:
-        pid = _BLIND_LAST.get(review_id)
-        return (pid, _BLIND_MAP.get(pid)) if pid else (None, None)
 
 
 @app.get("/review/batch/{batch}")
@@ -1084,31 +1076,35 @@ def verdict(review_id: str, body: Verdict):
                     raise HTTPException(409, "本次呈现不存在或已被清理（超出保留上限，或来自另一个实例）："
                                              "请从「已判回顾」重新端题后再判")
         else:
-            # 老客户端不带 pid 的过渡路径：**单次持锁**同时取 pid 与映射；命中
-            # ⇒ 照常解读但记 binding=legacy_review_id 留痕，便于事后甄别。
-            pid_used, served = _blind_latest(review_id)
-            if served is not None:
-                binding = "legacy_review_id"
-            else:
-                # A01 二轮（知识化调整方案 §1.1，2026-09-21）：连最近一份呈现都
-                # 没有时——禁止按「最近一次呈现」猜含义（23:14 复现：旧页面提交
-                # 被按新映射误译成 candidate，HTTP 200 打到最贵的偏好标签上）。
-                # 带 A/B 语义（winner A/B）的提交一律 409 拒收；仅批注且该题
-                # 存在呈现行时同样拒收（归属无法确定）。pre-A01 历史题（从无
-                # 任何呈现）投 tie/both_bad/cant_judge 仍走「存原始值」路径——
-                # 那是如实存未知，不是猜。
+            # A01 二轮（知识化调整方案 §1.1，2026-09-21）：旧客户端不带
+            # pid——禁止按「最近一次呈现」猜含义（23:14 复现：旧页面提交
+            # 被按新映射误译成 candidate，HTTP 200 打到最贵的偏好标签上）。
+            # 凡带 A/B 语义（winner A/B 或有批注）的提交必须呈现绑定：
+            # 该题存在任何呈现行而无 pid → 409 拒收，让客户端重取题重提；
+            # 完全没有呈现行的 pre-A01 历史题保留「存原始值」unresolved
+            # 路径（那是如实存未知，不是猜）。
+            # 会审整改（2026-09-25，qwen 席 [严重]）：本分支**不再调用**
+            # _blind_latest——"留痕"不是防线，且内存映射存活/逐出两种状态
+            # 下同一提交的命运不同（服务端重启时序决定客户端结局）。
+            if body.winner in ("A", "B") or body.annotations:
+                has_presentations = s.query(
+                    ReviewPresentation.id).filter_by(
+                    review_id=review_id).first() is not None
+                if has_presentations:
+                    raise HTTPException(
+                        409, "提交未带呈现绑定（页面过期/旧客户端）——"
+                             "A/B 含义无法确定，禁止按最近呈现猜测；"
+                             "请重新取题后再提交")
                 if body.winner in ("A", "B"):
+                    # 从无呈现行的历史题：A/B 依旧依赖一个从未存在过的排列，
+                    # 存原始值同样是"不知道按哪套解读"的脏判定（口径钉在
+                    # test_pending_never_served_now_rejected）→ 拒收。
+                    # 仅 tie/both_bad/cant_judge、及无归属语义的纯批注，
+                    # 才走上面注释说的「存原始值」unresolved 路径（binding=none）。
                     raise HTTPException(
                         409, "提交未带呈现绑定（页面过期/旧客户端），且本服务已无该题的呈现映射"
                              "（未端出/重启过/已被清理）——A/B 含义无法确定，禁止按最近呈现猜义；"
                              "请重新端题后再提交")
-                if body.annotations and s.query(
-                        ReviewPresentation.id).filter_by(
-                        review_id=review_id).first() is not None:
-                    raise HTTPException(
-                        409, "提交未带呈现绑定（页面过期/旧客户端）——"
-                             "批注的 A/B 归属无法确定，禁止按最近呈现猜测；"
-                             "请重新取题后再提交")
         human_first = served.get("human_first") if served else None
         prev = r.human_verdict if r.status == "done" else None
         # 改判纪律（2026-09-16）：已判题允许覆盖（改判），但只有映射还活着才能把
@@ -1161,7 +1157,7 @@ def verdict(review_id: str, body: Verdict):
             "human_was_a": human_first,
             # A01：本次判定按哪次呈现解读（审计追溯：排列/文本指纹见 review_presentations）
             "presentation_id": pid_used,
-            "presentation_binding": binding,   # presentation_id | legacy_review_id | none
+            "presentation_binding": binding,   # presentation_id | none
             "ctx_mode": served.get("ctx_mode") if served else None,
             "reasons": body.reasons,
             "annotations": anns,

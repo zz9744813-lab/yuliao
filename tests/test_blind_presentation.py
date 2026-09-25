@@ -11,7 +11,8 @@
   3. pid 未知/过期 → 409 拒绝（不回退猜测）；
   4. pid 与 review_id 不匹配（串页提交）→ 400 拒绝；
   5. 页面回传的两侧文本指纹与冻结值不符 → 409（冻结字段必须被真的用上，不是死字段）；
-  6. 不带 pid 的老客户端仍能提交，但记录标 presentation_binding=legacy_review_id；
+  6. 不带 pid 的提交**一律不按最近呈现猜义**（会审 qwen 席 [严重] 整改，A01 二轮口径）：
+     有呈现行 ⇒ 409 拒收；从无呈现行的历史题投非 A/B 仍走「存原始值」binding=none；
   7. 呈现**落盘**：清内存后重新装载（模拟重启）旧 pid 仍可提交；文件损坏则备份 .corrupt 并告警；
   8. 落盘文件走 config.DATA_DIR（测试期即 conftest 的临时目录），不碰仓库真实状态（A04），
      `_reset()` 连文件一起删，测试之间不靠"整体覆盖写"间接隔离（会审两席）。
@@ -190,17 +191,41 @@ def test_presentation_review_mismatch_rejected():
     assert r.status_code == 400, f"串页提交必须 400，实得 {r.status_code}"
 
 
-def test_legacy_submit_without_pid_is_marked():
+def test_legacy_submit_without_pid_is_never_guessed():
+    """会审 qwen 席 [严重] 整改：无 pid 分支恢复 A01 二轮契约（56ddc43 口径）。
+
+    移植版曾把无 pid 提交经 _blind_latest **接受**并只记 binding=legacy_review_id——
+    「最近呈现」正是被重新端题后的**新**映射，旧页面提交会被误译并 HTTP 200 写进
+    最贵的偏好标签；留痕不是防线，且内存映射存活/重启逐出后同一提交命运不同
+    （客户端结局取决于服务端重启时序）。现在钉死：
+      · 该题存在任何呈现行 + 无 pid + 带 A/B 语义（winner A/B 或有批注）⇒ 409，不落库；
+      · 完全没有呈现行的 pre-A01 历史题 + 非 A/B 判定 ⇒ 200「存原始值」，binding=none
+        （那是如实存未知，不是猜）。
+    """
     _reset()
     _seed("EXP-A5", "bp")
-    item = _present("EXP-A5")
-    r = _judge(item, _human_side_of(item), pid=None)      # 老前端：不带 pid
-    assert r.status_code == 200
+    item = _present("EXP-A5")            # 内存映射存活——旧实现正是在这条路径上猜义放行
+    assert api_mod._blind_get(item["presentation_id"]) is not None
+    for side in ("A", "B"):
+        r = _judge(item, side, pid=None)     # 老前端：不带 pid
+        assert r.status_code == 409, \
+            f"有呈现行+无 pid+winner={side} 必须 409（禁止按最近呈现猜义），实得 {r.status_code}"
+        assert "呈现绑定" in r.text
+    # 批注同样携带 A/B 归属语义：tie + 批注、无 pid ⇒ 一样拒收
+    ann = {"side": "A", "start": 0, "end": 5, "text": SEG_TEXT[:5], "kind": "用词"}
+    r = _judge(item, "tie", pid=None, annotations=[ann])
+    assert r.status_code == 409, "有呈现行+无 pid+带批注 ⇒ 归属无法确定，必须 409"
     hv = _stored(item["review_id"])
-    assert hv["winner_resolved"] == "human"
-    assert hv["presentation_binding"] == "legacy_review_id", "老路径必须留痕，便于事后甄别"
-    assert hv["presentation_id"] == item["presentation_id"], \
-        "legacy 也要记下**实际被猜的**那一份呈现，否则事后无法定位污染源"
+    assert not hv.get("winner_raw"), "被拒收的提交不许落库（留痕≠防线，这里根本不许留）"
+    # pre-A01 历史题（该题从无呈现行）：非 A/B 判定仍走「存原始值」unresolved 路径
+    old_rids = _seed("EXP-A5B", "bp5b")
+    r2 = client.post(f"/review/{old_rids[0]}/verdict",
+                     json={"winner": "tie", "reasons": [], "annotations": []})
+    assert r2.status_code == 200, f"从无呈现的历史题投 tie 应存原始值，实得 {r2.status_code}"
+    hv2 = _stored(old_rids[0])
+    assert hv2["presentation_binding"] == "none"
+    assert hv2["presentation_id"] is None
+    assert hv2["winner_raw"] == "tie" and hv2["winner_resolved"] == "tie"
 
 
 def test_presentations_survive_restart():
@@ -270,7 +295,8 @@ def test_latest_pid_index_is_capped(monkeypatch):
 
 
 def test_legacy_without_any_presentation_rejected():
-    """连最近一份呈现都没有时，老路径也**不许猜**：直接 409（口径与代码一致，会审两席）。"""
+    """从无呈现行的历史题投 A/B：A/B 依赖一个从未存在过的排列——同样 409，
+    不落"原始 A/B"（整改后无 pid 分支与内存映射存活与否无关，会审两席）。"""
     _reset()
     ids = _seed("EXP-A10", "bp")
     r = client.post(f"/review/{ids[0]}/verdict",
