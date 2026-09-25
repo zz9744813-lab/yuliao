@@ -55,46 +55,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from app import db, limits  # noqa: E402
 from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import Segment  # noqa: E402
+from _conc_guard import check_conc as _check_conc, pool_workers as _pool_workers  # noqa: E402  # 并发闸唯一实现（2026-09-25 去重）
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 
 RULES_PV = "clean_rules_v1"
 LLM_PV = "clean_llm_v1"
 LLM_MODEL = "z-ai/glm-5.3"
 
-
-def _pool_workers(conc: int, models=()) -> int:
-    """线程池 worker 数的运行时兜底（上限真源：app/limits.py::MAX_CONCURRENCY）。
-
-    CLI 闸（_check_conc）已对越界**报错退出**；本函数管的是绕过命令行、
-    从别处直接调 `run_llm(conc=...)` 的路径：越界按上限截断并打印（不静默）；
-    模型里命中单账号 CLI 通道（`app.gateway.is_serial_model`——判定口径只有
-    这一处，不许在本脚本自己比字符串前缀）→ workers 恒 1 并打印「串行强制」。
-    界内正常值原样返回、零额外输出：默认路径与改前逐字一致。
-    """
-    requested = max(1, int(conc))
-    workers = min(requested, limits.MAX_CONCURRENCY)
-    hits = [m for m in models if is_serial_model(m)]
-    if hits:
-        print(f"[conc] 串行强制：命中单账号 CLI 模型 {hits} → workers=1（请求 conc={conc}）",
-              flush=True)
-        return 1
-    if workers != requested:
-        print(f"[conc] 越界截断：conc={conc} → workers={workers}"
-              f"（上限 app/limits.MAX_CONCURRENCY={limits.MAX_CONCURRENCY}）", flush=True)
-    return workers
-
-
-def _check_conc(ap, value: int, flag: str) -> None:
-    """`--conc` 硬上界闸：超界**响亮报错退出**（parser.error → SystemExit(2)）。
-
-    为什么报错退出不静默 clamp：命令行数值是操作者亲手声明的意图，静默改写
-    会让人以为在 200 并发实跑 16——对费用/限速护栏而言，意图错位比失败危险。
-    要更高并发只能先改真源（app/limits.py）并重新定价，不是往命令行塞数字。
-    """
-    if value > limits.MAX_CONCURRENCY:
-        ap.error(f"{flag}={value} 超过上限 {limits.MAX_CONCURRENCY}"
-                 f"（单一真源 app/limits.py::MAX_CONCURRENCY）；"
-                 f"本脚本拒绝静默 clamp，越界即报错退出")
 
 # ── 规则 ───────────────────────────────────────────────────────
 # 每条都来自实测样本，不做没见过的推测式清洗
@@ -368,7 +335,7 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False,
             s.commit()
 
     t0 = time.time()
-    workers = _pool_workers(conc, [LLM_MODEL])
+    workers = _pool_workers(conc, [LLM_MODEL], serial_check=is_serial_model)
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(one, batches))
     print(f"完成：llm_ok={_stat['llm_ok']} failed={_stat['llm_failed']} "
