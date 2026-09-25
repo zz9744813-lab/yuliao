@@ -31,9 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config, db
 from app.context_ablation import scene_context
+from app.gateway import is_serial_model  # noqa: E402
 from app.judges import PREFERENCE_PROMPT_VERSION, judge_preference
 from app.models import Candidate, JudgeRun, Segment, Work
 import preflight_models as pf
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 # 语料 → 实验（各语料 v2 段 + S/M/L 双抽取器产物）
 CORPORA = [
@@ -141,14 +143,25 @@ def _report() -> None:
                 print(f"{label:24s}{m.split('/')[-1]:14s}{n:4d}{rate:>13s}{ph:9d}{other:>14d}")
 
 
+def _run_pool(jobs: list, conc: int, judges) -> None:
+    """执行本脚本全部评委调用；worker 数由 pool_workers 兜底（上限截断+串行强制）。"""
+    workers = pool_workers(conc, judges, serial_check=is_serial_model)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: run_one(*j), jobs):
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--per-corpus", type=int, default=20)
     ap.add_argument("--judges", default=DEFAULT_JUDGES)
-    ap.add_argument("--conc", type=int, default=5)
+    ap.add_argument("--conc", type=int, default=5,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"--judges 命中单账号 CLI 通道时强制串行 workers=1）")
     ap.add_argument("--seed", type=int, default=20260914)
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在任何库副作用之前：越界响亮报错退出
 
     judges = [m.strip() for m in args.judges.split(",") if m.strip()]
     print(f"跨语料偏差探针 / prompt={PREFERENCE_PROMPT_VERSION} / 每语料 {args.per_corpus} 对 "
@@ -174,9 +187,7 @@ def main() -> None:
     _counter["first_error"] = ""          # 本轮失败原因只属于本轮
 
     print(f"\n共 {len(jobs)} 次调用…")
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: run_one(*j), jobs):
-            pass
+    _run_pool(jobs, args.conc, judges)
     print(f"完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
     if _counter["failed"]:
         print(f"       首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")

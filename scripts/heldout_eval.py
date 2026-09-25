@@ -36,9 +36,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config, db
 from app.context_ablation import scene_context
+from app.gateway import is_serial_model  # noqa: E402
 from app.judges import PROMPT_VARIANTS, judge_preference
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
 import preflight_models as pf
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 DB = Path(__file__).resolve().parent.parent / "data" / "language_genome.db"
 EXP = "EXP-0911-B82D"
@@ -574,7 +576,8 @@ def _run_reverse(items: list[dict], conc: int, exp: str | None = None) -> None:
             texts, _ = scene_context(s, human)
             ctx_by_cid[x["cid"]] = (chr(10) * 2).join(texts)
     print(f"  待跑 {len(jobs)} 次调用")
-    with ThreadPoolExecutor(max_workers=conc) as pool:
+    workers = pool_workers(conc, JUDGES, serial_check=is_serial_model)   # 运行时兜底：上限截断 + 串行强制
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         for _ in pool.map(
                 lambda j: run_one(j[0], ctx_by_cid[j[0]], j[2], j[3],
                                   force_human_a=j[4], pv_suffix=REVERSE_SUFFIX,
@@ -586,6 +589,14 @@ def _run_reverse(items: list[dict], conc: int, exp: str | None = None) -> None:
     report(items, batch="（正序+反序）", reverse=True)
 
 
+def _run_pool(jobs: list, conc: int, exp) -> None:
+    """main 主流程判定池；worker 数由 pool_workers 兜底（上限截断+串行强制）。"""
+    workers = pool_workers(conc, JUDGES, serial_check=is_serial_model)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: run_one(*j, exp=exp), jobs):
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--batch", default=BATCH, help="批次名（r25 / s30 …）")
@@ -593,7 +604,9 @@ def main() -> None:
                     help="含建批前判过的题（那些进过推导集，非留出）")
     ap.add_argument("--no-epoch", action="store_true",
                     help="不做建批时刻过滤（s30 这类全新批次用）")
-    ap.add_argument("--conc", type=int, default=4)
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"JUDGES 名单命中单账号 CLI 通道时强制串行 workers=1）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--variants", default="v3,v4",
                     help="要跑的口径，逗号分隔（v3,v4,defect）。默认 v3,v4 保持行为不变。")
@@ -602,6 +615,7 @@ def main() -> None:
     ap.add_argument("--exp", default=None,
                     help="实验号；默认由批次标签反查（跨语料批次属于别的实验，写死 B82D 会加载到 0 条）")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在一切库/网络副作用之前：越界响亮报错退出
     args.variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for _v in args.variants:
         if _v not in PROMPT_VARIANTS:
@@ -662,9 +676,7 @@ def main() -> None:
 
     jobs = [(x["cid"], ctx_by_cid[x["cid"]], m, v)
             for m in JUDGES for v in args.variants for x in items]
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: run_one(*j, exp=exp), jobs):
-            pass
+    _run_pool(jobs, args.conc, exp)
     print(f"完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
     if _counter["failed"]:
         print(f"       首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")

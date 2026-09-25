@@ -48,8 +48,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import heldout_eval as he  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 from app import db  # noqa: E402
-from app.gateway import chat  # noqa: E402
+from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import Candidate, Frame, JudgeRun, ReviewItem, Segment  # noqa: E402
 
 PV = "frame_constraint_v1"
@@ -212,13 +213,24 @@ def report() -> None:
             print(f"      {k:16s} n={n2:3d}  违规率 {v2/n2:.2f}  心理解释率 {p2/n2:.2f}")
 
 
+def _run_pool(jobs: list, conc: int, models) -> None:
+    """执行本脚本全部判定调用；worker 数由 pool_workers 兜底（上限截断+串行强制）。"""
+    workers = pool_workers(conc, models, serial_check=is_serial_model)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: one(*j), jobs):
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", default="moonshotai/kimi-k3")
-    ap.add_argument("--conc", type=int, default=4)
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"--models 命中单账号 CLI 通道时强制串行 workers=1）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--report", action="store_true")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在 db.init_db() 之前：越界响亮报错退出
     db.init_db()
     if args.report:
         report()
@@ -233,9 +245,7 @@ def main() -> None:
     # 批量防呆①（P0 死 id 事故）：池外模型的表现是 failed=整批，与"没货"同形
     pf.require_models(models, source="frame_violation")
     jobs = [(it, m) for m in models for it in items]
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: one(*j), jobs):
-            pass
+    _run_pool(jobs, args.conc, models)
     print(f"完成：ok={_cnt['ok']} failed={_cnt['failed']} skip={_cnt['skip']}")
     report()
 

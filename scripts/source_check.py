@@ -86,11 +86,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
-from app.gateway import bind_experiment, chat  # noqa: E402
+from app.gateway import bind_experiment, chat, is_serial_model  # noqa: E402
 from app.models import Candidate, ControlledCorruption, Frame, Segment, WorkSource  # noqa: E402
 from app import config  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：模型名预检
 import k2_extract_backfill as k2b  # noqa: E402  # K2 试点来源口径唯一入口（单源复用，import 不到即 fail-closed）
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY，越界报错退出；串行纪律复用 gateway.is_serial_model）
 
 # nonbench 排除集与 K2 侧同源（单源复用）：k2_extract_backfill 经
 # `from app import knowledge_query as KQ` 消费 `DEFAULT_EXCLUDED_SOURCE_TYPES`
@@ -469,7 +470,8 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
             _count("unverified")
 
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
+    workers = pool_workers(conc, [MODEL], serial_check=is_serial_model)   # 运行时兜底：绕过 CLI 直调 run() 也开不出越界池
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(one, todo))
     done = (f"完成：ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
             f"unverified={_stat['unverified']}（{(time.time() - t0) / 60:.1f} 分钟）")
@@ -534,9 +536,12 @@ def main() -> None:
                           "收窄是唯一允许的方向：结果恒 ⊆ 该 scope 自己的选取集，"
                           "绝不用它扩宽到不合规来源（给不合规/无关 work_id = "
                           "空集，不报错也不放行）。"))
-    ap.add_argument("--conc", type=int, default=8)
+    ap.add_argument("--conc", type=int, default=8,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"{MODEL} 等单账号 CLI 通道命中时强制串行 workers=1）")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在任何库/网络副作用之前：越界响亮报错退出
     db.init_db()
     if args.scan:
         scan()

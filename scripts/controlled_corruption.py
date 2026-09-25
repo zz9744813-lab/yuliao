@@ -57,11 +57,12 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import config, db  # noqa: E402
-from app.gateway import bind_experiment, chat  # noqa: E402
+from app.gateway import bind_experiment, chat, is_serial_model  # noqa: E402
 from app.models import (Candidate, ControlledCorruption, Experiment, Frame,  # noqa: E402
                         ReviewItem, Segment, Work, exclude_corpus_v2_segments)
 from app.prompt_render import render  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 sys.path.insert(0, str(ROOT / "scripts"))
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
@@ -999,7 +1000,8 @@ def recheck(*, verify_model: str, conc: int, batch: str = "", dry_run: bool = Fa
                     _stat["rejected"] += 1
             s.commit()
 
-    with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
+    workers = pool_workers(conc, [verify_model], serial_check=is_serial_model)   # 运行时兜底：上限截断 + 串行强制
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(one, todo))
     print(f"重查完成：剔除 {_stat['rejected']} 条")
     return dict(_stat)
@@ -1068,7 +1070,8 @@ def reverify(*, verify_model: str, conc: int, dry_run: bool = False,
                 print(f"  ...{out['checked']}/{len(rows)}（救回 {out['rescued']}）")
         return "ok"
 
-    with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
+    workers = pool_workers(conc, [verify_model], serial_check=is_serial_model)   # 运行时兜底：上限截断 + 串行强制
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(_one, rows))
     return out
 
@@ -1122,7 +1125,9 @@ def judge_corruptions(*, models: list[str], variant: str = "v4", conc: int = 6,
         print(f"串行模型（单账号共享额度，禁止并发）：{serial}")
     jobs = [(x["cid"], ctx_by_cid[x["cid"]], m, variant) for m in par for x in items]
     if jobs:
-        with ThreadPoolExecutor(max_workers=max(1, conc)) as pool:
+        # 串行模型已由 split_models 移出池外；并行池仍要过上限兜底
+        workers = pool_workers(conc, par, serial_check=is_serial_model)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             for _ in pool.map(lambda j: he.run_one(*j, pv_suffix=NEW1_SUFFIX, exp=exp), jobs):
                 pass
     for m in serial:                     # agy 等：严格顺序，逐个跑完再下一个
@@ -1421,7 +1426,9 @@ def main() -> None:
     ap.add_argument("--works", default="", help="逗号分隔作品标题关键词；空=全部")
     ap.add_argument("--gen-model", default=DEFAULT_GEN)
     ap.add_argument("--verify-model", default=DEFAULT_VERIFY)
-    ap.add_argument("--conc", type=int, default=4)
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"--gen/--verify/--judge-models 命中单账号 CLI 通道时强制串行 workers=1）")
     ap.add_argument("--seed", type=int, default=20260918)
     ap.add_argument("--ctx-limit", type=int, default=2)
     ap.add_argument("--min-chars", type=int, default=60)
@@ -1446,6 +1453,7 @@ def main() -> None:
     ap.add_argument("--judge-limit", type=int, default=0)
     ap.add_argument("--variant", default="v4")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在任何库/网络副作用之前：越界响亮报错退出
 
     # 批量防呆①（P0 死 id 事故）：会发 LLM 调用的分支，开跑前先把模型名问一遍网关。
     if not args.dry_run:
@@ -1496,7 +1504,8 @@ def main() -> None:
         # （2026-09-18 实测踩到）。所以这里补一步 L 帧抽取，幂等。
         _ensure_frames(seg_ids, exp_id)
         bind_experiment(exp_id)
-        with ThreadPoolExecutor(max_workers=max(1, args.conc)) as ex:
+        workers = pool_workers(args.conc, [args.gen_model, args.verify_model], serial_check=is_serial_model)   # 运行时兜底
+        with ThreadPoolExecutor(max_workers=workers) as ex:
             list(ex.map(lambda sp: run_one(sp, ctypes2, exp_id=exp_id,
                                            gen_model=args.gen_model,
                                            verify_model=args.verify_model,
@@ -1575,7 +1584,8 @@ def main() -> None:
 
     bind_experiment(exp_id)
     t0 = time.time()
-    with ThreadPoolExecutor(max_workers=max(1, args.conc)) as ex:
+    workers = pool_workers(args.conc, [args.gen_model, args.verify_model], serial_check=is_serial_model)   # 运行时兜底
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(lambda sp: run_one(sp, ctypes, exp_id=exp_id,
                                        gen_model=args.gen_model,
                                        verify_model=args.verify_model,
