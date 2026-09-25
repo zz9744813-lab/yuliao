@@ -85,8 +85,10 @@ class WorkSource(Base):
     canonical_work_id: Mapped[str] = mapped_column(String(32), index=True)
     author_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # 已核对作者；NULL=未核对
     genre_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    # 来源类型：fixture / synthetic / commentary / human_fiction
-    source_type: Mapped[str] = mapped_column(String(20), index=True)
+    # 来源类型：fixture / synthetic / commentary / human_fiction / 含
+    # production_nonbenchmark_ 前缀族（如 production_nonbenchmark_k2v2，长 28）；
+    # 列宽 64 留余量——SQLite 不校验长度，换 Postgres/MySQL 必须能装下。
+    source_type: Mapped[str] = mapped_column(String(64), index=True)
     # 文本版本标签（corpus-v1 / corpus-v2-mirror / test-fixture…）；
     # seg_version 是**切分**版本，不等于「属于 corpus v2 镜像」——镜像判定
     # 只认 works.v2_of（方案 §4.1 明令）
