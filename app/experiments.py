@@ -17,11 +17,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from sqlalchemy.orm import Session
 
-from . import config, jobs
+from . import config, jobs, limits, residual_sem
 from .db import session
 from .frames_prompts import EXTRACT_V2, PROMPT_VERSION
 from .frames_schema import MODEL_BY_GRAN, frame_prompt_text
-from .gateway import bind_experiment, chat
+from .gateway import bind_experiment, chat, is_serial_model
 from .ids import new_exp_id, new_id
 from .judges import (ADVERSARIAL_PROMPT_VERSION, NATURALNESS_PROMPT_VERSION,
                      SEMANTIC_PROMPT_VERSION, judge_adversarial, judge_naturalness,
@@ -136,11 +136,60 @@ def _segments(s: Session, exp: Experiment) -> list[Segment]:
     return s.query(Segment).filter(Segment.id.in_(ids)).all()
 
 
-def _pool_map(exp: Experiment, items, fn, desc: str = "") -> list:
-    """线程池执行 fn(item)；fn 自己开自己的 session。返回成功 item 数统计写在外层。"""
-    workers = max(1, int(exp.config.get("concurrency", 4)))
-    results = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+def _pool_plan(exp: Experiment, models: list[str] | None = None) -> dict:
+    """算出本 stage 线程池该开几个 worker，并把"为什么不是配置值"显式记进返回值。
+
+    两条口径，都不静默（2026-09-25 实验并发上限收口）：
+
+    1. **上限** workers ≤ `limits.MAX_CONCURRENCY`（与 HTTP 入参闸同一个真源）。
+       越界**按上限截断**并在 `concurrency_clamped_from` 里记下配置原值，
+       不抛异常：这里已经在 stage/job 执行中途，抛错会把整条 stage 打成
+       failed、白白丢掉已花掉的调用；旁路脚本（scale_corpus / run_calibration）
+       写的 config 又是历史既有实验，硬失败等于让老实验永远跑不动。
+       HTTP 入参侧（`api.ExperimentIn`）仍是越界 422 直拒 —— 入参契约与运行
+       护栏口径不同是刻意的，理由见 docs/实验并发上限_20260925.md。
+
+    2. **串行纪律** 本 stage 用到的模型里只要有 `gateway.is_serial_model()` 为真
+       （`agy/` `qoder/` `wb/` `zcode/` = 本机 CLI 单账号共享额度，
+       gateway.py:133-143 明写「顺序调用，不要并发」）→ workers 强制 1，
+       并记 `serial_forced` + 命中的模型名。判定一律复用 gateway 的函数，
+       不在这里自己比字符串前缀（口径源只有一处）。
+       混合池（并发组+串行组）按**最保守**处理：整段串行。分两组分别跑会改动
+       stage 的执行结构，且串行组慢模型本来就该单独排班，不在本次收口范围。
+    """
+    requested = max(1, int(exp.config.get("concurrency", 4)))
+    workers, clamped_from = requested, None
+    if requested > limits.MAX_CONCURRENCY:
+        workers, clamped_from = limits.MAX_CONCURRENCY, requested
+    hits = [m for m in (models or []) if is_serial_model(m)]
+    if hits:
+        workers = 1
+    return {"requested": requested, "workers": workers,
+            "concurrency_clamped_from": clamped_from,
+            "serial_forced": bool(hits), "serial_models": hits}
+
+
+class _PoolRun(list):
+    """`_pool_map` 的返回：item 结果列表（照旧可迭代/求和）+ 本次线程池口径 `plan`。"""
+
+
+def _pool_map(exp: Experiment, items, fn, desc: str = "",
+              models: list[str] | None = None) -> _PoolRun:
+    """线程池执行 fn(item)；fn 自己开自己的 session。返回成功 item 数统计写在外层。
+
+    `models` 是本 stage 实际发请求的模型列表，用于串行纪律判定（见 `_pool_plan`）；
+    调用点必须传，不传等于放弃串行保护。
+    """
+    plan = _pool_plan(exp, models)
+    if plan["serial_forced"] or plan["concurrency_clamped_from"] is not None:
+        print(f"[pool] {exp.id} {desc or 'stage'} concurrency={plan['requested']} "
+              f"→ workers={plan['workers']} serial_forced={plan['serial_forced']} "
+              f"serial_models={plan['serial_models']} "
+              f"concurrency_clamped_from={plan['concurrency_clamped_from']}",
+              flush=True)
+    results = _PoolRun()
+    results.plan = plan
+    with ThreadPoolExecutor(max_workers=plan["workers"]) as pool:
         futs = {pool.submit(fn, it): it for it in items}
         for fut in as_completed(futs):
             try:
@@ -210,7 +259,7 @@ def stage_extract_frames(s: Session, exp: Experiment) -> None:
                     made += 1
             return {"ok": True, "made": made}
 
-    results = _pool_map(exp, segs, work)
+    results = _pool_map(exp, segs, work, desc="extract_frames", models=extractors)
     ok_frames = s.query(Frame).filter_by(experiment_id=exp.id, status="ok").count()
     repaired = s.query(Frame).filter_by(experiment_id=exp.id, status="repaired").count()
     failed = s.query(Frame).filter_by(experiment_id=exp.id, status="failed").count()
@@ -281,7 +330,8 @@ def stage_extract_propositions(s: Session, exp: Experiment) -> None:
             ts.commit()
         return {"ok": res["status"] == "ok"}
 
-    results = _pool_map(exp, segs, work)
+    results = _pool_map(exp, segs, work, desc="extract_propositions",
+                        models=[residual_sem.PROPOSITION_MODEL])
     n = s.query(Proposition).count()
     _set_stage(s, exp, "extract_propositions", done=True, total=n,
                item_errors=sum(1 for r in results if not r.get("ok")))
@@ -332,7 +382,8 @@ def stage_reconstruct(s: Session, exp: Experiment) -> None:
                         made += 1
         return {"ok": True, "made": made}
 
-    results = _pool_map(exp, frames, work)
+    results = _pool_map(exp, frames, work, desc="reconstruct",
+                        models=exp.config["recon_models"])
     n_ok = s.query(Candidate).filter_by(experiment_id=exp.id, status="ok").count()
     n_fail = s.query(Candidate).filter_by(experiment_id=exp.id, status="failed").count()
     _set_stage(s, exp, "reconstruct", done=True, ok=n_ok, failed=n_fail,
@@ -364,7 +415,8 @@ def stage_adversarial_leakage(s: Session, exp: Experiment) -> None:
             ts.commit()
         return {"ok": out.get("status") == "ok"}
 
-    results = _pool_map(exp, frames, work)
+    results = _pool_map(exp, frames, work, desc="adversarial_leakage",
+                        models=[config.STRONG_MODEL])
     _set_stage(s, exp, "adversarial_leakage", done=True,
                scored=len(frames) if config.LLM_MODE != "mock" else "mock-skipped",
                item_errors=sum(1 for r in results if not r.get("ok")))
@@ -416,7 +468,8 @@ def stage_residual_sem(s: Session, exp: Experiment) -> None:
             ts.commit()
         return {"ok": res["status"] == "ok"}
 
-    _pool_map(exp, cands, work)
+    _pool_map(exp, cands, work, desc="residual_sem",
+              models=[residual_sem.PROPOSITION_MODEL])
     n = s.query(ResidualSem).count()
     _set_stage(s, exp, "residual_sem", done=True, total=n)
 
@@ -457,7 +510,8 @@ def stage_judges(s: Session, exp: Experiment) -> None:
                                     abstain=out.get("abstain", False), status=out["status"]))
                     ts.commit()
             return {"ok": True}
-        _pool_map(exp, list(seg_map.values()), work_h)
+        _pool_map(exp, list(seg_map.values()), work_h, desc="judges:human",
+                  models=judge_models)
 
     def work(c: Candidate) -> dict:
         bind_experiment(exp.id)
@@ -501,7 +555,7 @@ def stage_judges(s: Session, exp: Experiment) -> None:
                 made += 1
         return {"ok": True, "made": made}
 
-    results = _pool_map(exp, cands, work)
+    results = _pool_map(exp, cands, work, desc="judges", models=judge_models)
     n = s.query(JudgeRun).filter_by(experiment_id=exp.id).count()
     _set_stage(s, exp, "judges", done=True, total=n,
                item_errors=sum(1 for r in results if not r.get("ok")))
