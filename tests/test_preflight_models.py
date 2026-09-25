@@ -23,7 +23,6 @@
 from __future__ import annotations
 
 import ast
-import io
 import re
 import sys
 from pathlib import Path
@@ -484,13 +483,34 @@ def _code_only(src: str) -> str:
     lines = src.splitlines(keepends=True)
     out = [list(line) for line in lines]
 
-    def blank(r1: int, c1: int, r2: int, c2: int) -> None:
+    def _b2c(row: list, byte_col: int) -> int:
+        """AST 的 col_offset 是 **UTF-8 字节**偏移，不是字符下标。
+
+        本仓脚本里中文注释/中文字符串极常见（实测 77 个脚本有「同一行内
+        非 ASCII 出现在字面量之前」），直接拿字节偏移当字符下标会**整段错位**：
+        轻则挖不掉该挖的（`chat(` 漏进判据 ⇒ 红门原样回归），重则挖掉真代码。
+
+        注意：只有 **AST** 用字节列；`tokenize` 的列是**字符**列（实测
+        `# 中文注释…` 的 COMMENT 给的是字符列 0..21，而同行 AST 字符串给的是
+        字节列）。所以本函数只准喂 AST 的偏移，注释那条路走字符列，不可混用。
+        """
+        if byte_col <= 0:
+            return 0
+        raw = "".join(row).encode("utf-8")
+        if byte_col >= len(raw):
+            return len(row)
+        return len(raw[:byte_col].decode("utf-8", errors="ignore"))
+
+    def blank(r1: int, a0: int, r2: int, b0: int) -> None:
+        """挖空 [r1,a0)..(r2,b0)。a0/b0 由调用方负责换算成**字符**列。"""
         for ln in range(r1, r2 + 1):
             if not (1 <= ln <= len(out)):
-                continue
+                raise AssertionError(
+                    "挖空行号越界（%d 不在 1..%d）：AST/tokenize 行号与源码已错位，"
+                    "此处静默 continue 会把「判据错位」伪装成「没有漏接」" % (ln, len(out)))
             row = out[ln - 1]
-            a = c1 if ln == r1 else 0
-            b = c2 if ln == r2 else len(row)
+            a = a0 if ln == r1 else 0
+            b = b0 if ln == r2 else len(row)
             for i in range(a, min(b, len(row))):
                 row[i] = " "
 
@@ -499,17 +519,23 @@ def _code_only(src: str) -> str:
             # 仅字符串常量（含 docstring）；f-string 的 JoinedStr 不在此列，
             # 它内部的表达式节点会各自被遍历到，不会被挖掉。
             if node.end_lineno and node.end_col_offset is not None:
-                blank(node.lineno, node.col_offset,
-                      node.end_lineno, node.end_col_offset)
+                # AST 给字节列 → 换算成字符列后交给 blank
+                blank(node.lineno, _b2c(out[node.lineno - 1], node.col_offset),
+                      node.end_lineno, _b2c(out[node.end_lineno - 1], node.end_col_offset))
     # 注释不在 AST 里：用 tokenize 的 COMMENT 补挖（comment 不会出现在 f-string 表达式内部）
+    import io as _io
+    import tokenize as _tok
     try:
-        import io as _io
-        import tokenize as _tok
         for t in _tok.generate_tokens(_io.StringIO(src).readline):
             if t.type == _tok.COMMENT:
+                # tokenize 已是字符列，直接用（不要再过 _b2c）
                 blank(t.start[0], t.start[1], t.end[0], t.end[1])
-    except Exception:  # noqa: BLE001  挖注释失败不影响主判据
-        pass
+    except Exception as e:  # noqa: BLE001
+        # 不许裸 pass：注释剥离失败会让「注释里提到 chat(」的误报原样回归
+        # （docstring 走 AST，注释只能走 tokenize）。发警告让失败可见。
+        import warnings as _w
+        _w.warn("普查门：注释剥离失败（%s: %s）——注释中的 chat( 可能仍被计入判据"
+                % (type(e).__name__, e))
     return "".join("".join(row) for row in out)
 
 
@@ -527,7 +553,12 @@ def test_every_llm_entrypoint_in_scripts_carries_a_preflight_gate():
     code = {p: _code_only(p.read_text(encoding="utf-8")) for p in scripts}
     sends = [p for p in scripts if _SENDS.search(code[p])]
     bad = [p.name for p in sends if not _GATED.search(code[p])]
-    assert len(sends) >= 15, f"正则失效了？只认出 {len(sends)} 个发调用的脚本"
+    # 门槛按「剥离后仍应认出的真入口」定：实测 22 个（修前全文口径 23，多的那个
+    # 正是注释误报）。低于 15 说明判据被改坏了，而不是「正则坏了」——文案写清楚。
+    assert len(sends) >= 15, (
+        f"普查判据变严了？剥离字符串/注释后只认出 {len(sends)} 个发调用的脚本"
+        f"（应约 22 个）。低于 15 通常是 _code_only 挖空错位把真调用也挖掉了，"
+        f"请先核对 _code_only 再调本阈值")
     assert not bad, f"这些 LLM 入口没有预检闸门（池外名字=整批白跑）：{bad}"
 
 
@@ -569,6 +600,30 @@ def test_census_ignores_calls_mentioned_only_in_strings_and_comments():
     # 解析失败要保守回退原文（宁可误报，也不静默放过真漏接）
     broken = "def f(:\n    return 'chat('\n"
     assert _code_only(broken) == broken
+
+    # 非 ASCII 在前：AST 的 col_offset 是**字节**偏移，不是字符下标。
+    # 本仓脚本中文极常见（实测 77 个脚本有「同行非 ASCII 出现在字面量之前」），
+    # 按字符下标挖会整段错位——既挖不掉字符串里的 chat(（红门原样回归），
+    # 又可能挖掉真代码。这条用例把字节→字符换算钉死。
+    # 注意：必须用**字符串字面量**（走 AST 字节列）来验，注释走 tokenize 字符列，
+    # 用注释验不出这个缺陷（实测：把 _b2c 退化成恒等，注释版用例照样全绿）。
+    zh = (
+        "中文变量 = 'ok'\n"
+        "提示 = '文档里写了 chat( 这是字符串，不算调用'\n"
+        "def run(c):\n"
+        "    return c.chat(prompt='x')\n"
+    )
+    masked = _code_only(zh)
+    assert not _SENDS.search(masked.split("def run")[0]), (
+        "非 ASCII 前缀让字符串挖空整段错位了：字符串里的 chat( 没被挖掉（门会误报）\n"
+        "masked=%r" % masked)
+    assert _SENDS.search(masked), "非 ASCII 前缀把真调用一起挖掉了（门会漏放）"
+
+    # 同一行的多字节字面量必须被**完整**挖掉，且同行后续真代码保留
+    same_line = "备注 = '中文 chat( 提示'; chat(1)\n"
+    m2 = _code_only(same_line)
+    assert m2.count("chat(") == 1, \
+        "同行字符串里的 chat( 应被挖掉、只留真调用；实际 %d 个" % m2.count("chat(")
 
 
 # ── P0 核心不变量（09-19 死 id 事故的教训钉进测试）────────────
