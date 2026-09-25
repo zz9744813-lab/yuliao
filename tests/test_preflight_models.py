@@ -22,6 +22,8 @@
 """
 from __future__ import annotations
 
+import ast
+import io
 import re
 import sys
 from pathlib import Path
@@ -454,6 +456,63 @@ _SENDS = re.compile(r"(?<!\w)chat\(|\bstage_\w+\(")     # 自己发 或 经引�
 _GATED = re.compile(r"require_models|preflight_block")
 
 
+def _code_only(src: str) -> str:
+    """把源码里的**字符串字面量与注释**挖空，只留可执行代码，再喂给 `_SENDS`。
+
+    为什么必须有这一步（2026-09-26 事故）：`_SENDS` 原本直接扫**全文**，
+    于是把「文档字符串/注释里提到 `chat(`」的只读脚本也判成 LLM 入口。
+    实测误报：`scripts/k5_sourcecheck_coverage.py`（只读盘查、零模型调用、
+    无 client/invoke/requests/openai 导入）因为 docstring 与注释里写了
+    「check_one 内 chat( 次数≠1」被判「没接闸门」，**main 全量 pytest 因此常红
+    （1 failed / 1550 passed，exit 1）**，而合入时只跑了 worktree 门没在主仓
+    cwd 复跑，红门就这样进了 main。
+
+    判据必须是「代码里真的调用了」，不是「文本里出现过这个词」。
+
+    实现用 `ast` 定位字符串/注释的**精确行列**再逐字符挖空，不用正则整行删
+    （会误伤同行真代码），也不用 `tokenize` 整段挖（Python 3.11 把整个 f-string
+    切成**一个** STRING token，连 `f"{c.chat(...)}"` 里的真调用也会被一起挖掉
+    ——这条已由本文件的反向用例钉死）。`ast` 拿到的 JoinedStr 里的表达式节点
+    是真代码，天然不在被挖范围内。
+
+    解析失败时保守回退原文——宁可误报也不放过真漏接。
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return src
+    lines = src.splitlines(keepends=True)
+    out = [list(line) for line in lines]
+
+    def blank(r1: int, c1: int, r2: int, c2: int) -> None:
+        for ln in range(r1, r2 + 1):
+            if not (1 <= ln <= len(out)):
+                continue
+            row = out[ln - 1]
+            a = c1 if ln == r1 else 0
+            b = c2 if ln == r2 else len(row)
+            for i in range(a, min(b, len(row))):
+                row[i] = " "
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # 仅字符串常量（含 docstring）；f-string 的 JoinedStr 不在此列，
+            # 它内部的表达式节点会各自被遍历到，不会被挖掉。
+            if node.end_lineno and node.end_col_offset is not None:
+                blank(node.lineno, node.col_offset,
+                      node.end_lineno, node.end_col_offset)
+    # 注释不在 AST 里：用 tokenize 的 COMMENT 补挖（comment 不会出现在 f-string 表达式内部）
+    try:
+        import io as _io
+        import tokenize as _tok
+        for t in _tok.generate_tokens(_io.StringIO(src).readline):
+            if t.type == _tok.COMMENT:
+                blank(t.start[0], t.start[1], t.end[0], t.end[1])
+    except Exception:  # noqa: BLE001  挖注释失败不影响主判据
+        pass
+    return "".join("".join(row) for row in out)
+
+
 def test_every_llm_entrypoint_in_scripts_carries_a_preflight_gate():
     """scripts/ 下凡是会发出 LLM 调用的脚本，都必须先过预检闸门。
 
@@ -461,12 +520,55 @@ def test_every_llm_entrypoint_in_scripts_carries_a_preflight_gate():
     **每个 LLM 入口**，而覆盖面这种东西人工清点必漏——本轮就抓到 xcorpus_bias
     上一轮自以为接了、其实没接。普查跑一次几十毫秒，漏一个当场红一条。
     经 `experiments.stage_*` 间接触发的也算入口：第五批的 0 帧正是死在抽取 stage 里。
+    判据只认**可执行代码**里的调用（见 `_code_only`）：字符串/注释里提到 `chat(`
+    不算入口，否则只读脚本会被永久误报成红门。
     """
     scripts = sorted((ROOT / "scripts").glob("*.py"))
-    sends = [p for p in scripts if _SENDS.search(p.read_text(encoding="utf-8"))]
-    bad = [p.name for p in sends if not _GATED.search(p.read_text(encoding="utf-8"))]
+    code = {p: _code_only(p.read_text(encoding="utf-8")) for p in scripts}
+    sends = [p for p in scripts if _SENDS.search(code[p])]
+    bad = [p.name for p in sends if not _GATED.search(code[p])]
     assert len(sends) >= 15, f"正则失效了？只认出 {len(sends)} 个发调用的脚本"
     assert not bad, f"这些 LLM 入口没有预检闸门（池外名字=整批白跑）：{bad}"
+
+
+def test_census_ignores_calls_mentioned_only_in_strings_and_comments():
+    """普查必须只认**可执行代码**：字符串/注释里出现 `chat(` 不算 LLM 入口。
+
+    钉死 2026-09-26 的红门：`k5_sourcecheck_coverage.py` 只在 docstring/注释里
+    写「check_one 内 chat( 次数≠1」，本身零模型调用，却被判「没接闸门」，
+    使 main 全量 pytest 常红。这里用合成样例把判据的方向钉住。
+    """
+    mention_only = (
+        '"""只读盘查：文档里提到 chat( 不算调用。"""\n'
+        "import re\n"
+        "# 注释里也写了 stage_extract( ，同样不算\n"
+        "P = re.compile(r'chat\\(')\n"
+        "def scan():\n"
+        "    return '提示词里的 stage_plan( 只是字符串'\n"
+    )
+    assert _SENDS.search(mention_only), "前提：原文里确实出现了这些词"
+    assert not _SENDS.search(_code_only(mention_only)), \
+        "剥离字符串/注释后不该再判成 LLM 入口"
+
+    # 反向：真调用必须仍被认出（剥字符串不能把真入口一起剥掉）
+    real_call = (
+        '"""真发调用的脚本。"""\n'
+        "import preflight_models as pf\n"
+        "def run(models):\n"
+        "    pf.require_models(models, source='census')\n"
+        "    return client.chat(prompt='x')\n"
+    )
+    assert _SENDS.search(_code_only(real_call)), "真调用被误剥离 ⇒ 门会漏放"
+    assert _GATED.search(_code_only(real_call))
+
+    # f-string 里的表达式是真代码，不能被当成纯字符串整段剥掉
+    fstring_call = 'def run(c):\n    return f"{c.chat(prompt=\'x\')}"\n'
+    assert _SENDS.search(_code_only(fstring_call)), \
+        "f-string 内的调用是真代码，剥离不能放过它"
+
+    # 解析失败要保守回退原文（宁可误报，也不静默放过真漏接）
+    broken = "def f(:\n    return 'chat('\n"
+    assert _code_only(broken) == broken
 
 
 # ── P0 核心不变量（09-19 死 id 事故的教训钉进测试）────────────
