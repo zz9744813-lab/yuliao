@@ -1,0 +1,360 @@
+{
+ "mode": "dry_run",
+ "generated_at": "2026-09-25T14:40:05",
+ "doc": "docs/K5-A_离线前置评估.md（v1/2）",
+ "k4_artifact": "F:\\agi\\language-genome\\out_k4_3_mc22_v2\\k4_paired.json",
+ "criteria": [
+  {
+   "id": "P0",
+   "name": "通道健康（402 已证伪改判）",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §1 / docs/K4_首轮真跑_证据_20260923.md",
+   "satisfied": true,
+   "evidence": [
+    "收据 F:\\agi\\language-genome\\out_k4_3_mc22_v2\\k4_paired.json：live=True，committed=2 处"
+   ],
+   "missing": []
+  },
+  {
+   "id": "P1",
+   "name": "K4 三场 6/6 臂 committed（failures=0）",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §1/§6（期望 failures=0）",
+   "satisfied": false,
+   "evidence": [
+    "committed=2/6",
+    "failures=2",
+    "skipped=2"
+   ],
+   "missing": [
+    "committed 2/6 ≠ 6；failures=2≠0——缺『三场全过』的真跑收据"
+   ]
+  },
+  {
+   "id": "P2",
+   "name": "A 臂包非空率 ≥2/3 场",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §1/§6（期望 n_techniques≥1 的场数≥2）",
+   "satisfied": false,
+   "evidence": [
+    "packages 场数=2，n_techniques≥1 场数=0",
+    "逐场 n_techniques=[0, 0]"
+   ],
+   "missing": [
+    "A 臂知识包全空——根因：8 张 legacy 策略卡经 24 席独立判定全数『证据不支持』（docs/策略语义审查_判定模型版_20260923.md），合并新卡 S1/S2 尚未走完成对对照证据→两席判定→status 晋升链，K3 只服务 verified+observed（不许放宽）"
+   ]
+  },
+  {
+   "id": "P3",
+   "name": "双闸纪律未被绕过",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §1（K4_ALLOW_LIVE=1 显式）",
+   "satisfied": null,
+   "evidence": [
+    "机制：scripts/k4_paired_scenes.py --live 双闸 + tests/test_k4_paired.py::test_live_double_gate 回归在位",
+    "收据 live=True（真跑收据只能经门产生）"
+   ],
+   "missing": [
+    "『未被绕过』离线不可全证——机制与回归在位，无绕过记录可查；真值待主控侧审计"
+   ]
+  },
+  {
+   "id": "C1",
+   "name": "方向一致差异 ≥1 处经人工复核确认",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §2（报告停止线）",
+   "satisfied": false,
+   "evidence": [
+    "机械层无人工复核记录可读——该判据设计上只认人工证据"
+   ],
+   "missing": [
+    "缺集霸（或其授权复核席）对 A/B 差异的人工复核记录（≥1 处、非预算/超时/通道噪声）——离线校验永远给不出此证据，K5 不可能由 dry-run 宣告通过"
+   ]
+  },
+  {
+   "id": "C2",
+   "name": "零失败臂",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §2/§6（期望 failures=0）",
+   "satisfied": false,
+   "evidence": [
+    "failures=2（rollback_failed 条目 0）；skipped_after_failure 不计入失败但阻断 P1 完整性"
+   ],
+   "missing": [
+    "真跑存在失败臂（s2 预算/改稿闸诚实拒绝）——修卡/调参后重跑 K4，不扩 10 场"
+   ]
+  },
+  {
+   "id": "C3",
+   "name": "A 臂非空包率 ≥2/3（C 行）",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §2/§6",
+   "satisfied": false,
+   "evidence": [
+    "n_techniques≥1 场数=0"
+   ],
+   "missing": [
+    "同 P2：知识卡未晋升，查得空=知识不足（先补 K2 成对证据链）"
+   ]
+  },
+  {
+   "id": "C4",
+   "name": "复核负担可承受（≤20 分钟/场，集霸口径）",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §2",
+   "satisfied": false,
+   "evidence": [
+    "无差异清单与复核耗时记录可读"
+   ],
+   "missing": [
+    "缺 A/B 差异清单与逐场人工复核耗时记录——依赖 C1 的人工复核先行"
+   ]
+  },
+  {
+   "id": "C5",
+   "name": "通道一致性（换通道须标 channel_changed 并复核 C1）",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §2（A6 写死：未标 → C1 与 C5 均不过）",
+   "satisfied": true,
+   "evidence": [
+    "收据 channel_changed=True；writer/verifier 记录={'writer': 'deepseek-v4.1-flash', 'verifier': 'deepseek-v4.1-flash'}"
+   ],
+   "missing": []
+  },
+  {
+   "id": "C4+",
+   "name": "总量止损（真跑 tokens ≤800 万）",
+   "source": "docs/K5-A_离线前置评估.md（v1/2） §4",
+   "satisfied": true,
+   "evidence": [
+    "三场收据 tokens 合计=2167 ≤ 8000000"
+   ],
+   "missing": []
+  }
+ ],
+ "n_criteria": 10,
+ "n_satisfied": 3,
+ "k5_established": false,
+ "verdict": "K5 未通——dry-run 与只读核验不构成通过；当前判据 3/10 项机械层满足，C1 人工复核结构性缺证据（详见 missing）",
+ "ten_scene_dry_run": {
+  "ok": true,
+  "mode": "dry_run",
+  "live": false,
+  "scenes": {
+   "s1": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s10": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s2": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s3": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s4": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s5": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s6": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s7": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s8": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   },
+   "s9": {
+    "arms": {
+     "A": "committed",
+     "B": "committed"
+    },
+    "committed_arms": 2,
+    "structural_status": "committed",
+    "est_budget": {
+     "normal_calls": 4,
+     "worst_calls": 12,
+     "est_tokens_normal": 2168,
+     "est_tokens_worst": 6504,
+     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+    },
+    "blocked_by": [
+     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
+     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
+     "C1（无人工复核记录——离线结构性不可证）",
+     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+    ]
+   }
+  },
+  "totals": {
+   "scenes": 10,
+   "normal_calls": 40,
+   "worst_calls": 120,
+   "est_tokens_normal": 21680,
+   "est_tokens_worst": 65040,
+   "stop_loss_tokens": 8000000,
+   "doc_model_note": "K5-A §4 文档口径（每调用 4~6 万 token 的语料级估算）与三场实测口径并列；扩场前以实测复核"
+  },
+  "n_prose": 20,
+  "failures": 0,
+  "skipped": 0,
+  "note": "dry-run=离线 FixtureClient 结构性跑通；**不构成任何判据的通过证据**（live 收据才算数）"
+ }
+}
