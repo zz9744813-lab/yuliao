@@ -88,6 +88,22 @@ def _is_fixture(w) -> bool:
         or (w.title or "").startswith("fixture")
 
 
+def _check_source_type_width(source_type: str) -> None:
+    """登记写入口的列宽硬校验：超宽**响亮报错退出**，不许静默截断/clamp。
+
+    SQLite 不校验 String 长度，换 Postgres/MySQL 会 value too long——
+    超宽值必须在这道写入口被当场拦住。宽度以模型声明的列为唯一
+    事实源（改列宽自动跟随）；取值集合是否枚举化不在本任务范围。"""
+    max_len = getattr(WorkSource.__table__.c.source_type.type, "length", None)
+    if max_len is None:                      # Text 等无长度约束 → 无校验
+        return
+    if len(source_type) > max_len:
+        raise SystemExit(
+            f"source_type 超宽：{source_type!r}（{len(source_type)} 字符）> "
+            f"列宽 {max_len}——SQLite 不校验、换 Postgres/MySQL 立即 "
+            "value too long；先扩列宽再登记，本脚本不静默截断")
+
+
 def register(dry_run: bool = False, only: set[str] | None = None,
              reset_anchor: bool = False) -> list[dict]:
     """only：只处理这些 work_id（测试/局部补登）；None=全部（生产口径——
@@ -187,6 +203,7 @@ def register(dry_run: bool = False, only: set[str] | None = None,
                     metadata_status="verified" if meta["author"] else "partial",
                     metadata_basis=meta["basis"])
                 root_meta_cache[w.id] = row
+            _check_source_type_width(row["source_type"])
             rows.append(row)
 
         if dry_run:
