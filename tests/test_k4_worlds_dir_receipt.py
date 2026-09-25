@@ -35,10 +35,15 @@ from knowledge_seed import seed_knowledge          # noqa: E402
 from app import db, config as _cfg                 # noqa: E402
 from app.scene_runtime.store import Store          # noqa: E402
 
-# 改动前（db67d88）离线收据与产物顶层的既有键集——逐字钉死，多一键即红
+# 改动前（db67d88）离线收据与产物顶层的既有键集——逐字钉死，多一键即红。
+# 例外（2026-09-25，gui-k4-s2-contract/1869ecc）：`budget_calls` 是**有意**新增的
+# 生效上限键，对 live/离线**两条路径都落**（由 tests/test_k4_paired.py 的
+# test_budget_default_6_and_receipts_consistent 正面钉死）。本钉的职责是防
+# worlds_dir / worlds_dir_exists / created_at / worlds_dir_cleaned 这四个
+# **live 专属**字段漏进离线收据，故基线键集补上 budget_calls，防护力不变。
 BASE_RECEIPT_KEYS = {"scene", "arm", "job_id", "usage", "live",
                      "channel_changed", "gateway_host", "models",
-                     "retried", "verifier_attempts"}
+                     "retried", "verifier_attempts", "budget_calls"}
 BASE_OUT_KEYS = {"artifacts", "analysis", "live", "channel_changed",
                  "worlds_dir"}
 ISO8601_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
