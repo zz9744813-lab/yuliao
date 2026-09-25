@@ -16,9 +16,11 @@
   是测试钉死的红线）；
 - 不改 K2/K3 判定口径、不动表结构、不清语料。
 
-用法（真跑命令见 docs/K5判据核验_20260925.md）：
-    python scripts/k5_criteria_check.py --repo-root F:/agi/language-genome \
-        --out <report.json>
+用法（真跑命令见 docs/K5判据核验_20260925.md §6）：
+    python scripts/k5_criteria_check.py --out k5_report_20260925.json
+  - `--repo-root` 缺省＝脚本自身推导的仓库根（ROOT），不硬编码主仓机器路径；
+  - `--out` 给裸文件名一律落 `<repo>/docs/`（仓根不再新增报告）；
+  - 报告里的路径字段相对仓库根、`generated_at` 带时区偏移（可移植、可对账）。
 """
 from __future__ import annotations
 
@@ -42,10 +44,60 @@ K4_SCENE_BUDGET = {"normal_calls_per_arm": 2, "worst_calls_per_arm": 6,
                    "arms": 2, "scenes": 10,
                    # 收据不可读时的保守兜底单价（不静默：price_src 会写明来源）
                    "fallback_per_call": 542}
+# P1 的逐场口径（会审 2026-09-25 第 7 条）：三场每场 A/B 各 committed 一次
+K4_REQUIRED_SCENES = ("s1", "s2", "s3")
+K4_REQUIRED_ARMS = ("A", "B")
+P1_NAME = "K4 三场每场 A/B 各 committed（共 6 处，failures=0）"
+# 报告落位（会审 2026-09-25 第 8 条）：仓根不再新增报告，与同类报告同放 docs/
+REPORT_DIR = ROOT / "docs"
 
 
 def _load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def portable_path(path, repo_root=None) -> str | None:
+    """绝对路径 → 报告里可移植的相对写法（相对仓库根）。
+
+    会审 2026-09-25 第 8 条：报告内嵌 `F:\\...` 机器绝对路径换台机器/换
+    worktree 就对不上账，故一律相对化；仓库根之外的路径不内嵌盘符，退化成
+    `<仓外>/文件名` 占位（宁可少写，也不产出不可移植的证据行）。"""
+    if path is None:
+        return None
+    p = Path(path)
+    base = Path(repo_root) if repo_root is not None else ROOT
+    try:
+        return p.resolve().relative_to(base.resolve()).as_posix()
+    except (ValueError, OSError, RuntimeError):
+        return f"<outside-repo>/{p.name}"
+
+
+def resolve_out_path(out) -> Path:
+    """报告落位规则：绝对路径照写；相对路径按仓库根解析；**裸文件名落
+    `<repo>/docs/`**（仓根不再新增报告）。"""
+    p = Path(out)
+    if p.is_absolute():
+        return p
+    if p.parent == Path("."):
+        return REPORT_DIR / p.name
+    return ROOT / p
+
+
+def _committed_by_scene(committed) -> dict:
+    """逐场 committed 计数（三场缺场记 0；口径外的场照实列出便于对账）。"""
+    per = {s: 0 for s in K4_REQUIRED_SCENES}
+    for scene, _arm in committed:
+        key = str(scene)
+        per[key] = per.get(key, 0) + 1
+    return per
+
+
+def _committed_arms(committed) -> dict:
+    """逐场 committed 的臂集合（分布校验用，不看总数）。"""
+    arms: dict = {}
+    for scene, arm in committed:
+        arms.setdefault(str(scene), set()).add(str(arm))
+    return arms
 
 
 def latest_k4_artifact(repo_root: Path) -> Path | None:
@@ -104,18 +156,23 @@ def _crit(cid, name, source, satisfied, evidence, missing):
 
 
 def check_criteria(artifact_path: Path | None,
-                   ten_scene_present: bool = False) -> list[dict]:
-    """P0–P3 + C1–C5 逐条核验（只读收据；缺收据=缺证据=未满足）。"""
+                   ten_scene_present: bool = False,
+                   repo_root: Path | None = None) -> list[dict]:
+    """P0–P3 + C1–C5 逐条核验（只读收据；缺收据=缺证据=未满足）。
+
+    `repo_root` 只用于把证据里的路径写成相对仓库根的可移植形式（缺省取脚本
+    推导的仓库根）。"""
     out: list[dict] = []
     art = None
     if artifact_path is not None and artifact_path.exists():
         art = _load_json(artifact_path)
+    art_rel = portable_path(artifact_path, repo_root)
     if art is None:
         out.append(_crit("P0", "通道健康（原 402 拍板已失效改判）", DOC
                          + " §1 / docs/K4_首轮真跑_证据_20260923.md",
                          False, [], "缺任何 live 真跑收据（out_k4_3*/"
                          "k4_paired.json 不存在）——通道可用性无实证"))
-        for cid, name in (("P1", "K4 三场 6/6 臂 committed（failures=0）"),
+        for cid, name in (("P1", P1_NAME),
                           ("P2", "A 臂包非空率 ≥2/3"),
                           ("P3", "双闸纪律未被绕过")):
             out.append(_crit(cid, name, DOC + " §1", False, [],
@@ -151,20 +208,53 @@ def check_criteria(artifact_path: Path | None,
     out.append(_crit("P0", "通道健康（402 已证伪改判）",
                      DOC + " §1 / docs/K4_首轮真跑_证据_20260923.md",
                      bool(live and committed),
-                     [f"收据 {artifact_path}：live={live}，committed="
+                     [f"收据 {art_rel}：live={live}，committed="
                       f"{len(committed)} 处"],
                      [] if (live and committed) else
                      ["live 收据中无 committed 正文——通道可用性未实证"]))
 
-    # P1 三场 6/6 臂 committed 且 failures=0
-    p1_ok = live and len(committed) == 6 and not failures
-    out.append(_crit("P1", "K4 三场 6/6 臂 committed（failures=0）",
-                     DOC + " §1/§6（期望 failures=0）", p1_ok,
-                     [f"committed={len(committed)}/6", f"failures="
-                      f"{len(failures)}", f"skipped={len(a.get('skipped') or [])}"],
-                     [] if p1_ok else [
-                         f"committed {len(committed)}/6 ≠ 6；failures="
-                         f"{len(failures)}≠0——缺『三场全过』的真跑收据"]))
+    # P1 逐场分布校验（会审 2026-09-25 第 7 条）：三场每场 A/B 各 committed
+    # 一次且总数恰 6、failures=0。只看 len(committed)==6 会被两种形态骗过：
+    # ① 6 处集中在少数场；② 4 场/10 场收据被 out_k4_3* glob 误匹配（>6）。
+    per_scene = _committed_by_scene(committed)
+    arms_by_scene = _committed_arms(committed)
+    p1_total_ok = len(committed) == 6
+    p1_extra = sorted(set(arms_by_scene) - set(K4_REQUIRED_SCENES))
+    p1_gap_scenes = [s for s in K4_REQUIRED_SCENES if s not in arms_by_scene]
+    p1_lack = {s: sorted(set(K4_REQUIRED_ARMS) - arms_by_scene.get(s, set()))
+               for s in K4_REQUIRED_SCENES
+               if set(K4_REQUIRED_ARMS) - arms_by_scene.get(s, set())}
+    p1_dist_ok = (not p1_extra and not p1_gap_scenes and not p1_lack
+                  and all(per_scene[s] == 2 for s in K4_REQUIRED_SCENES))
+    p1_ok = bool(live and p1_total_ok and p1_dist_ok and not failures)
+    p1_missing: list[str] = []
+    if not live:
+        p1_missing.append("收据 live≠True——P1 只认 live 真跑收据")
+    if not p1_total_ok:
+        p1_missing.append(f"committed 总数={len(committed)}≠6（每场 2 处×三场）")
+    if p1_extra:
+        p1_missing.append(f"committed 出现在三场口径外的场 {p1_extra}"
+                          "（疑 4 场/10 场收据被 out_k4_3* glob 误匹配）"
+                          "——总数达标也不判过")
+    if p1_gap_scenes:
+        p1_missing.append(f"三场中完全无 committed 记录的场：{p1_gap_scenes}"
+                          "——不满足『每场 A/B 各 1』的分布")
+    for _s, _lack in sorted(p1_lack.items()):
+        p1_missing.append(f"{_s} 缺 {'/'.join(_lack)} 臂 committed"
+                          "（每场须 A/B 各 1 次）")
+    if failures:
+        p1_missing.append(f"failures={len(failures)}≠0——缺『三场全过』的真跑收据")
+    if not p1_ok and not p1_missing:      # 不许「未满足却说不出缺什么」
+        p1_missing.append(f"逐场分布不满足三场每场 A/B 各 committed：per_scene={per_scene}")
+    arms_view = {s: sorted(arms_by_scene.get(s, set())) for s in K4_REQUIRED_SCENES}
+    out.append(_crit("P1", P1_NAME,
+                     DOC + " §1/§6（期望每场 2/2、failures=0）", p1_ok,
+                     [f"committed={len(committed)}/6（总数）",
+                      f"per_scene={per_scene}",
+                      f"逐场 committed 臂={arms_view}",
+                      f"failures={len(failures)}",
+                      f"skipped={len(a.get('skipped') or [])}"],
+                     [] if p1_ok else p1_missing))
 
     # P2/C3 A 臂非空包率 ≥2/3（三场口径；10 场口径见十场段）
     p2_ok = pkg_scenes >= 3 and nonempty >= 2
@@ -337,7 +427,7 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
     measured_per_call = (round(tokens_real / calls_real) if calls_real
                          else K4_SCENE_BUDGET.get("fallback_per_call", 0))
     # blockers 由判据实际结果派生（会审指出：硬编码列表会与判据表脱节）
-    _crits = check_criteria(art3, has_ten_scene_artifact(repo_root))
+    _crits = check_criteria(art3, has_ten_scene_artifact(repo_root), repo_root)
     blockers = [f"{c['id']}（{c['name']}）"
                 for c in _crits if c["satisfied"] is not True] or                ["无（全部判据机械层满足——但仍不构成 K5 通过，见 C1）"]
     return {
@@ -375,14 +465,19 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
 
 
 def build_report(artifact_path: Path | None,
-                 ten_scene_present: bool = False) -> dict:
-    """纯函数：判据核验报告（不含十场子进程段——离线可测）。"""
-    criteria = check_criteria(artifact_path, ten_scene_present)
+                 ten_scene_present: bool = False,
+                 repo_root: Path | None = None) -> dict:
+    """纯函数：判据核验报告（不含十场子进程段——离线可测）。
+
+    可移植性（会审 2026-09-25 第 8 条）：路径字段相对 `repo_root` 书写、
+    `generated_at` 带时区偏移，报告换机器/换 worktree 仍可对账。"""
+    criteria = check_criteria(artifact_path, ten_scene_present, repo_root)
     mech_ok = sum(1 for c in criteria if c["satisfied"] is True)
     return {
-        "mode": "dry_run", "generated_at": datetime.datetime.now().isoformat(
-            timespec="seconds"),
-        "doc": DOC, "k4_artifact": str(artifact_path) if artifact_path else None,
+        "mode": "dry_run",
+        "generated_at": datetime.datetime.now(
+            datetime.timezone.utc).astimezone().isoformat(timespec="seconds"),
+        "doc": DOC, "k4_artifact": portable_path(artifact_path, repo_root),
         "criteria": criteria,
         "n_criteria": len(criteria), "n_satisfied": mech_ok,
         # 红线：dry-run/只读核验永远不构成「K5 已通」——C1 人工复核离线
@@ -394,27 +489,34 @@ def build_report(artifact_path: Path | None,
     }
 
 
-def main() -> None:
+def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--repo-root", default="F:/agi/language-genome",
-                    dest="repo_root",
-                    help="主仓根（收据与真库所在；本脚本对其只读）")
+    ap.add_argument("--repo-root", default=str(ROOT), dest="repo_root",
+                    help="仓库根（收据与真库所在；本脚本对其只读）。"
+                         "缺省＝脚本自身推导的仓库根，不硬编码机器路径")
     ap.add_argument("--k4-artifact", default="", dest="k4_artifact",
                     help="三场收据路径（缺省自动取最新 out_k4_3*/k4_paired.json）")
-    ap.add_argument("--out", default="", help="报告 JSON 落盘（可选）")
+    ap.add_argument("--out", default="",
+                    help="报告 JSON 落盘：裸文件名一律落 <repo>/docs/"
+                         "（仓根不再新增报告）；带目录或绝对路径按给定写入")
     ap.add_argument("--py", default=sys.executable,
                     help="驱动器子进程解释器（缺省当前解释器）")
-    a = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    a = build_argparser().parse_args()
     repo = Path(a.repo_root)
     art = Path(a.k4_artifact) if a.k4_artifact else latest_k4_artifact(repo)
-    report = build_report(art, has_ten_scene_artifact(repo))
+    report = build_report(art, has_ten_scene_artifact(repo), repo)
     report["ten_scene_dry_run"] = ten_scene_dry_run(repo, a.py)
     text = json.dumps(report, ensure_ascii=False, indent=1)
     print(text)
     if a.out:
-        Path(a.out).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.out).write_text(text, encoding="utf-8")
-        print(f"[k5_criteria_check] 报告已写 {a.out}")
+        out_path = resolve_out_path(a.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
+        print(f"[k5_criteria_check] 报告已写 {out_path}")
 
 
 if __name__ == "__main__":
