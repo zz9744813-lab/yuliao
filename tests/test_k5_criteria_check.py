@@ -472,7 +472,11 @@ def test_report_adds_only_new_section_by_default(tmp_path):
     promotion_gap_preflight section 外逐字不变（键集=旧键集+1，
     criteria/verdict 口径原样——旧用例全绿即为行为不变的另一半证明）。"""
     art = _write(tmp_path, "perfect.json", _perfect_artifact())
-    report = k5c.build_report(art)
+    # repo_root 显式指向不存在的根：本节吐真伪随环境变化（worktree 无真库
+    # ⇒ True，主仓有真库 ⇒ False），不显式传就是脆测试——同一条用例在
+    # worktree 绿、在主仓红（2026-09-25 事故）。缺库态由本用例钉，
+    # 有库态另由 test_gap_* 系列钉。
+    report = k5c.build_report(art, repo_root=tmp_path / "no-such-root")
     old_keys = {"mode", "generated_at", "doc", "k4_artifact", "criteria",
                 "n_criteria", "n_satisfied", "k5_established", "verdict"}
     assert set(report) == old_keys | {"promotion_gap_preflight"},         set(report)
