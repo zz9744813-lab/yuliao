@@ -22,8 +22,20 @@ knowledge_packages / strategy_conditions 的唯一写入路径是否存在、
 用法：
     python scripts/k5_promotion_wire_probe.py                     # 缺省仓库根
     python scripts/k5_promotion_wire_probe.py --repo-root <主仓>   # 真库实测
+    python scripts/k5_promotion_wire_probe.py --gate-ledger <门账本> \
+       --ledger <遥测账本>                                        # 路径覆盖
     python scripts/k5_promotion_wire_probe.py --out ""            # 只打印不落盘
   报告缺省落 F:/Hermes/team/reports/k5_promotion_wire_probe_20260925.json。
+
+账本口径（2026-09-26 修正，本派工核心）：探针原先把
+F:/Hermes/team/judge/k2pairs_ledger.jsonl 写死成「旁路账本」——那是
+scripts/k2_pairs_gen.py 的**写手调用遥测**（event=writer_call/cache_hit，
+无 gates_ok/pair_id/persist_outcome），拿它数门 ⇒ 恒得 n_gates_ok=0，
+把 A4 判死是「证据链断在探针自己身上」。现探针同时认两种账本并按 schema
+分类（a4.ledger.kind = gate / writer_telemetry / unknown）：只有门账本
+（k2_contrast_extract.write_pairs_ledger 产物，缺省 <repo>/k2_pairs.jsonl）
+参与 n_gates_ok/n_written 统计；遥测账本如实标注、绝不参与门统计；
+门账本找不到 → n_gates_ok=null + 「不猜」文案，不产出「过门数=0」断言。
 """
 from __future__ import annotations
 
@@ -42,11 +54,23 @@ sys.path.insert(0, str(ROOT / "scripts"))
 PROBE = "k5_promotion_wire_probe"
 DEFAULT_OUT = "F:/Hermes/team/reports/k5_promotion_wire_probe_20260925.json"
 DEFAULT_PAIRS_REL = "_pairs/k2_pairs_20260924.json"    # 48 对成对对照文件
-DEFAULT_LEDGER = "F:/Hermes/team/judge/k2pairs_ledger.jsonl"   # 旁路账本
+# 写手调用遥测账本（k2_pairs_gen.py 追加 event=writer_call/cache_hit 行；
+# 与门是否通过无关，绝不参与门统计）——即旧版误当成旁路账本的硬编码路径
+DEFAULT_TELEMETRY_LEDGER = "F:/Hermes/team/judge/k2pairs_ledger.jsonl"
+# 真门账本（k2_contrast_extract.write_pairs_ledger 产物）：仓内真实缺省名
+# k2_pairs.jsonl（见 k2_contrast_extract.py --pairs-ledger 缺省，live 跑时
+# 相对仓库根落盘）
+DEFAULT_GATE_LEDGER_REL = "k2_pairs.jsonl"
 A4_REQUIRED_PAIRS = 48
 A4_REQUIRED_PASSES = 35
 PAIRED_PROTOCOL = "paired_contrast_v2"
 VERDICTS = ("卡未晋升", "K3 过滤", "写入路径缺失", "证据不足")
+# 两类账本的 schema 判别标记（现场读取的键集，非臆造）：
+#   门账本行 = ledger_entry()：pair_id/…/gates_ok/gate_results/persist_outcome
+#   遥测行   = k2_pairs_gen：event/op/segment_id/writer_model/n_chars_ai/ts
+#              或 {event:"cache_hit",…,cache}
+GATE_LEDGER_MARKERS = ("pair_id", "gates_ok", "persist_outcome")
+TELEMETRY_LEDGER_MARKERS = ("event", "writer_model", "cache", "n_chars_ai")
 
 
 def portable_path(path, repo_root: Path) -> str | None:
@@ -408,9 +432,29 @@ def _parse_pairs_file(path: Path) -> tuple[int | None, str | None]:
     return None, "schema 未识别（不猜对数）"
 
 
+def _classify_ledger_rows(rows: list) -> str:
+    """按行键集机械判账本类型：gate（门账本）/ writer_telemetry（写手遥测）
+    / unknown。判别只看 schema 标记，**不看有没有行**——「有行就算门账本」
+    正是本派工要修的错（遥测账本行数最多，恒把门统计污染成 0）。"""
+    def _hit(r, markers):
+        return isinstance(r, dict) and any(m in r for m in markers)
+    n_gate = sum(1 for r in rows if _hit(r, GATE_LEDGER_MARKERS))
+    n_tele = sum(1 for r in rows
+                 if _hit(r, TELEMETRY_LEDGER_MARKERS)
+                 and not _hit(r, GATE_LEDGER_MARKERS))
+    if n_gate:
+        # 混档（门行+遥测行同档）也判 gate：门统计只数带 gates_ok/
+        # persist_outcome 的行，遥测行不构成门证据（见 _parse_ledger）
+        return "gate"
+    if n_tele:
+        return "writer_telemetry"
+    return "unknown"
+
+
 def _parse_ledger(path: Path) -> dict:
     out = {"path": str(path), "exists": path.exists(), "n_rows": None,
-           "n_gates_ok": None, "n_written": None, "error": None}
+           "n_gates_ok": None, "n_written": None, "kind": "unknown",
+           "schema_keys": [], "error": None, "note": None}
     if not out["exists"]:
         out["error"] = "账本文件不存在（不猜数字）"
         return out
@@ -421,23 +465,49 @@ def _parse_ledger(path: Path) -> dict:
         out["error"] = f"读取失败：{type(exc).__name__}"
         return out
     out["n_rows"] = len(rows)
-    out["n_gates_ok"] = sum(1 for r in rows if r.get("gates_ok") is True)
-    out["n_written"] = sum(1 for r in rows
-                           if r.get("persist_outcome") == "written")
+    keys: set = set()
+    for r in rows:
+        if isinstance(r, dict):
+            keys |= set(r)
+    out["schema_keys"] = sorted(keys)
+    out["kind"] = _classify_ledger_rows(rows)
+    if out["kind"] == "gate":
+        out["n_gates_ok"] = sum(1 for r in rows
+                                if isinstance(r, dict)
+                                and r.get("gates_ok") is True)
+        out["n_written"] = sum(1 for r in rows
+                               if isinstance(r, dict)
+                               and r.get("persist_outcome") == "written")
+    elif out["kind"] == "writer_telemetry":
+        out["note"] = ("写手调用遥测账本（k2_pairs_gen 的 writer_call/"
+                       "cache_hit 事件计数）——与门是否通过无关，不参与"
+                       "门统计；n_gates_ok/n_written 保持 null（不猜）")
+    elif not rows:
+        out["error"] = "账本为空行集，schema 无从判定（不猜）"
+    else:
+        out["error"] = ("schema 未识别：既无门账本标记（pair_id/gates_ok/"
+                        "persist_outcome）也无遥测标记（event/writer_model）"
+                        "——不猜门统计数字")
     return out
 
 
 def a4_feasibility(db_path: Path, repo_root: Path, pairs_file: Path,
-                   ledger_file: Path) -> dict:
+                   ledger_file: Path,
+                   gate_ledger_file: Path | None = None) -> dict:
     """A4 前提的机械核对：35/48 过门对是否**已经存在于库中**。
     真跑 SQL：strategy_instances(extractor_model=paired_contrast_v2) 行数、
     v2 卡在 strategy_reviews/judge_runs 的席位读数；文件侧数 pairs 文件
-    与旁路账本。**不得**据此产任何 status 变更建议。"""
+    与账本（门账本与写手遥测账本**同时**认，按 schema 分类，只有门账本
+    参与 n_gates_ok/n_written；找不到门账本 → null+「不猜」文案，绝不
+    产出「过门数=0」断言）。**不得**据此产任何 status 变更建议。"""
     pf = {"path": portable_path(pairs_file, repo_root) if pairs_file.exists()
           else str(pairs_file),
           "exists": pairs_file.exists()}
     pf["n_pairs"], pf["error"] = _parse_pairs_file(pairs_file)
-    ledger = _parse_ledger(ledger_file)
+    ledgers = [_parse_ledger(ledger_file)]
+    if gate_ledger_file is not None and Path(gate_ledger_file) != ledger_file:
+        ledgers.append(_parse_ledger(gate_ledger_file))
+    ledger = next((l for l in ledgers if l["kind"] == "gate"), ledgers[0])
     db: dict = {"strategy_instances_paired_rows": None, "by_status": None,
                 "v2_card_reviews": None, "judge_runs_total": None,
                 "errors": {}}
@@ -472,6 +542,15 @@ def a4_feasibility(db_path: Path, repo_root: Path, pairs_file: Path,
     missing: list[str] = []
     n_pairs = pf.get("n_pairs")
     n_db = db["strategy_instances_paired_rows"]
+    if ledger["kind"] == "writer_telemetry":
+        missing.append(
+            f"探针未找到门账本：已读 {ledger['path']} 是写手调用遥测账本"
+            f"（schema_keys={ledger['schema_keys']}），与门是否通过无关——"
+            "过门对数不可核（n_gates_ok=null，不猜；请用 --gate-ledger "
+            "指定 k2_contrast_extract 产物）")
+    elif ledger["kind"] != "gate":
+        missing.append(f"门账本不可核（{ledger.get('error') or 'schema 未识别'}）"
+                       "——n_gates_ok=null，不猜数字")
     if n_pairs is None:
         missing.append(f"pairs 文件对数不可核（{pf.get('error')}）")
     elif n_pairs < A4_REQUIRED_PAIRS:
@@ -481,7 +560,8 @@ def a4_feasibility(db_path: Path, repo_root: Path, pairs_file: Path,
     elif n_db < A4_REQUIRED_PASSES:
         missing.append(f"过门成对对照落库行数={n_db} <{A4_REQUIRED_PASSES}"
                        "（35/48 只存在于账本口径，未入库为行）")
-    return {"pairs_file": pf, "ledger": ledger, "db": db,
+    return {"pairs_file": pf, "ledger": ledger, "all_ledgers": ledgers,
+            "db": db,
             "thresholds": {"required_pairs": A4_REQUIRED_PAIRS,
                            "required_gate_passed_in_db": A4_REQUIRED_PASSES},
             "a4_feasible_now": (n_pairs is not None and n_db is not None
@@ -495,14 +575,21 @@ def a4_feasibility(db_path: Path, repo_root: Path, pairs_file: Path,
 # ------------------------------------------------ 组装
 def run_probe(repo_root: Path, db_path: Path | None = None,
               artifact: Path | None = None, pairs_file: Path | None = None,
-              ledger_file: Path | None = None) -> dict:
+              ledger_file: Path | None = None,
+              gate_ledger_file: Path | None = None) -> dict:
     repo_root = Path(repo_root)
     db_path = Path(db_path) if db_path else repo_root / "data" / \
         "language_genome.db"
     pairs_file = Path(pairs_file) if pairs_file else \
         repo_root / DEFAULT_PAIRS_REL
-    ledger_file = Path(ledger_file) if ledger_file else Path(DEFAULT_LEDGER)
-    a4 = a4_feasibility(db_path, repo_root, pairs_file, ledger_file)
+    # ledger_file 槽缺省＝写手遥测账本（旧版硬编码处）；门账本另按仓内
+    # 真实缺省名 <repo>/k2_pairs.jsonl 找——两路同时认，kind 由 schema 判
+    ledger_file = Path(ledger_file) if ledger_file else \
+        Path(DEFAULT_TELEMETRY_LEDGER)
+    gate_file = Path(gate_ledger_file) if gate_ledger_file else \
+        repo_root / DEFAULT_GATE_LEDGER_REL
+    a4 = a4_feasibility(db_path, repo_root, pairs_file, ledger_file,
+                        gate_file)
     chain = chain_segments(db_path, repo_root,
                            a4["db"]["strategy_instances_paired_rows"])
     return {
@@ -532,7 +619,13 @@ def main() -> int:
     ap.add_argument("--k4-artifact", default="", dest="k4_artifact",
                     help="C3/P2 动态段用的三场收据（缺省自动取最新）")
     ap.add_argument("--pairs-file", default="", help="48 对 pairs 文件覆盖")
-    ap.add_argument("--ledger", default="", help="旁路账本覆盖")
+    ap.add_argument("--ledger", default="",
+                    help="旁路账本覆盖（缺省=写手遥测账本 "
+                    f"{DEFAULT_TELEMETRY_LEDGER}；按 schema 分类，遥测行"
+                    "绝不参与门统计）")
+    ap.add_argument("--gate-ledger", default="", dest="gate_ledger",
+                    help="门账本覆盖（k2_contrast_extract.write_pairs_ledger "
+                    f"产物）；缺省 <repo>/{DEFAULT_GATE_LEDGER_REL}")
     ap.add_argument("--out", default=DEFAULT_OUT,
                     help='报告落盘路径；""＝只打印不落盘')
     a = ap.parse_args()
@@ -540,7 +633,8 @@ def main() -> int:
         Path(a.repo_root), Path(a.db) if a.db else None,
         Path(a.k4_artifact) if a.k4_artifact else None,
         Path(a.pairs_file) if a.pairs_file else None,
-        Path(a.ledger) if a.ledger else None)
+        Path(a.ledger) if a.ledger else None,
+        Path(a.gate_ledger) if a.gate_ledger else None)
     text = json.dumps(report, ensure_ascii=False, indent=1)
     print(text)
     if a.out:
