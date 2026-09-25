@@ -5,11 +5,18 @@
    静默判 satisfied；
 2. **禁止把 dry-run 说成已通**——即使全部机械判据满足（伪造的完美收据），
    报告的 mode=dry_run、k5_established 恒 False、verdict 恒含「未通」。
+
+2026-09-25 遗留整改另钉两组：
+- 遗留 A（会审第 7 条）：P1 必须**逐场**校验「三场每场 A/B 各 committed」，
+  不得只看 `len(committed)==6` 总数；
+- 遗留 B（会审第 8 条）：报告不得内嵌机器绝对路径、`generated_at` 带时区、
+  `--repo-root` 缺省由脚本自身推导、报告落位不再进仓根。
 """
 from __future__ import annotations
 
 import importlib.util as _u
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,6 +30,10 @@ _spec = _u.spec_from_file_location(
 k5c = _u.module_from_spec(_spec)
 sys.modules["k5c"] = k5c
 _spec.loader.exec_module(k5c)
+
+# 报告文本里不该出现的形态：盘符级绝对路径；该出现的：带偏移的时间戳
+_ABS_RE = re.compile(r"[A-Za-z]:[\\/]")
+_TZ_RE = re.compile(r"[+-]\d{2}:\d{2}$")
 
 
 def _write(tmp_path, name, payload):
@@ -227,3 +238,110 @@ def test_ten_scene_dry_run_clears_live_gate_env(tmp_path, monkeypatch):
     k5c.ten_scene_dry_run(tmp_path, "py")
     assert "K4_ALLOW_LIVE" not in seen and "LG_LIVE" not in seen
     assert "LG_DATABASE_URL" in seen
+
+
+# ─── 遗留 A（会审第 7 条）：P1 逐场分布校验 ───────────────────────────
+def test_p1_requires_two_arms_in_every_scene(tmp_path):
+    """P1 不得只看总数 6：① 6 处 committed 集中在一场 ⇒ False；
+    ② 三场各 2/2 ⇒ True；③ 4 场 8 处（10 场收据被 out_k4_3* 误匹配）
+    ⇒ 总数达标也不判过。"""
+    # ① 6 处全在 s1（A/B 各重复三次）——旧口径 len==6 会误判满足
+    art = _perfect_artifact()
+    art["artifacts"]["prose"] = [
+        {"scene": "s1", "arm": arm, "status": "committed", "text": "x"}
+        for arm in ("A", "A", "A", "B", "B", "B")]
+    by = {c["id"]: c for c in k5c.build_report(
+        _write(tmp_path, "one_scene.json", art))["criteria"]}
+    ev = " ".join(by["P1"]["evidence"])
+    assert by["P1"]["satisfied"] is False, by["P1"]
+    assert "per_scene={'s1': 6, 's2': 0, 's3': 0}" in ev, ev
+    assert any("s2" in m and "s3" in m for m in by["P1"]["missing"]), \
+        by["P1"]["missing"]
+
+    # ② 三场各 2/2（其余前提满足）⇒ P1 满足，且不留 missing 话术
+    by2 = {c["id"]: c for c in k5c.build_report(
+        _write(tmp_path, "each2.json", _perfect_artifact()))["criteria"]}
+    assert by2["P1"]["satisfied"] is True, by2["P1"]
+    assert by2["P1"]["missing"] == []
+    assert "per_scene={'s1': 2, 's2': 2, 's3': 2}" in " ".join(
+        by2["P1"]["evidence"]), by2["P1"]["evidence"]
+
+    # ③ 4 场 8 处 committed ⇒ 超出三场口径，不得判过
+    art3 = _perfect_artifact()
+    art3["artifacts"]["prose"] = [
+        {"scene": f"s{i}", "arm": arm, "status": "committed", "text": "x"}
+        for i in (1, 2, 3, 4) for arm in ("A", "B")]
+    by3 = {c["id"]: c for c in k5c.build_report(
+        _write(tmp_path, "four_scenes.json", art3))["criteria"]}
+    assert by3["P1"]["satisfied"] is False, by3["P1"]
+    assert any("口径外" in m and "s4" in m for m in by3["P1"]["missing"]), \
+        by3["P1"]["missing"]
+
+
+def test_p1_names_the_missing_arm(tmp_path):
+    """三场齐但 s3 只有 A 臂 ⇒ 每场 2/2 不成立，且 missing 要指名缺哪一臂
+    （旧口径只报「5/6≠6」，说不出谁没交）。"""
+    art = _perfect_artifact()
+    art["artifacts"]["prose"] = [p for p in art["artifacts"]["prose"]
+                                 if not (p["scene"] == "s3" and p["arm"] == "B")]
+    by = {c["id"]: c for c in k5c.build_report(
+        _write(tmp_path, "no_s3b.json", art))["criteria"]}
+    assert by["P1"]["satisfied"] is False, by["P1"]
+    assert any("s3 缺 B" in m for m in by["P1"]["missing"]), by["P1"]["missing"]
+    assert "per_scene={'s1': 2, 's2': 2, 's3': 1}" in " ".join(
+        by["P1"]["evidence"]), by["P1"]["evidence"]
+
+
+# ─── 遗留 B（会审第 8 条）：路径可移植 + 报告落位 ──────────────────────
+def test_report_contains_no_machine_absolute_paths(tmp_path):
+    """报告文本内不出现机器绝对路径：`k4_artifact` 与 P0 证据行都相对
+    仓库根书写；`generated_at` 带时区偏移（假 repo-root 在 tmp 下跑）。"""
+    repo = tmp_path / "repo"
+    (repo / "out_k4_3_x").mkdir(parents=True)
+    art_file = repo / "out_k4_3_x" / "k4_paired.json"
+    art_file.write_text(json.dumps(_perfect_artifact(), ensure_ascii=False),
+                        encoding="utf-8")
+    report = k5c.build_report(art_file, True, repo)
+    text = json.dumps(report, ensure_ascii=False)
+    assert report["k4_artifact"] == "out_k4_3_x/k4_paired.json", \
+        report["k4_artifact"]
+    by = {c["id"]: c for c in report["criteria"]}
+    assert "out_k4_3_x/k4_paired.json" in " ".join(by["P0"]["evidence"]), \
+        by["P0"]["evidence"]
+    assert str(tmp_path) not in text, "报告内不得出现机器绝对路径"
+    assert not _ABS_RE.search(text), "报告内不得内嵌盘符级绝对路径"
+    assert _TZ_RE.search(report["generated_at"]), report["generated_at"]
+
+
+def test_portable_path_outside_repo_has_no_drive_letter(tmp_path):
+    """仓外收据：退化成 `<仓外>/文件名` 占位，仍不内嵌盘符。"""
+    art_file = tmp_path / "loose.json"
+    art_file.write_text(json.dumps(_perfect_artifact(), ensure_ascii=False),
+                        encoding="utf-8")
+    repo = tmp_path / "repo2"
+    (repo / "docs").mkdir(parents=True)
+    report = k5c.build_report(art_file, False, repo)
+    text = json.dumps(report, ensure_ascii=False)
+    assert report["k4_artifact"] == "<outside-repo>/loose.json", \
+        report["k4_artifact"]
+    assert not _ABS_RE.search(text), text[:300]
+
+
+def test_report_out_path_lands_in_docs_not_repo_root(tmp_path):
+    """落位规则：裸文件名一律进 <repo>/docs/（仓根不再新增报告）；
+    带目录的相对路径按仓库根解析；绝对路径按给定写入。"""
+    assert k5c.resolve_out_path("k5_report_20260925.json") == \
+        k5c.ROOT / "docs" / "k5_report_20260925.json"
+    assert k5c.resolve_out_path("docs/k5_r.json") == k5c.ROOT / "docs" / "k5_r.json"
+    assert k5c.resolve_out_path("sub/k5_r.json") == k5c.ROOT / "sub" / "k5_r.json"
+    abs_p = tmp_path / "out" / "k5_r.json"
+    assert k5c.resolve_out_path(str(abs_p)) == abs_p
+
+
+def test_repo_root_default_is_script_derived():
+    """--repo-root 缺省改由脚本自身推导（ROOT），不再硬编码主仓机器路径。"""
+    a = k5c.build_argparser().parse_args([])
+    assert a.repo_root == str(k5c.ROOT), "缺省仓库根须由脚本自身推导"
+    assert (Path(a.repo_root) / "scripts" / "k5_criteria_check.py").is_file(), \
+        "推导出的仓库根须真的含本脚本——硬编码主仓路径做不到这一点"
+
