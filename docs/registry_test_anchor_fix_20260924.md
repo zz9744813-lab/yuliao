@@ -142,3 +142,34 @@ if (r.text_sha256 or None) != (sha or None):
      应如实列出而非掩盖——尤其注意任何新建带 `WorkSource` 却仍不带锚、且不随夹具
      清库的**新**测试文件（当前 §2 排除项已核对，无一泄漏）。
 - 单跑 `pytest tests/test_work_registry.py -q` 仍应 20 passed（改动不触碰其判定，仅换锚来源）。
+
+
+## 7. 主控实跑补证（2026-09-25 08:1x，回应会审 9e2c3f8 千问席 BLOCK 的唯一实质理由）
+
+会审 `9e2c3f8b8a` 千问 Qwen3.8-Flash 席判 **BLOCK**，实质理由只有一条：本文件 §6 自述
+「未能实际执行 pytest」+ §5 写「未 commit / merge / push」，而该变更已以 merge 落进 main
+⇒ 「修复有效」在合并时点无任何实测证据。中转 glm-5.3 席同批判 **PASS**（仅一般/建议级）。
+现由主控在同一 main HEAD 上实跑补齐，命令与原始输出如下（**非采信执行代理回执**）：
+
+```
+$ F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest tests/ -o addopts="" -p no:warnings
+tests	est_websrc_contract.py ..................                         [ 97%]
+tests	est_work_registry.py ....................                         [ 99%]
+tests	est_writer.py ........                                            [100%]
+============ 1092 passed, 1 skipped, 3 xfailed in 89.81s (0:01:29) ============
+```
+
+- **全量绿**：`1092 passed / 1 skipped / 3 xfailed / 0 failed`（`1 skipped` = 缺 `fastembed`
+  的既有环境跳过项，非本次改动引入；`3 xfailed` 为既有 xfail 标记）。§6 第 3 条要求的
+  `test_clean_tree_passes_and_roots_only` 在全量序下**绿**。
+- **顺序无关验收**（§6 第 1 条）：`pytest tests/test_k2_pairs_gen.py tests/test_work_registry.py -q`
+  → exit 0 全绿（改前该组合报 `n_mismatch=13`，条数随组合变化）。
+- **新增回归**（§6 第 2 条）：`pytest tests/test_registry_anchor_order.py -q` → 4 passed。
+- **§5「未 commit / merge / push」的更正**：该句描述的是**执行代理会话内**的边界（执行代理
+  确实未提交）；收口动作由主控完成——`689eab6`（修复）+ `9e2c3f8`（merge）。执行代理未越权，
+  但文档口径与提交形态不一致，此处更正为「执行代理未 commit；主控收口提交 `689eab6`/`9e2c3f8`」。
+- 会审另两席提出的「`test_strategy_stats_rebuild.py` / `test_k4_registered_world_preflight.py`
+  是否缺 `sys.path` tests 路径」：已逐文件核实——前者 `:26-27` 插入 `ROOT` 与 `ROOT/scripts`，
+  且在 `:97-98` 用**函数内** `from registry_anchor import refresh`（`scripts` 侧 import 时
+  `tests` 已在 `sys.path`，全量序实测绿）；后者 `:22` 显式插入 `ROOT/tests`。⇒ 两处**不是必红**，
+  glm 席的「一般」级担忧经实跑排除。
