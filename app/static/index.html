@@ -919,6 +919,8 @@ async function loadNext(){
     curReview = item.review_id;
     curRaw = {A: item.text_a || '', B: item.text_b || ''};
     curPid = item.presentation_id || '';
+    curAh = item.a_hash || '';
+    curBh = item.b_hash || '';
     diffStale = true;
     lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
     marks = {A: [], B: []};
@@ -955,7 +957,7 @@ function updateHistory(id, w, tags){
   if(h){ h.winner = w; h.marks = deepCopyMarks(marks); h.tags = tags || h.tags; }
   else pushHistory({id, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
                     ctx:lastCtx, tags:tags||[], marks:deepCopyMarks(marks), winner:w,
-                    pid:curPid});
+                    pid:curPid, ahash:curAh, bhash:curBh});
 }
 
 let submitting = false;   // 交卷进行中：防连点/连按造成重复提交（第二次会被记成 rejudged）
@@ -980,8 +982,8 @@ async function sendVerdict(w){
       }
     }
     const resp = await api('/review/'+curReview+'/verdict',
-              {body:{winner:w, reasons:[], annotations,
-                     presentation_id:curPid}});
+               {body:{winner:w, reasons:[], annotations,
+                      presentation_id:curPid, a_hash:curAh, b_hash:curBh}});
     unlockChips(resp.tags||[]);
     const note = annotations.length ? ` · ${annotations.length} 处批注` : '';
     if(inRj){
@@ -990,12 +992,14 @@ async function sendVerdict(w){
     } else {
       pushHistory({id:curReview, batch:BATCH, exp:curExp, a:curRaw.A, b:curRaw.B,
                    ctx:lastCtx, tags:resp.tags||[], marks:deepCopyMarks(marks), winner:w,
-                   pid:curPid});
+                   pid:curPid, ahash:curAh, bhash:curBh});
       batchDone = Math.min(batchDone+1, batchTotal); renderProgress();
       $('#rv-state').textContent = `已记录：${WIN_LABEL[w]}${note}`;
     }
     curReview = null;
     curPid = '';
+    curAh = '';
+    curBh = '';
     setTimeout(loadNext, 820);
   }catch(e){
     submitting = false;
@@ -1049,6 +1053,8 @@ function enterRejudge(entry){
   curReview = entry.id;
   curRaw = {A: entry.a, B: entry.b};
   curPid = entry.pid || '';
+  curAh = entry.ahash || '';
+  curBh = entry.bhash || '';
   diffStale = true;
   marks = deepCopyMarks(entry.marks || {A:[], B:[]});
   markSeq = 0;
@@ -1081,6 +1087,8 @@ async function rejudgeFromDone(id){
     curReview = item.review_id;
     curRaw = {A: item.text_a || '', B: item.text_b || ''};
     curPid = item.presentation_id || '';
+    curAh = item.a_hash || '';
+    curBh = item.b_hash || '';
     diffStale = true;
     lastCtx = item.context || ''; lastCtxMode = item.ctx_mode || '';
     marks = {A: [], B: []};
@@ -1110,6 +1118,7 @@ let marks = {A: [], B: []};
 let curRaw = {A: '', B: ''};
 let curPid = '';             // A01：本次端题的 presentation_id——提交必须绑定它，
                              // 服务端按呈现当时的 A/B 排列解读，重出题不会改语义
+let curAh = '', curBh = '';
 let markSeq = 0;
 let pendingSel = null;
 
