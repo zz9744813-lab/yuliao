@@ -15,6 +15,15 @@ LLM 还原留给既有 clean_text.py --llm 流程。两条既有路径（partial
 text_clean，不产生 NULL/空串混用。只影响**新导入**，不回填既有书（既有书锚
 按 text_clean 拼，补写会让锚漂移，属主控授权面）。
 
+`n_sentences` 口径（2026-09-25 修正）：旧代码在建段处硬写 `n_sentences=0`，
+v2 段句数全库都是 0（主控只读查询实测 424,294 行；
+`app/corpus.py segment_stats()` 的 `sentences_mean` 因此是被 0 拉平的假读数），
+而 v1 导入路径写的是 `len(_sentences(s))` ⇒ 两条路径口径不一致。现在 v2 侧经
+`n_sents()` 复用 `app.segmenter_v2._count_sents`，它 import 的就是 v1 路径同一个
+`app.metrics_det._sentences`（**同源**，不自写第三套切句器）。数的是 `text`
+原文，与 v1 一致（`text_clean` 不参与计数）。存量 0 值段由
+`scripts/backfill_v2_sentences.py` 补（默认 dry-run）。
+
 中断语义（审计《language-genome-code-audit-20260923》非阻断项）：大书每 BATCH 段
 提交一次，Ctrl-C / 崩溃 / WAL 锁失败都会留下**半本**——旧口径重跑只看 `Work.source`
 就判「已导入过」直接退出，半本永远补不齐，下游也没有任何「未完成」标记可识别。
@@ -35,6 +44,19 @@ from app.models import Segment, Work  # noqa: E402
 BATCH = 2000    # 大书分批提交：SQLite 变量数上限 + WAL 锁窗口
 STATE_KEY = "import_state"
 PARTIAL, COMPLETE = "partial", "complete"
+
+
+def n_sents(text: str) -> int:
+    """本脚本唯一的句数口径入口。
+
+    **与 v1 同源**：`app.segmenter_v2._count_sents` 内部用的就是
+    `app.metrics_det._sentences`（`from .metrics_det import _sentences`），
+    而 v1 路径 `app/corpus.py add_work()` 写的也是 `len(_sentences(s))`——
+    两条导入路径落到同一个切句实现。这里不自写第三套切句器/正则/常量：
+    若 `_count_sents` 或其下游 `_sentences` 变更，本口径随之变更（勿在此
+    另加规则）。空文本返回 0；任何非空文本恒 ≥1。"""
+    return segmenter_v2._count_sents(text)
+
 
 _clean_mod = None
 
@@ -109,7 +131,10 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False,
     caveats=True 时走 app.corpus_import_v2 的三条修复口径（默认 False＝旧行为）。
     clean=True 时新段同时写 text_clean=clean_rules(text)（单源复用 clean_text.py；
     规则洗不掉的段 integrity 记 clean_pending_llm 不送 LLM）；默认 False＝旧行为
-    text_clean 留 NULL。已提交段任何路径都不重写（幂等）。"""
+    text_clean 留 NULL。已提交段任何路径都不重写（幂等）。
+    n_sentences 一律经 `n_sents()`（＝`app.segmenter_v2._count_sents`，与 v1
+    路径 `app/corpus.py add_work` 同源的 `app.metrics_det._sentences`）按段的
+    `text` 计数，不再硬写 0。"""
     text = _read_text_loose(Path(path))
     prep = corpus_import_v2.prepare_import(text, title=title) if caveats else None
     chunks = prep.chunks if prep is not None else segmenter_v2.make_segments_v2(text)
@@ -169,7 +194,7 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False,
             s.add(Segment(id=new_id("SEG"), work_id=w.id, ordinal=i, text=ch,
                           text_clean=text_clean,
                           chapter=prep.chapters[i] if prep is not None else None,
-                          n_sentences=0, n_chars=len(ch), seg_version=2,
+                          n_sentences=n_sents(ch), n_chars=len(ch), seg_version=2,
                           integrity=json.dumps(flags, ensure_ascii=False)))
             written += 1
             if written % BATCH == 0:
