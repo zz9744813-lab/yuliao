@@ -37,10 +37,18 @@ mock 不烧钱故跳过以保双闸测试）：过闸才许起真实调用，否
         --book-id WK-dc90993434e9   # 只读预检：WK-K4 默认也行
     python scripts/k4_paired_scenes.py --live --book-id WK-dc90993434e9 \
         --writer-model m1 --verifier-model m2   # 过闸才真跑
+
+审计非阻断项收口（2026-09-25，docs/K4_世界目录收据_20260924.md）：live 收据
+（four["receipts"] 逐条）补记 worlds_dir（产物世界目录，绝对路径）+
+worlds_dir_exists + created_at（目录创建时刻 ISO8601 UTC）+ worlds_dir_cleaned
+（正常收口留库=False 供 tokens 对账；异常/中断且收据未落盘时保守清理本次自建的
+临时目录=True——清理只作用于本次 mkdtemp 自建目录，绝不碰他处）。
+离线（非 live）路径的收据字段与产物 JSON 逐字不变。
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -191,7 +199,9 @@ class FxClient:
 
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
                freeze: bool = False, n_scenes: int = 3,
-               channel_changed: bool = False) -> dict:
+               channel_changed: bool = False,
+               worlds_dir: str | None = None,
+               worlds_created_at: str | None = None) -> dict:
     """N 场（默认 3=SCENES；扩展场派生见 scenes_for）× 2 臂 + 四类产物
     （prose/packages/receipts/failures）+ skipped（断臂后未执行的后续场
     单列，不进 failures——C2/止损台账不被连锁幻影污染，2026-09-23 会审
@@ -201,7 +211,19 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
     revision 逐场递增）。同幂等键异输入必冲突（K3-B 契约）→ 两臂 idem
     键各带后缀。freeze 只在真跑（--live）时 True——离线零库写。
     **回滚口径**：freeze_package 逐臂即时 commit，已提交的冻结写不因
-    另一臂 rollback 回退（rollback 只丢本臂未提交部分，每臂收据独立）。"""
+    另一臂 rollback 回退（rollback 只丢本臂未提交部分，每臂收据独立）。
+
+    worlds_dir / worlds_created_at：本次跑的世界目录（main() 里
+    tempfile.mkdtemp(prefix="k4_worlds_") 自建）及其创建时刻（ISO8601
+    UTC）。仅 live 消费——审计非阻断项收口（2026-09-25）：live 收据逐条
+    记 worlds_dir/worlds_dir_exists/created_at，缺参即拒跑（不带无收据的
+    真跑）；离线（live=False）不消费、收据字段逐字不变。"""
+    if live:
+        if worlds_dir is None or worlds_created_at is None:
+            raise ValueError("run_paired: live 跑必须记 worlds_dir 与 "
+                             "worlds_created_at——无收据地址不许起真跑"
+                             "（审计非阻断项收口 2026-09-25）")
+        worlds_dir_abs = str(Path(worlds_dir).resolve())
     four = {"prose": [], "packages": [], "receipts": [], "failures": [],
             "skipped": []}
     stores = {arm: store_factory() for arm in ("A", "B")}
@@ -265,22 +287,30 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                               for a in u.get("attempts", [])
                               if str(a.get("stage", "")
                                      ).startswith("verifier")]
-                four["receipts"].append(
-                    {"scene": scene_id, "arm": arm,
-                     "job_id": receipt["job_id"],
-                     "usage": {"calls": u.get("calls", 0),
-                               "duration_ms": u.get("duration_ms", 0),
-                               "tokens": u.get("tokens", 0),
-                               "verifier_invalid_retries":
-                                   u.get("verifier_invalid_retries", 0)},
-                     "live": live,
-                     # C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed
-                     "channel_changed": channel_changed,
-                     "gateway_host": gw_host,
-                     "models": {"writer": client.models.get("writer"),
-                                "verifier": client.models.get("verifier")},
-                     "retried": bool(u.get("verifier_invalid_retries")),
-                     "verifier_attempts": v_attempts})
+                rec = {"scene": scene_id, "arm": arm,
+                       "job_id": receipt["job_id"],
+                       "usage": {"calls": u.get("calls", 0),
+                                 "duration_ms": u.get("duration_ms", 0),
+                                 "tokens": u.get("tokens", 0),
+                                 "verifier_invalid_retries":
+                                     u.get("verifier_invalid_retries", 0)},
+                       "live": live,
+                       # C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed
+                       "channel_changed": channel_changed,
+                       "gateway_host": gw_host,
+                       "models": {"writer": client.models.get("writer"),
+                                  "verifier": client.models.get("verifier")},
+                       "retried": bool(u.get("verifier_invalid_retries")),
+                       "verifier_attempts": v_attempts}
+                if live:
+                    # 审计非阻断项收口（2026-09-25）：live 收据逐条记产物
+                    # 世界目录（绝对路径）、写收据时目录是否仍在、目录创建
+                    # 时刻（ISO8601 UTC）——事后从收据即可定位 arm*/k4.sqlite
+                    # 对账产物。离线收据不加键：默认路径输出逐字不变。
+                    rec["worlds_dir"] = worlds_dir_abs
+                    rec["worlds_dir_exists"] = Path(worlds_dir_abs).exists()
+                    rec["created_at"] = worlds_created_at
+                four["receipts"].append(rec)
             except Exception as exc:             # noqa: BLE001
                 failed_at[arm] = scene_id       # 断臂标记：本臂后续场 skip
                 # 回滚口径（会审五轮）：freeze_package 是**逐臂即时 commit**
@@ -401,6 +431,11 @@ def main() -> None:
         else:
             client = FxClient()
         tmp = Path(tempfile.mkdtemp(prefix="k4_worlds_"))
+        # 世界目录创建时刻（ISO8601 UTC，Z 后缀）——随 live 收据逐条落账
+        worlds_created_at = datetime.datetime.now(
+            datetime.timezone.utc).isoformat(
+                timespec="seconds").replace("+00:00", "Z")
+        receipted = False        # 产物（含 worlds_dir 收据）是否已打印/落盘
         try:
             def factory():
                 factory.n = getattr(factory, "n", 0) + 1
@@ -410,14 +445,25 @@ def main() -> None:
             with db.session() as s:
                 four = run_paired(factory, client, s, live=a.live,
                                   freeze=a.live, n_scenes=a.scenes,
-                                  channel_changed=a.channel_changed)
+                                  channel_changed=a.channel_changed,
+                                  worlds_dir=str(tmp),
+                                  worlds_created_at=worlds_created_at)
             analysis = paired_analysis(four, scenes_for(a.scenes))
+            if a.live:
+                # worlds_dir_cleaned 语义（审计非阻断项收口）：走到这里即
+                # 正常收口——live 留库作收据（tokens 对账要读这里的
+                # arm*/k4.sqlite），不清理，记 False。异常/中断且收据未落盘
+                # 的分支在 finally 清理（记 stderr，收据本就无从谈起）。
+                for r in four["receipts"]:
+                    r["worlds_dir_cleaned"] = False
             # worlds_dir 记入产物（审计非阻断项收口）：live 留库作收据——
             # tokens 对账（收据之和 vs calls 表之和）要读这里的 arm*/k4.sqlite
             out = {"artifacts": four, "analysis": analysis, "live": a.live,
                    "channel_changed": a.channel_changed,
                    "worlds_dir": str(tmp)}
             print(json.dumps(out, ensure_ascii=False, indent=1))
+            receipted = True       # 收据已对外可见（stdout 即记录）——此后
+                                   # 世界目录被收据引用，任何异常都不再清理
             if a.out:
                 d = Path(a.out)
                 d.mkdir(parents=True, exist_ok=True)
@@ -428,6 +474,15 @@ def main() -> None:
         finally:
             if not a.live:                  # 离线 fixture 世界用后即清；
                 shutil.rmtree(tmp, ignore_errors=True)   # --live 留库作收据
+            elif not receipted:
+                # 泄漏路径收口（2026-09-25）：live 异常/中断且收据从未落盘
+                # ——本次自建的临时世界目录不会被任何收据引用，留着即泄漏。
+                # 保守口径：只删本次 mkdtemp 自建的 tmp（O_EXCL 唯一目录），
+                # 绝不删他处目录；收据已落盘（receipted=True）时留库不删。
+                shutil.rmtree(tmp, ignore_errors=True)
+                print(f"[k4_paired_scenes] live 中断且收据未落盘：已清理本次"
+                      f"自建临时世界目录 {tmp}（worlds_dir_cleaned=true，"
+                      f"仅限本次 mkdtemp 自建目录）", file=sys.stderr)
         if four["failures"]:
             raise SystemExit(
                 f"有失败臂：{len(four['failures'])} 条（另有 "
