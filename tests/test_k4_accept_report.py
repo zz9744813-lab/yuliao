@@ -43,7 +43,7 @@ CREATE TABLE calls(
 
 def _mk_world(tmp_path, arm_n, *, scene, max_calls=6, max_rewrites=2,
               n_calls=6, all_succeeded=True, job_status="running",
-              call_statuses=None):
+              call_statuses=None, budget_in_request=True):
     """造一个与 store.py 同形的最小世界库（离线夹具，写 tmp_path 副本）。"""
     d = tmp_path / f"arm{arm_n}"
     d.mkdir(parents=True, exist_ok=True)
@@ -51,10 +51,12 @@ def _mk_world(tmp_path, arm_n, *, scene, max_calls=6, max_rewrites=2,
     con = sqlite3.connect(p)
     con.executescript(SCHEMA)
     job_id = f"job-{scene}-{'AB'[arm_n - 1]}"
-    request = json.dumps({
-        "plan": {"scene_id": scene, "idempotency_key": f"k4-{scene}-"
-                 f"{'AB'[arm_n - 1]}"},
-        "budget": {"max_calls": max_calls, "max_rewrites": max_rewrites}})
+    plan = {"plan": {"scene_id": scene, "idempotency_key": f"k4-{scene}-"
+                     f"{'AB'[arm_n - 1]}"}}
+    if budget_in_request:
+        plan["budget"] = {"max_calls": max_calls,
+                          "max_rewrites": max_rewrites}
+    request = json.dumps(plan)
     con.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (job_id, "WK-K4", "main", scene,
                  f"k4-{scene}-{'AB'[arm_n - 1]}", "h", request,
@@ -194,3 +196,105 @@ def test_unknown_code_is_defect(tmp_path):
                    "error": "mysterious_fault", "rollback_failed": False}])
     rows = _by(k4ar.classify(art)["rows"])
     assert rows[("s2", "A")]["verdict"] == "defect_undetermined"
+
+
+# —— 预算诊断 budget_diag 接入（accept-budget-diag，2026-09-25）——
+
+def _diag_failure(**diag):
+    return {"scene": "s2", "arm": "A", "error_type": "RuntimeFault",
+            "error": "call_budget_exhausted", "rollback_failed": False,
+            "budget_diag": diag}
+
+
+def test_budget_diag_hard_evidence_is_honest(tmp_path):
+    """a) budget_diag.actual_calls == max_calls（硬证据）⇒ 诚实失败。"""
+    _mk_world(tmp_path, 1, scene="s2", n_calls=6)
+    art = _artifact(tmp_path, failures=[
+        _diag_failure(max_calls=6, configured=False, actual_calls=6,
+                      failed_calls=0, repair_calls=1)])
+    r = _by(k4ar.classify(art)["rows"])[("s2", "A")]
+    assert r["verdict"] == "honest_failure", r
+    joined = "".join(r["basis"])
+    assert "budget_diag" in joined and "actual_calls=6" in joined
+
+
+def test_budget_diag_actual_lt_max_overrides_to_defect(tmp_path):
+    """b) 世界库旧口径看着自洽（calls=6==max_calls=6），但 budget_diag
+    硬证据 actual_calls=4 < max_calls=6 ⇒ 判 defect，不许判诚实
+    （优先级的存在意义：diag 能推翻仅凭世界库的诚实结论）。"""
+    _mk_world(tmp_path, 1, scene="s2", n_calls=6)
+    art = _artifact(tmp_path, failures=[
+        _diag_failure(max_calls=6, configured=True, actual_calls=4,
+                      failed_calls=0, repair_calls=2)])
+    r = _by(k4ar.classify(art)["rows"])[("s2", "A")]
+    assert r["verdict"] == "defect_undetermined", r
+    assert "actual_calls=4" in r["note"]
+
+
+def test_no_diag_old_receipt_summary_verbatim(tmp_path):
+    """c) 无 budget_diag 的旧收据（out_k4_3_mc22_v2 形态）⇒ 退回旧口径，
+    summary 与基线（docs/K4验收定性_20260925.md §1 真跑：pass=2、
+    honest_failure=2、defect_undetermined=0、insufficient_evidence=0、
+    cascade_skip=2、total=6）**逐字相同**——默认语义零变化。"""
+    _mk_world(tmp_path, 1, scene="s2", n_calls=6, all_succeeded=True)
+    _mk_world(tmp_path, 2, scene="s2", n_calls=6)
+    art = _artifact(
+        tmp_path,
+        prose=[{"scene": "s1", "arm": "A", "status": "committed"},
+               {"scene": "s1", "arm": "B", "status": "committed"}],
+        receipts=[{"scene": "s1", "arm": "A", "job_id": "j1",
+                   "usage": {"calls": 2, "tokens": 900,
+                             "verifier_invalid_retries": 0}},
+                  {"scene": "s1", "arm": "B", "job_id": "j2",
+                   "usage": {"calls": 2, "tokens": 950,
+                             "verifier_invalid_retries": 0}}],
+        failures=[
+            {"scene": "s2", "arm": "A", "error_type": "RuntimeFault",
+             "error": "call_budget_exhausted", "rollback_failed": False,
+             "rollback_error": None},
+            {"scene": "s2", "arm": "B", "error_type": "RuntimeFault",
+             "error": "rewrite_budget_exhausted:"
+                      "missing_or_unplanned_event",
+             "rollback_failed": False, "rollback_error": None}],
+        skips=[{"scene": "s3", "arm": "A", "skipped_after": "s2"},
+               {"scene": "s3", "arm": "B", "skipped_after": "s2"}])
+    report = k4ar.classify(art)
+    assert report["summary"] == {
+        "pass": 2, "honest_failure": 2, "defect_undetermined": 0,
+        "insufficient_evidence": 0, "cascade_skip": 2, "total": 6}
+    rows = _by(report["rows"])
+    # 旧口径文案不因接入而漂移：
+    assert any("calls == max_calls" in b for b in rows[("s2", "A")]["basis"])
+    assert "budget_diag" not in json.dumps(report, ensure_ascii=False)
+
+
+def test_store_unavailable_annotated_not_flipped(tmp_path):
+    """d) budget_diag.store_unavailable=true ⇒ 报告如实标注「诊断取数
+    失败、退回旧口径」，判定不翻（世界库自洽 ⇒ 仍 honest_failure）。"""
+    _mk_world(tmp_path, 1, scene="s2", n_calls=6)
+    art = _artifact(tmp_path, failures=[
+        _diag_failure(max_calls=6, configured=True, store_unavailable=True)])
+    report = k4ar.classify(art)
+    r = _by(report["rows"])[("s2", "A")]
+    assert r["verdict"] == "honest_failure", r
+    text = json.dumps(report, ensure_ascii=False)
+    assert "store_unavailable" in text
+    assert "取数失败" in text and "退回旧口径" in text
+    # 退回旧口径：世界库逐行核对文案仍在
+    assert any("calls == max_calls" in b for b in r["basis"])
+
+
+def test_fallback_max_calls_from_receipt_budget_calls(tmp_path):
+    """旧口径回退源钉：世界库 jobs.request 未记预算时生效上限取收据
+    budget_calls（缺字段不许翻 defect）；旧收据两者皆无 ⇒ 口径不变。"""
+    _mk_world(tmp_path, 1, scene="s2", n_calls=6, budget_in_request=False)
+    art = _artifact(
+        tmp_path,
+        receipts=[{"scene": "s2", "arm": "A", "job_id": "job-s2-A",
+                   "budget_calls": 6}],
+        failures=[{"scene": "s2", "arm": "A", "error_type": "RuntimeFault",
+                   "error": "call_budget_exhausted",
+                   "rollback_failed": False}])
+    r = _by(k4ar.classify(art)["rows"])[("s2", "A")]
+    assert r["verdict"] == "honest_failure", r
+    assert any("budget_calls=6" in b for b in r["basis"])
