@@ -28,9 +28,63 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import heldout_eval as he  # noqa: E402
-from app import db  # noqa: E402
+from app import db, limits  # noqa: E402
 from app.context_ablation import scene_context  # noqa: E402
+from app.gateway import is_serial_model  # noqa: E402
 from app.models import Candidate, JudgeRun, Segment  # noqa: E402
+
+
+def _pool_workers(conc: int, models=()) -> int:
+    """线程池 worker 数的运行时兜底（上限真源：app/limits.py::MAX_CONCURRENCY）。
+
+    CLI 闸（_check_conc）已对越界**报错退出**；本函数管绕过命令行直接调函数的
+    路径：越界按上限截断并打印（不静默）；命中单账号 CLI 模型
+    （app.gateway.is_serial_model，判定口径唯一，不许本脚本自比前缀）→ workers
+    恒 1 并打印「串行强制」。界内正常值原样返回、零额外输出。
+    """
+    requested = max(1, int(conc))
+    workers = min(requested, limits.MAX_CONCURRENCY)
+    hits = [m for m in models if is_serial_model(m)]
+    if hits:
+        print(f"[conc] 串行强制：命中单账号 CLI 模型 {hits} → workers=1（请求 conc={conc}）",
+              flush=True)
+        return 1
+    if workers != requested:
+        print(f"[conc] 越界截断：conc={conc} → workers={workers}"
+              f"（上限 app/limits.MAX_CONCURRENCY={limits.MAX_CONCURRENCY}）", flush=True)
+    return workers
+
+
+def _check_conc(ap, value: int, flag: str) -> None:
+    """`--conc` 硬上界闸：超界响亮报错退出（parser.error → SystemExit(2)），不静默 clamp。"""
+    if value > limits.MAX_CONCURRENCY:
+        ap.error(f"{flag}={value} 超过上限 {limits.MAX_CONCURRENCY}"
+                 f"（单一真源 app/limits.py::MAX_CONCURRENCY）；"
+                 f"本脚本拒绝静默 clamp，越界即报错退出")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--models", required=True, help="逗号分隔的模型 id")
+    ap.add_argument("--variants", default="v4", help="默认只跑 v4（口径与既有评委同源）")
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY="
+                         f"{limits.MAX_CONCURRENCY}，越界报错退出）；agy 等单账号 CLI 通道"
+                         f"（gateway.is_serial_model 命中）会被强制串行 workers=1")
+    ap.add_argument("--batch", default=None,
+                    help="只跑这些批次（逗号分隔），如 h30,mix30,nq50")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args(argv)
+    _check_conc(ap, args.conc, "--conc")
+    return args
+
+
+def _run_pool(jobs: list, conc: int, models: list[str]) -> None:
+    """执行本脚本全部评委补跑；worker 数由 _pool_workers 兜底（上限+串行）。"""
+    workers = _pool_workers(conc, models)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: he.run_one(*j), jobs):
+            pass
 
 
 def load_cids(batch: str | None = None) -> list[str]:
@@ -74,15 +128,7 @@ def verify(cids, models, variants) -> list[str]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--models", required=True, help="逗号分隔的模型 id")
-    ap.add_argument("--variants", default="v4", help="默认只跑 v4（口径与既有评委同源）")
-    ap.add_argument("--conc", type=int, default=4,
-                    help="agy 等共享额度通道必须 =1（顺序调用）")
-    ap.add_argument("--batch", default=None,
-                    help="只跑这些批次（逗号分隔），如 h30,mix30,nq50")
-    ap.add_argument("--dry-run", action="store_true")
-    args = ap.parse_args()
+    args = parse_args()
     models = [m.strip() for m in args.models.split(",") if m.strip()]
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for v in variants:
@@ -109,9 +155,7 @@ def main() -> None:
     print(f"上文中位 {med} 字")
 
     jobs = [(cid, ctx_by_cid[cid], m, v) for m in models for v in variants for cid in cids]
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: he.run_one(*j), jobs):
-            pass
+    _run_pool(jobs, args.conc, models)
     print(f"完成：ok={he._counter['ok']} failed={he._counter['failed']} skip={he._counter['skip']}")
 
     gaps = verify(cids, models, variants)

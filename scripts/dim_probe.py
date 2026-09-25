@@ -34,12 +34,62 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import heldout_eval as he  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
-from app import db  # noqa: E402
+from app import db, limits  # noqa: E402
 from app.context_ablation import scene_context  # noqa: E402
-from app.gateway import chat  # noqa: E402
+from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import Candidate, JudgeRun, Segment  # noqa: E402
 
 PV = "dim_rating_v1"
+
+
+def _pool_workers(conc: int, models=()) -> int:
+    """线程池 worker 数的运行时兜底（上限真源：app/limits.py::MAX_CONCURRENCY）。
+
+    CLI 闸（_check_conc）已对越界**报错退出**；本函数管绕过命令行直接调函数的
+    路径：越界按上限截断并打印（不静默）；命中单账号 CLI 模型
+    （app.gateway.is_serial_model，判定口径唯一，不许本脚本自比前缀）→ workers
+    恒 1 并打印「串行强制」。界内正常值原样返回、零额外输出。
+    """
+    requested = max(1, int(conc))
+    workers = min(requested, limits.MAX_CONCURRENCY)
+    hits = [m for m in models if is_serial_model(m)]
+    if hits:
+        print(f"[conc] 串行强制：命中单账号 CLI 模型 {hits} → workers=1（请求 conc={conc}）",
+              flush=True)
+        return 1
+    if workers != requested:
+        print(f"[conc] 越界截断：conc={conc} → workers={workers}"
+              f"（上限 app/limits.MAX_CONCURRENCY={limits.MAX_CONCURRENCY}）", flush=True)
+    return workers
+
+
+def _check_conc(ap, value: int, flag: str) -> None:
+    """`--conc` 硬上界闸：超界响亮报错退出（parser.error → SystemExit(2)），不静默 clamp。"""
+    if value > limits.MAX_CONCURRENCY:
+        ap.error(f"{flag}={value} 超过上限 {limits.MAX_CONCURRENCY}"
+                 f"（单一真源 app/limits.py::MAX_CONCURRENCY）；"
+                 f"本脚本拒绝静默 clamp，越界即报错退出")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--models", default="moonshotai/kimi-k3")
+    ap.add_argument("--conc", type=int, default=3,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY="
+                         f"{limits.MAX_CONCURRENCY}，越界报错退出）")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--report", action="store_true")
+    args = ap.parse_args(argv)
+    _check_conc(ap, args.conc, "--conc")
+    return args
+
+
+def _run_pool(jobs: list, conc: int, models: list[str]) -> None:
+    """执行本脚本全部探针调用；worker 数由 _pool_workers 兜底（上限+串行）。"""
+    workers = _pool_workers(conc, models)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: one(*j), jobs):
+            pass
 DIMS = ["语义贴合", "语言", "用词", "节奏", "情感"]
 SYSTEM = "你是中文小说编辑。只按被问的维度比较，不要给总体偏好。"
 PROMPT = """前文：
@@ -174,12 +224,7 @@ def report() -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--models", default="moonshotai/kimi-k3")
-    ap.add_argument("--conc", type=int, default=3)
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--report", action="store_true")
-    args = ap.parse_args()
+    args = parse_args()
     db.init_db()
     if args.report:
         report()
@@ -193,9 +238,7 @@ def main() -> None:
     # 批量防呆①（P0 死 id 事故）：池外模型的表现是 failed=整批，与"没货"同形
     pf.require_models(models, source="dim_probe")
     jobs = [(c, m) for m in models for c in cids]
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: one(*j), jobs):
-            pass
+    _run_pool(jobs, args.conc, models)
     print(f"完成：ok={_cnt['ok']} failed={_cnt['failed']} skip={_cnt['skip']}")
     report()
 
