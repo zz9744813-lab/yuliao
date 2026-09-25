@@ -4,20 +4,21 @@
 控制台：http://127.0.0.1:8787/  （鉴权见 app/access.py：loopback 免令牌需
 显式 LG_LOCAL_BYPASS=1，默认本机访问也需令牌）
 
-主要端点：
-  POST /corpus/import-inbox | import-distiller | import-file
-  GET  /works /segments /corpus/stats
-  POST /experiments            (body = experiment config override)
-  POST /experiments/{id}/run   (后台线程跑实验引擎的阶段状态机；body 可带 {"stages":[...]} 子集)
+主要端点（档位注明，2026-09-25 起两档令牌生效，见 app/access.py）：
+  POST /corpus/import-inbox | import-distiller | import-file   [管理档=admin]
+                                                               （建段/扩产入口，评审档 403）
+  GET  /works /segments /corpus/stats                         [评审档]
+  POST /experiments                                            [管理档=admin]（建实验=扩产）
+  POST /experiments/{id}/run                                   [管理档=admin]（启 run=烧钱/扩产）
   GET  /experiments /experiments/{id} /experiments/{id}/stages /experiments/{id}/report(.json)
-                               （/stages = 引擎各阶段状态，任务 12）
-  GET  /experiments/{id}/review          队列（含优先级理由）
-  GET  /experiments/{id}/review/next     盲评取题：匿名 A/B，服务端暗记映射
-  GET  /experiments/{id}/review/{rid}/serve  改判入口：重端已判题（A/B 重洗 + 回填原判）
+                                                               [评审档]
+  GET  /experiments/{id}/review          队列（含优先级理由）    [评审档]
+  GET  /experiments/{id}/review/next     盲评取题：匿名 A/B，服务端暗记映射   [评审档]
+  GET  /experiments/{id}/review/{rid}/serve  改判入口：重端已判题   [评审档]
   POST /review/{id}/verdict    {"winner":"A|B|tie|both_bad|cant_judge","reasons":[...]}
-                               （已判题可覆盖改判；响应附本题信号标签，判定后才可展示）
-  GET  /review/batch/{b} | /review/batch/{b}/done   批次概览 / 已判清单
-  GET  /llm/stats
+                                                               [评审档]（评审者的写入口，专属）
+  GET  /review/batch/{b} | /review/batch/{b}/done   批次概览 / 已判清单   [评审档]
+  GET  /llm/stats                                            [评审档]
 """
 from __future__ import annotations
 
@@ -73,6 +74,8 @@ if (_WEBSRC / "_shared").is_dir():
 
 
 # ── 语料 ────────────────────────────────────────────────────
+# 以下三个导入端点 = 建段/扩产入口，只认管理档（app/access.requires_admin）；
+# 评审令牌走这里一律 403。既有行为/实现零改动，档位由访问门中间件裁决。
 
 @app.post("/corpus/import-inbox")
 def import_inbox():
