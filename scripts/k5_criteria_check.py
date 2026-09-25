@@ -26,6 +26,7 @@ import argparse
 import datetime
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 DOC = "docs/K5-A_离线前置评估.md（v1/2）"
 STOP_LOSS_TOKENS = 8_000_000        # §4 总量止损线
 K4_SCENE_BUDGET = {"normal_calls_per_arm": 2, "worst_calls_per_arm": 6,
-                   "arms": 2, "scenes": 10}
+                   "arms": 2, "scenes": 10,
+                   # 收据不可读时的保守兜底单价（不静默：price_src 会写明来源）
+                   "fallback_per_call": 542}
 
 
 def _load_json(path: Path):
@@ -52,12 +55,56 @@ def latest_k4_artifact(repo_root: Path) -> Path | None:
     return cands[0] if cands else None
 
 
+def _world_db_tokens(art: dict) -> tuple[int, str]:
+    """世界库实耗 tokens（含失败臂）：逐 job 的 calls.response 里
+    tokens_in+tokens_out 求和（只读打开，mode=ro）。
+
+    为什么必须算：三场收据 receipts 只覆盖 committed 臂（s1 两臂），
+    s2 两臂诚实失败后的 6+6 次调用实耗**只在世界库 calls 表**里。
+    2026-09-25 会审双席一致指出：止损若只累加 receipts，会把 12,810
+    报成 2,167，止损线形同虚设。不可读时返回 (0, 原因)，由调用方
+    如实降级并在证据行披露（不静默当成 0）。
+    """
+    wd = art.get("worlds_dir")
+    if not wd:
+        return 0, "收据无 worlds_dir 字段——失败臂实耗不可核，止损按收据口径（会少计）"
+    total, n_db, errs = 0, 0, []
+    for db in sorted(Path(wd).glob("arm*/*.sqlite")):
+        try:
+            con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+            try:
+                for (resp,) in con.execute("select response from calls"):
+                    if not resp:
+                        continue
+                    try:
+                        d = json.loads(resp)
+                    except (TypeError, ValueError):
+                        continue
+                    total += int(d.get("tokens_in") or 0) + int(d.get("tokens_out") or 0)
+                n_db += 1
+            finally:
+                con.close()
+        except sqlite3.Error as e:
+            errs.append(f"{db.parent.name}: {e}")
+    if not n_db:
+        return 0, ("世界库不可读（%s）——失败臂实耗不可核，止损按收据口径（会少计）"
+                   % ("; ".join(errs) or "无 arm*/*.sqlite"))
+    return total, (f"世界库 {n_db} 个 arm 库实耗={total}（含失败臂）"
+                   + ("；部分库不可读：%s" % "; ".join(errs) if errs else ""))
+
+
+def has_ten_scene_artifact(repo_root: Path) -> bool:
+    """10 场真跑收据是否存在（out_k4_10*/k4_paired.json）——C5 的满足前提。"""
+    return any(Path(repo_root).glob("out_k4_10*/k4_paired.json"))
+
+
 def _crit(cid, name, source, satisfied, evidence, missing):
     return {"id": cid, "name": name, "source": source,
             "satisfied": satisfied, "evidence": evidence, "missing": missing}
 
 
-def check_criteria(artifact_path: Path | None) -> list[dict]:
+def check_criteria(artifact_path: Path | None,
+                   ten_scene_present: bool = False) -> list[dict]:
     """P0–P3 + C1–C5 逐条核验（只读收据；缺收据=缺证据=未满足）。"""
     out: list[dict] = []
     art = None
@@ -91,7 +138,11 @@ def check_criteria(artifact_path: Path | None) -> list[dict]:
     prose = a.get("prose") or []
     committed = [(p["scene"], p["arm"]) for p in prose
                  if p.get("status") == "committed"]
-    tokens = sum(r.get("usage", {}).get("tokens", 0) for r in receipts)
+    tokens_receipts = sum(r.get("usage", {}).get("tokens", 0) for r in receipts)
+    tokens_worlds, worlds_note = _world_db_tokens(art)
+    # 止损口径取两者较大者：收据只覆盖 committed 臂，失败臂实耗只在世界库；
+    # 只用收据会系统性少计（会审双席 2026-09-25 一致指出）。
+    tokens = max(tokens_receipts, tokens_worlds)
     nonempty = sum(1 for p in packages if p.get("n_techniques", 0) >= 1)
     pkg_scenes = len(packages)
     live = art.get("live") is True
@@ -173,23 +224,34 @@ def check_criteria(artifact_path: Path | None) -> list[dict]:
 
     # C5 通道一致性
     cc = art.get("channel_changed")
-    c5_ok = bool(live and cc is True)
+    models = receipts[0].get("models") if receipts else None
+    # 会审 2026-09-25 指出：C5 是「三场+10 场同通道」的一致性判据，
+    # 10 场收据缺位时不能给 satisfied=True；证据键缺失也不许静默判过。
+    # C5 判据原文（docs/K5-A §2）：10 场用与 K4 相同通道，换通道须标
+    # channel_changed 并对 C1 复核。故 C5 的满足前提是**10 场收据存在**；
+    # 只有三场收据时不能判过（会审 2026-09-25 一致指出）。
+    c5_ok = bool(live and cc is True and models is not None
+                 and ten_scene_present)
     out.append(_crit("C5", "通道一致性（换通道须标 channel_changed 并复核 C1）",
                      DOC + " §2（A6 写死：未标 → C1 与 C5 均不过）", c5_ok,
-                     [f"收据 channel_changed={cc}；writer/verifier 记录="
-                      f"{receipts[0].get('models') if receipts else None}"],
-                     [] if c5_ok else [
-                          "10 场尚未真跑（无 out_k4_10 收据）；三场收据须带"
-                          " channel_changed=true 且 10 场与之同通道或换通道"
-                          "再标再复核 C1"] if cc is True else [
-                          "三场收据未标 channel_changed=true（A6：C1 与 C5 "
-                          "均判不过）"] + (["10 场收据缺位"] if cc is True else [])))
+                     [f"收据 channel_changed={cc}；writer/verifier 记录={models}"],
+                     [] if c5_ok else (
+                         ["三场收据未标 channel_changed=true（A6：C1 与 C5 均判不过）"]
+                         if cc is not True else []) + (
+                         [f"writer/verifier 证据键缺位（models={models}）——"
+                          "缺证据不许判过"] if models is None else []) + (
+                         ["10 场收据缺位（无 out_k4_10*/k4_paired.json）："
+                          "C5 是 10 场通道一致性判据，只有三场收据不能判过"]
+                         if not ten_scene_present else [])))
 
     # 止损（§4）附核
     out.append(_crit("C4+", "总量止损（真跑 tokens ≤800 万）",
                      DOC + " §4", tokens <= STOP_LOSS_TOKENS,
-                     [f"三场收据 tokens 合计={tokens} ≤ {STOP_LOSS_TOKENS}"],
-                     [] if tokens <= STOP_LOSS_TOKENS else ["已越线，停止扩张"]))
+                     [f"收据口径 tokens={tokens_receipts}（仅 committed 臂）",
+                      worlds_note,
+                      f"止损取用={tokens} ≤ {STOP_LOSS_TOKENS}"],
+                     [] if tokens <= STOP_LOSS_TOKENS else
+                     [f"已越线（{tokens} > {STOP_LOSS_TOKENS}），停止扩张"]))
     return out
 
 
@@ -200,15 +262,37 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
     env = dict(os.environ)
     env["LG_DATABASE_URL"] = (
         f"sqlite:///{(Path(repo_root) / 'data' / 'language_genome.db').as_posix()}")
+    # 会审 2026-09-25 指出：全量继承父环境会把调用方 shell 里残留的
+    # K4_ALLOW_LIVE=1 等闸门变量原样传进子进程——本段必须**确定离线**，
+    # 故显式清掉 live 闸门变量（不依赖「驱动器缺省离线」这一隐式前提）。
+    for gate in ("K4_ALLOW_LIVE", "LG_LIVE", "LG_LLM_MODE"):
+        env.pop(gate, None)
     with tempfile.TemporaryDirectory(prefix="k5_dry_") as td:
         out_dir = Path(td) / "dry10"
         cmd = [py, "scripts/k4_paired_scenes.py",
                "--scenes", "10", "--out", str(out_dir)]
-        r = subprocess.run(cmd, capture_output=True, text=True, env=env,
-                           cwd=str(ROOT), timeout=600)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                               cwd=str(ROOT), timeout=600)
+        except subprocess.TimeoutExpired:
+            # 红线精神：失败形态必须如实落成 ok=False，不许裸异常栈崩
+            return {"ok": False, "mode": "dry_run", "live": None,
+                    "error": "dry-run 子进程超时（600s）——未产出报告；"
+                             "不得据此推断十场路径通畅"}
         if r.returncode != 0:
-            return {"ok": False, "error": (r.stderr or r.stdout)[-500:]}
-        art = _load_json(out_dir / "k4_paired.json")["artifacts"]
+            return {"ok": False, "mode": "dry_run", "live": None,
+                    "error": (r.stderr or r.stdout)[-500:]}
+        art_file = out_dir / "k4_paired.json"
+        if not art_file.exists():
+            return {"ok": False, "mode": "dry_run", "live": None,
+                    "error": "dry-run 子进程 rc=0 但未产出 k4_paired.json"}
+        art_all = _load_json(art_file)
+        # 断言子进程真的走离线：live 必须显式为 False（不许只看 returncode）
+        if art_all.get("live") is not False:
+            return {"ok": False, "mode": "dry_run", "live": art_all.get("live"),
+                    "error": f"dry-run 子进程 live={art_all.get('live')!r} ≠ False"
+                             "——疑似走到了 live 路径，已中止（不消耗调用）"}
+        art = art_all["artifacts"]
     prose = art.get("prose") or []
     per_scene = {}
     for p in prose:
@@ -221,12 +305,41 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
                      * K4_SCENE_BUDGET["arms"] * K4_SCENE_BUDGET["scenes"])
     n_calls_worst = (K4_SCENE_BUDGET["worst_calls_per_arm"]
                      * K4_SCENE_BUDGET["arms"] * K4_SCENE_BUDGET["scenes"])
-    measured_per_call = 542        # tokens/调用：三场真跑实测均值
-    blockers = ["C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，"
-                "成对对照证据链未走完）",
-                "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-                "C1（无人工复核记录——离线结构性不可证）",
-                "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"]
+    # 实测单价从最新三场收据实算（会审 2026-09-25 指出：硬编码魔数会
+    # 在收据更新后脱节）。失败臂实耗取自世界库（与止损同口径）。
+    art3 = latest_k4_artifact(repo_root)
+    calls_real, tokens_real, price_src = 0, 0, "无收据——单价不可实算"
+    if art3 is not None:
+        try:
+            a3 = _load_json(art3).get("artifacts") or {}
+            rcpts = a3.get("receipts") or []
+            calls_real = sum(int(r.get("usage", {}).get("calls", 0)) for r in rcpts)
+            tok_r = sum(int(r.get("usage", {}).get("tokens", 0)) for r in rcpts)
+            tok_w, _note = _world_db_tokens(_load_json(art3))
+            # 世界库 calls 行数 = 全部臂的调用数（含失败臂）
+            wd = _load_json(art3).get("worlds_dir")
+            n_world = 0
+            if wd:
+                for db in sorted(Path(wd).glob("arm*/*.sqlite")):
+                    try:
+                        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
+                        n_world += con.execute("select count(*) from calls").fetchone()[0]
+                        con.close()
+                    except sqlite3.Error:
+                        pass
+            calls_real = max(calls_real, n_world)
+            tokens_real = max(tok_r, tok_w)
+            if calls_real:
+                price_src = (f"{art3.parent.name} 实算：{tokens_real} tokens/"
+                             f"{calls_real} 调用（含失败臂，世界库口径）")
+        except (OSError, ValueError, KeyError):
+            price_src = f"{art3.parent.name} 读取失败——单价不可实算"
+    measured_per_call = (round(tokens_real / calls_real) if calls_real
+                         else K4_SCENE_BUDGET.get("fallback_per_call", 0))
+    # blockers 由判据实际结果派生（会审指出：硬编码列表会与判据表脱节）
+    _crits = check_criteria(art3, has_ten_scene_artifact(repo_root))
+    blockers = [f"{c['id']}（{c['name']}）"
+                for c in _crits if c["satisfied"] is not True] or                ["无（全部判据机械层满足——但仍不构成 K5 通过，见 C1）"]
     return {
         "ok": True, "mode": "dry_run", "live": False,
         "scenes": {sid: {"arms": v["arms"],
@@ -243,8 +356,7 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
                              "est_tokens_worst": K4_SCENE_BUDGET[
                                  "worst_calls_per_arm"] * 2 * measured_per_call,
                              "unit_price_note": f"实测单价≈{measured_per_call} "
-                             "tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+"
-                             "10,643 tokens/24 调用≈542/调用含失败链）；"
+                             f"tokens/调用（{price_src}）；"
                              "货币单价以通道账为准，不虚构"},
                          "blocked_by": blockers}
                     for sid, v in sorted(per_scene.items())},
@@ -262,9 +374,10 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
                 "的通过证据**（live 收据才算数）"}
 
 
-def build_report(artifact_path: Path | None) -> dict:
+def build_report(artifact_path: Path | None,
+                 ten_scene_present: bool = False) -> dict:
     """纯函数：判据核验报告（不含十场子进程段——离线可测）。"""
-    criteria = check_criteria(artifact_path)
+    criteria = check_criteria(artifact_path, ten_scene_present)
     mech_ok = sum(1 for c in criteria if c["satisfied"] is True)
     return {
         "mode": "dry_run", "generated_at": datetime.datetime.now().isoformat(
@@ -294,7 +407,7 @@ def main() -> None:
     a = ap.parse_args()
     repo = Path(a.repo_root)
     art = Path(a.k4_artifact) if a.k4_artifact else latest_k4_artifact(repo)
-    report = build_report(art)
+    report = build_report(art, has_ten_scene_artifact(repo))
     report["ten_scene_dry_run"] = ten_scene_dry_run(repo, a.py)
     text = json.dumps(report, ensure_ascii=False, indent=1)
     print(text)

@@ -1,6 +1,6 @@
 {
  "mode": "dry_run",
- "generated_at": "2026-09-25T14:40:05",
+ "generated_at": "2026-09-25T16:02:50",
  "doc": "docs/K5-A_离线前置评估.md（v1/2）",
  "k4_artifact": "F:\\agi\\language-genome\\out_k4_3_mc22_v2\\k4_paired.json",
  "criteria": [
@@ -106,11 +106,13 @@
    "id": "C5",
    "name": "通道一致性（换通道须标 channel_changed 并复核 C1）",
    "source": "docs/K5-A_离线前置评估.md（v1/2） §2（A6 写死：未标 → C1 与 C5 均不过）",
-   "satisfied": true,
+   "satisfied": false,
    "evidence": [
     "收据 channel_changed=True；writer/verifier 记录={'writer': 'deepseek-v4.1-flash', 'verifier': 'deepseek-v4.1-flash'}"
    ],
-   "missing": []
+   "missing": [
+    "10 场收据缺位（无 out_k4_10*/k4_paired.json）：C5 是 10 场通道一致性判据，只有三场收据不能判过"
+   ]
   },
   {
    "id": "C4+",
@@ -118,15 +120,17 @@
    "source": "docs/K5-A_离线前置评估.md（v1/2） §4",
    "satisfied": true,
    "evidence": [
-    "三场收据 tokens 合计=2167 ≤ 8000000"
+    "收据口径 tokens=2167（仅 committed 臂）",
+    "世界库 2 个 arm 库实耗=12810（含失败臂）",
+    "止损取用=12810 ≤ 8000000"
    ],
    "missing": []
   }
  ],
  "n_criteria": 10,
- "n_satisfied": 3,
+ "n_satisfied": 2,
  "k5_established": false,
- "verdict": "K5 未通——dry-run 与只读核验不构成通过；当前判据 3/10 项机械层满足，C1 人工复核结构性缺证据（详见 missing）",
+ "verdict": "K5 未通——dry-run 与只读核验不构成通过；当前判据 2/10 项机械层满足，C1 人工复核结构性缺证据（详见 missing）",
  "ten_scene_dry_run": {
   "ok": true,
   "mode": "dry_run",
@@ -142,15 +146,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s10": {
@@ -163,15 +171,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s2": {
@@ -184,15 +196,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s3": {
@@ -205,15 +221,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s4": {
@@ -226,15 +246,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s5": {
@@ -247,15 +271,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s6": {
@@ -268,15 +296,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s7": {
@@ -289,15 +321,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s8": {
@@ -310,15 +346,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    },
    "s9": {
@@ -331,15 +371,19 @@
     "est_budget": {
      "normal_calls": 4,
      "worst_calls": 12,
-     "est_tokens_normal": 2168,
-     "est_tokens_worst": 6504,
-     "unit_price_note": "实测单价≈542 tokens/调用（out_k4_3_mc22_v2 收据均值：2,167+10,643 tokens/24 调用≈542/调用含失败链）；货币单价以通道账为准，不虚构"
+     "est_tokens_normal": 3204,
+     "est_tokens_worst": 9612,
+     "unit_price_note": "实测单价≈801 tokens/调用（out_k4_3_mc22_v2 实算：12810 tokens/16 调用（含失败臂，世界库口径））；货币单价以通道账为准，不虚构"
     },
     "blocked_by": [
-     "C3/P2（A 臂包空：策略卡未晋升 verified——24 席判定否决，成对对照证据链未走完）",
-     "C5（10 场收据缺位；须与三场同通道或标 channel_changed）",
-     "C1（无人工复核记录——离线结构性不可证）",
-     "P1/C2（三场基线尚未 6/6——s2 两臂真跑被预算/改稿闸拒）"
+     "P1（K4 三场 6/6 臂 committed（failures=0））",
+     "P2（A 臂包非空率 ≥2/3 场）",
+     "P3（双闸纪律未被绕过）",
+     "C1（方向一致差异 ≥1 处经人工复核确认）",
+     "C2（零失败臂）",
+     "C3（A 臂非空包率 ≥2/3（C 行））",
+     "C4（复核负担可承受（≤20 分钟/场，集霸口径））",
+     "C5（通道一致性（换通道须标 channel_changed 并复核 C1））"
     ]
    }
   },
@@ -347,8 +391,8 @@
    "scenes": 10,
    "normal_calls": 40,
    "worst_calls": 120,
-   "est_tokens_normal": 21680,
-   "est_tokens_worst": 65040,
+   "est_tokens_normal": 32040,
+   "est_tokens_worst": 96120,
    "stop_loss_tokens": 8000000,
    "doc_model_note": "K5-A §4 文档口径（每调用 4~6 万 token 的语料级估算）与三场实测口径并列；扩场前以实测复核"
   },
