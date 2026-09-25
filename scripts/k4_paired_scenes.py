@@ -201,7 +201,8 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                freeze: bool = False, n_scenes: int = 3,
                channel_changed: bool = False,
                worlds_dir: str | None = None,
-               worlds_created_at: str | None = None) -> dict:
+               worlds_created_at: str | None = None,
+               budget_calls: int | None = None) -> dict:
     """N 场（默认 3=SCENES；扩展场派生见 scenes_for）× 2 臂 + 四类产物
     （prose/packages/receipts/failures）+ skipped（断臂后未执行的后续场
     单列，不进 failures——C2/止损台账不被连锁幻影污染，2026-09-23 会审
@@ -226,6 +227,13 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
         worlds_dir_abs = str(Path(worlds_dir).resolve())
     four = {"prose": [], "packages": [], "receipts": [], "failures": [],
             "skipped": []}
+    # 预算可配置（gui-k4-s2-contract 最小修复，2026-09-25）：
+    # budget_calls=None ⇒ Budget() 无参构造——**与现状逐字一致**（默认
+    # max_calls=6，contracts.py:103）；显式传参 ⇒ Budget(max_calls=N)
+    # （N 仍受契约 ge=2/le=20 约束，默认闸不许放宽指默认值不变，
+    # 上限也只收不放宽）。生效值逐条写进收据（budget_calls 键）。
+    budget = Budget() if budget_calls is None \
+        else Budget(max_calls=budget_calls)
     stores = {arm: store_factory() for arm in ("A", "B")}
     failed_at = {"A": None, "B": None}     # 本臂首个失败场（None=未断）
     for sp in scenes_for(n_scenes):
@@ -262,7 +270,7 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                         package_id=f"empty-{scene_id}", book_id=plan.book_id,
                         source_kind="empty", techniques=[])
                 runner = SceneRunner(store, client)
-                receipt = runner.run(plan, pkg, Budget())
+                receipt = runner.run(plan, pkg, budget)
                 usage = store.usage(receipt["job_id"])
                 export = store.export(plan.book_id)
                 four["prose"].append(
@@ -294,6 +302,7 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                                  "tokens": u.get("tokens", 0),
                                  "verifier_invalid_retries":
                                      u.get("verifier_invalid_retries", 0)},
+                       "budget_calls": budget.max_calls,
                        "live": live,
                        # C5 口径（证据 §3.3）：换通道真跑必须自报 channel_changed
                        "channel_changed": channel_changed,
@@ -327,12 +336,42 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                 except Exception as rb:          # noqa: BLE001
                     rollback_failed = True
                     rollback_error = type(rb).__name__
-                four["failures"].append(
-                    {"scene": scene_id, "arm": arm,
-                     "error_type": type(exc).__name__,
-                     "error": str(exc)[:300],
-                     "rollback_failed": rollback_failed,
-                     "rollback_error": rollback_error})
+                failure = {"scene": scene_id, "arm": arm,
+                           "error_type": type(exc).__name__,
+                           "error": str(exc)[:300],
+                           "rollback_failed": rollback_failed,
+                           "rollback_error": rollback_error}
+                # 预算耗尽诊断（gui-k4-s2-contract，2026-09-25）：给
+                # k4_accept_report 的机械判据补硬证据——实际调用数/生效上限/
+                # 返修调用数（.contract1/.state1/.retry 段）逐项落账，从
+                # 本臂世界库（临时产物库，只读 SELECT）取数；非预算类失败
+                # 记录逐字不变。**不改变判定**：预算耗尽仍按失败记账，
+                # 绝不改判通过。
+                err_head = str(exc).split(":", 1)[0]
+                if err_head in ("call_budget_exhausted",
+                                "rewrite_budget_exhausted"):
+                    diag = {"max_calls": budget.max_calls,
+                            "configured": budget_calls is not None}
+                    try:
+                        with store.connection() as wdb:
+                            jrow = wdb.execute(
+                                "SELECT id FROM jobs WHERE idem=?",
+                                (plan.idempotency_key,)).fetchone()
+                            if jrow is not None:
+                                rows = wdb.execute(
+                                    "SELECT stage,status FROM calls WHERE "
+                                    "job=?", (jrow[0],)).fetchall()
+                                diag["actual_calls"] = len(rows)
+                                diag["failed_calls"] = sum(
+                                    1 for _, st in rows if st != "succeeded")
+                                diag["repair_calls"] = sum(
+                                    1 for st, _ in rows
+                                    if st.endswith((".contract1", ".state1",
+                                                   ".retry")))
+                    except Exception:              # noqa: BLE001
+                        diag["store_unavailable"] = True
+                    failure["budget_diag"] = diag
+                four["failures"].append(failure)
     return four
 
 
@@ -380,9 +419,18 @@ def main() -> None:
                     dest="channel_changed",
                     help="换通道真跑必报（C5 口径，证据 §3.3）：收据与产物"
                          "标 channel_changed=true；同通道基线跑不带")
+    ap.add_argument("--budget-calls", type=int, default=None,
+                    dest="budget_calls",
+                    help="每场每臂的 call 预算上限（默认缺省=6，与现状逐字"
+                         "一致；显式传参须在契约域 2..20 内，生效值进收据"
+                         "budget_calls 键——gui-k4-s2-contract）")
     a = ap.parse_args()
     if a.scenes < 1:
         raise SystemExit("--scenes 须为 ≥1 的整数")
+    if a.budget_calls is not None and not (2 <= a.budget_calls <= 20):
+        raise SystemExit("--budget-calls 须在契约域 [2, 20] 内"
+                         f"（得到 {a.budget_calls}——与 Budget.max_calls 的 "
+                         "ge=2/le=20 同口径；默认缺省=6 不变）")
     if a.out and Path(a.out).exists():
         raise SystemExit(f"--out 已存在：{a.out}——不静默覆盖上次实验产物，"
                          "换新目录（方案「新实验目录」纪律）")
@@ -447,7 +495,8 @@ def main() -> None:
                                   freeze=a.live, n_scenes=a.scenes,
                                   channel_changed=a.channel_changed,
                                   worlds_dir=str(tmp),
-                                  worlds_created_at=worlds_created_at)
+                                  worlds_created_at=worlds_created_at,
+                                  budget_calls=a.budget_calls)
             analysis = paired_analysis(four, scenes_for(a.scenes))
             if a.live:
                 # worlds_dir_cleaned 语义（审计非阻断项收口）：走到这里即

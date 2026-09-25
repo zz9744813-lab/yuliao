@@ -472,3 +472,103 @@ def test_main_live_refused_when_lock_held(monkeypatch):
             k4.main()
     assert built == {"client": 0, "run": 0}, \
         f"守卫未前置：客户端构造 {built['client']} 次、run_paired {built['run']} 次"
+
+
+# ── gui-k4-s2-contract（2026-09-25）：预算可配置 + 默认零变化两钉 ──
+
+class _NeverPassVerify:
+    """verifier 恒判 hard issue——离线复现 s2 失败形态（改稿链烧到闸）。"""
+    models = {"writer": "fx", "verifier": "fx", "transport": "fixture"}
+
+    def invoke(self, *, role, system, payload, max_tokens, timeout):
+        body = ({"text": "林穗把一枚钱放在桌上。"} if role == "writer"
+                else {"issues": [{"kind": "hard",
+                                  "description": "事件未在正文发生",
+                                  "quote": payload["text"]}],
+                      "events": [], "changes": []})
+        return {"text": json.dumps(body, ensure_ascii=False),
+                "tokens_in": 1, "tokens_out": 1, "actual_model": "fx",
+                "finish_reason": "stop"}
+
+
+def test_budget_default_6_and_receipts_consistent(tmp_path):
+    """钉①：不带参数 ⇒ 预算仍 6（Budget() 无参逐字现状），收据逐字段
+    与既有口径一致 + 新增 budget_calls=6 键（默认零变化：行为字段全同，
+    仅加生效值键）。"""
+    seed_knowledge()
+    dirs = {"n": 0}
+
+    def factory():
+        d = tmp_path / f"bc{dirs['n']}"; dirs["n"] += 1
+        store = Store(d / "k4.sqlite")
+        store.create_world(k4.build_world())
+        return store
+    with db.session() as s:
+        four = k4.run_paired(factory, k4.FxClient(), s, live=False)
+    assert len(four["receipts"]) == 6 and not four["failures"]
+    for r in four["receipts"]:
+        assert r["budget_calls"] == 6, "缺省必须落 6（Budget() 无参）"
+        assert set(r["usage"]) == {"calls", "duration_ms", "tokens",
+                                  "verifier_invalid_retries"},             "usage 四键口径不得漂移"
+        assert r["usage"]["calls"] == 2 and r["usage"]["tokens"] == 30
+        assert r["live"] is False and r["channel_changed"] is False
+
+
+def test_budget_calls_configured_effective_and_actually_used(tmp_path):
+    """钉②：带参 ⇒ 生效值进收据且**被真实使用**——
+    (a) budget_calls=2 + FxClient：正常路径 2 调用即收，收据 budget_calls=2；
+    (b) budget_calls=2 + NeverPass：第 3 次调用前被闸拒（call_budget_
+        exhausted），budget_diag 落账 max_calls=2/actual_calls=2——
+        闸在配置值处真实生效（非摆设）；
+    (c) 缺省 + NeverPass：6 调用烧穿改稿轮（rewrite_budget_exhausted 形，
+        s2-B 同形）+ budget_diag.max_calls=6。"""
+    seed_knowledge()
+
+    def mk_factory(tag):
+        dirs = {"n": 0}
+
+        def factory():
+            d = tmp_path / f"{tag}{dirs['n']}"; dirs["n"] += 1
+            store = Store(d / "k4.sqlite")
+            store.create_world(k4.build_world())
+            return store
+        return factory
+    with db.session() as s:
+        four_a = k4.run_paired(mk_factory("ba"), k4.FxClient(), s,
+                               live=False, budget_calls=2)
+    assert all(r["budget_calls"] == 2 for r in four_a["receipts"]),         "生效值必须进收据"
+    assert not four_a["failures"], "2 调用对 FxClient 正常路径足够——不得破"
+
+    with db.session() as s:
+        four_b = k4.run_paired(mk_factory("bb"), _NeverPassVerify(), s,
+                               live=False, budget_calls=2)
+    fb = four_b["failures"][0]
+    assert "call_budget_exhausted" in fb["error"], fb
+    assert fb["budget_diag"]["max_calls"] == 2
+    assert fb["budget_diag"]["actual_calls"] == 2,         "闸在配置值 2 处真实拒绝（被真实使用）"
+    assert fb["budget_diag"]["configured"] is True
+    assert fb["rollback_failed"] is False
+
+    with db.session() as s:
+        four_c = k4.run_paired(mk_factory("bc"), _NeverPassVerify(), s,
+                               live=False)
+    fc = [f for f in four_c["failures"]
+          if "rewrite_budget_exhausted" in f["error"]][0]
+    assert fc["budget_diag"]["max_calls"] == 6
+    assert fc["budget_diag"]["actual_calls"] == 6,         "缺省=6：改稿轮 3×2 调用烧穿后按 rewrite 预算耗尽失败（s2-B 同形）"
+    assert fc["budget_diag"]["configured"] is False
+    assert isinstance(fc["budget_diag"]["repair_calls"], int)
+
+
+def test_main_budget_calls_cli_gates(tmp_path, monkeypatch):
+    """CLI 域校验：--budget-calls 1（<2）与 21（>20）都拒（契约域同口径）。"""
+    monkeypatch.setattr(sys, "argv",
+                        ["k4", "--budget-calls", "1",
+                         "--out", str(tmp_path / "o1")])
+    with pytest.raises(SystemExit, match=r"\[2, 20\]"):
+        k4.main()
+    monkeypatch.setattr(sys, "argv",
+                        ["k4", "--budget-calls", "21",
+                         "--out", str(tmp_path / "o2")])
+    with pytest.raises(SystemExit, match=r"\[2, 20\]"):
+        k4.main()
