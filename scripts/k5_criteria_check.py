@@ -15,6 +15,10 @@
   k5_established=False（C1 人工复核离线不可证；把 dry-run 说成已通
   是测试钉死的红线）；
 - 不改 K2/K3 判定口径、不动表结构、不清语料。
+- 晋升链缺口只读预检（2026-09-25 接入）：报告新增
+  `promotion_gap_preflight` section——机械回答「A 臂 n_techniques=0
+  为什么是 0」（卡未晋升 / K3 过滤，三席一致 N/M，真库 mode=ro）；
+  **默认语义零变化**：不加任何参数，报告除该新增 section 外逐字不变。
 
 用法（真跑命令见 docs/K5判据核验_20260925.md §6）：
     python scripts/k5_criteria_check.py --out k5_report_20260925.json
@@ -464,6 +468,139 @@ def ten_scene_dry_run(repo_root: Path, py: str) -> dict:
                 "的通过证据**（live 收据才算数）"}
 
 
+def promotion_gap_preflight(repo_root: Path | None,
+                             artifact_path: Path | None = None) -> dict:
+    """晋升链缺口只读预检（gui 任务 2026-09-25）：机械回答
+    『A 臂 n_techniques=0 为什么是 0』——是「卡未晋升」还是「K3 过滤」，
+    用三项硬数据判定，不许猜：
+
+    (1) knowledge_packages / strategy_conditions 真计数；
+    (2) expression_strategies_v2 逐卡 status/scope/observation；
+    (3) strategy_reviews 逐卡三席 verdict 档位是否完全一致（N/M）；
+    (4) 机械结论：
+        - 库不可读 → insufficient_evidence（不许猜）；
+        - 收据 A 臂非空 → not_applicable（本预检不构成缺口）；
+        - 无一张卡同时满足 K3 服务资格（status∈ELIGIBLE_STATUS 且
+          observation∈ELIGIBLE_OBSERVATION，**单源 import
+          app.knowledge_query，不本地重定义**）→ 『卡未晋升』——缺口在
+          晋升链（判定/两席 PASS/改 status 均未发生），与 K3 过滤无关；
+        - 有可服务卡而 A 臂仍空 → 『K3 过滤』——缺口在查询侧
+          （scope/条件/版本/证据实例），逐卡 scope 附证据供分诊。
+
+    纪律：真库 mode=ro 只读（sqlite URI）；零模型调用；缺收据时
+    A 臂口径记 none（结论只依赖库侧时仍可判『卡未晋升』）。"""
+    root = Path(repo_root) if repo_root else ROOT
+    db_path = root / "data" / "language_genome.db"
+    section: dict = {"db_path": portable_path(db_path, root),
+                     "read_mode": "ro"}
+    if not db_path.exists():
+        section.update({"db_unavailable": True,
+                        "conclusion": {
+                            "verdict": "insufficient_evidence",
+                            "reason": "真库不可读（mode=ro 打开前文件即缺）"
+                                      "——三项数据无从取，不许猜"}})
+        return section
+    try:
+        con = sqlite3.connect(
+            f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    except sqlite3.Error as exc:
+        section.update({"db_unavailable": True,
+                        "conclusion": {
+                            "verdict": "insufficient_evidence",
+                            "reason": f"真库 mode=ro 打开失败："
+                                      f"{type(exc).__name__}——不许猜"}})
+        return section
+    # A 臂收据口径（缺收据=none，不猜）
+    a_arm_nonempty = None
+    if artifact_path is not None and Path(artifact_path).exists():
+        art = _load_json(Path(artifact_path))
+        pkgs = (art.get("artifacts") or {}).get("packages") or []
+        a_arm_nonempty = sum(1 for p in pkgs
+                             if p.get("arm") == "A"
+                             and p.get("n_techniques", 0) >= 1)
+    try:
+        # (1) 真计数
+        n_packages = con.execute(
+            "SELECT COUNT(*) FROM knowledge_packages").fetchone()[0]
+        n_conditions = con.execute(
+            "SELECT COUNT(*) FROM strategy_conditions").fetchone()[0]
+        # (2) 逐卡 status/scope/observation
+        cards = [{"strategy_key": k, "version": v, "status": st,
+                  "scope": sc, "observation_status": ob}
+                 for k, v, st, sc, ob in con.execute(
+                     "SELECT strategy_key, version, status, scope, "
+                     "observation_status FROM expression_strategies_v2 "
+                     "ORDER BY strategy_key, version").fetchall()]
+        # (3) 逐卡三席 verdict 档位一致性（judge_kind 保留原样入证据）
+        # strategy_reviews.strategy_id 是库内 id（ESV2-*）——先取
+        # id→strategy_key 映射，评审按 id 聚到卡
+        reviews_by_card: dict[str, list] = {}
+        for sid, model, kind, verdict in con.execute(
+                "SELECT strategy_id, reviewer_model, judge_kind, verdict "
+                "FROM strategy_reviews ORDER BY strategy_id, id").fetchall():
+            reviews_by_card.setdefault(sid, []).append(
+                {"reviewer_model": model, "judge_kind": kind,
+                 "verdict": verdict})
+        # K3 资格集合：单源 import（不本地重定义——k2_pairs 同款纪律）
+        from app import knowledge_query as _kq
+        eligible_status = set(_kq.ELIGIBLE_STATUS)
+        eligible_observation = set(_kq.ELIGIBLE_OBSERVATION)
+        ids = {k: i for i, k in con.execute(
+            "SELECT id, strategy_key FROM expression_strategies_v2"
+        ).fetchall()}
+        n_consistent = 0
+        cards_with_reviews = 0
+        for c in cards:
+            revs = reviews_by_card.get(ids.get(c["strategy_key"], "")) or []
+            c["n_reviews"] = len(revs)
+            c["verdicts"] = sorted({r["verdict"] or "" for r in revs})
+            c["verdict_consistent"] = (
+                len(revs) >= 2 and len(c["verdicts"]) == 1)
+            c["judge_kinds"] = sorted({r["judge_kind"] for r in revs})
+            if revs:
+                cards_with_reviews += 1
+                if c["verdict_consistent"]:
+                    n_consistent += 1
+            c["k3_eligible"] = (
+                c["status"] in eligible_status
+                and c["observation_status"] in eligible_observation)
+        n_eligible = sum(1 for c in cards if c["k3_eligible"])
+        section.update({
+            "db_unavailable": False,
+            "(1)_counts": {"knowledge_packages": n_packages,
+                           "strategy_conditions": n_conditions},
+            "(2)_cards": cards,
+            "(3)_seats": {
+                "cards_with_reviews": cards_with_reviews,
+                "verdict_fully_consistent_cards": n_consistent,
+                "note": "完全一致＝该卡评审数≥2 且 verdict 档位唯一"
+                        "（多席同判 retire/merge/rewrite/verified）"},
+            "a_arm_nonempty_packages": a_arm_nonempty,
+        })
+        # (4) 机械结论（不许猜）
+        if a_arm_nonempty:
+            verdict = "not_applicable"
+            reason = (f"收据 A 臂非空（n_techniques≥1 的 A 臂包 "
+                      f"{a_arm_nonempty} 个）——本预检不构成缺口")
+        elif n_eligible == 0:
+            verdict = "卡未晋升"
+            reason = (f"K3 可服务卡数=0（status∈{sorted(eligible_status)} "
+                      f"且 observation∈{sorted(eligible_observation)} 的卡"
+                      f"为零）——A 臂空与 K3 过滤无关，缺口在晋升链："
+                      f"逐卡见 (2)，席位一致性见 (3)")
+        else:
+            verdict = "K3 过滤"
+            reason = (f"K3 可服务卡数={n_eligible}>0 而 A 臂包全空——"
+                      f"缺口在查询侧（scope/条件/版本/证据实例），"
+                      f"逐卡 scope 见 (2) 供分诊；本预检只定位到"
+                      f"『K3 过滤』层，不再猜具体哪条过滤")
+        section["conclusion"] = {"verdict": verdict, "reason": reason,
+                                 "n_k3_eligible_cards": n_eligible}
+    finally:
+        con.close()
+    return section
+
+
 def build_report(artifact_path: Path | None,
                  ten_scene_present: bool = False,
                  repo_root: Path | None = None) -> dict:
@@ -486,6 +623,11 @@ def build_report(artifact_path: Path | None,
         "verdict": "K5 未通——dry-run 与只读核验不构成通过；当前判据 "
                    f"{mech_ok}/{len(criteria)} 项机械层满足，C1 人工复核"
                    "结构性缺证据（详见 missing）",
+        # 晋升链缺口只读预检（gui 任务 2026-09-25）：机械回答
+        # 「A 臂 n_techniques=0 为什么是 0」——默认无参即并入报告
+        # （报告仅新增本 section，其余字段逐字不变——tests 钉死）
+        "promotion_gap_preflight": promotion_gap_preflight(
+            repo_root, artifact_path),
     }
 
 
