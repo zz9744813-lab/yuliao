@@ -41,9 +41,10 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import config, db  # noqa: E402
-from app.gateway import chat  # noqa: E402
+from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import BenchmarkItem, BenchmarkRun, BenchmarkSet  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 PV = "bench_task_v1"
 
@@ -129,6 +130,13 @@ _lock = threading.Lock()
 _stat = {"ok": 0, "failed": 0, "first_error": ""}
 
 
+def _run_pool(jobs: list, conc: int, models, fn) -> list:
+    """并行执行判定调用，返回结果列表；worker 数由 pool_workers 兜底（上限截断+串行强制）。"""
+    workers = pool_workers(conc, models, serial_check=is_serial_model)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(fn, jobs))
+
+
 def run_set(*, set_id: str, models: list[str], task: str = "preference",
             conc: int = 6, limit: int = 0, dry_run: bool = False) -> dict:
     with db.session() as s:
@@ -179,8 +187,8 @@ def run_set(*, set_id: str, models: list[str], task: str = "preference",
     t0 = time.time()
     results = []
     if par:
-        with ThreadPoolExecutor(max_workers=max(1, conc)) as ex:
-            results += list(ex.map(one, [(r, m) for m in par for r in rows]))
+        # 串行模型已被 split_models 挪出池外；并行池仍要过上限兜底（防绕过 CLI 直调）
+        results += _run_pool([(r, m) for m in par for r in rows], conc, par, one)
     for m in serial:
         results += [one((r, m)) for r in rows]
     dt = time.time() - t0
@@ -273,13 +281,16 @@ def main() -> None:
     ap.add_argument("--task", default="preference",
                     choices=tuple(TASK_TEMPLATES),
                     help="preference=哪边更好 / detection=哪边是原文 / naturalness=哪边更自然")
-    ap.add_argument("--conc", type=int, default=6)
+    ap.add_argument("--conc", type=int, default=6,
+                    help=f"并行池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"单账号 CLI 模型本就由 split_models 移出池外串行跑）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--scan", action="store_true")
     ap.add_argument("--compare", action="store_true")
     ap.add_argument("--model", default="")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在 db.init_db() 之前：越界响亮报错退出
     db.init_db()
     if args.scan:
         leaderboard(args.set or None)

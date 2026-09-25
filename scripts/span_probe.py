@@ -39,8 +39,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import heldout_eval as he  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 from app import db  # noqa: E402
-from app.gateway import chat  # noqa: E402
+from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import Candidate, JudgeRun, Segment  # noqa: E402
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 PV = "span_defect_v1"
 KINDS = ["用词", "解释过度", "情绪直给", "节奏", "逻辑", "意象", "其他"]
@@ -156,7 +157,8 @@ def run(models, conc) -> None:
     items = annotated_items()
     jobs = [(it, m) for m in models for it in items]
     print(f"待探针文本 = {len(items)} × {len(models)} 评委 = {len(jobs)} 次调用")
-    with ThreadPoolExecutor(max_workers=conc) as pool:
+    workers = pool_workers(conc, models, serial_check=is_serial_model)   # 运行时兜底：上限截断 + 串行强制
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         for _ in pool.map(lambda j: one(*j), jobs):
             pass
     print(f"完成：ok={_cnt['ok']} failed={_cnt['failed']} skip={_cnt['skip']}")
@@ -199,8 +201,11 @@ def main() -> None:
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--eval", action="store_true")
     ap.add_argument("--models", default=",".join(he.JUDGES))
-    ap.add_argument("--conc", type=int, default=4)
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"--models 命中单账号 CLI 通道时强制串行 workers=1）")
     a = ap.parse_args()
+    check_conc(ap, a.conc, "--conc")   # 闸在 db.init_db() 之前：越界响亮报错退出
     db.init_db()
     if a.run:
         run([m.strip() for m in a.models.split(",") if m.strip()], a.conc)

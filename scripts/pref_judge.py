@@ -33,9 +33,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from app import config, db
 from app.context_ablation import scene_context
+from app.gateway import is_serial_model  # noqa: E402
 from app.judges import PREFERENCE_PROMPT_VERSION, judge_preference
 from app.models import Candidate, JudgeRun, ReviewItem, Segment
 import preflight_models as pf
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 DEFAULT_JUDGES = "moonshotai/kimi-k3," + config.DEFAULT_LLM_MODEL
 
@@ -132,18 +134,29 @@ def run_one(exp_id: str, model: str, pair: dict, prompt_version: str) -> dict:
     return {"ok": out["status"] == "ok"}
 
 
+def _run_pool(jobs: list, conc: int, judges) -> None:
+    """执行本脚本全部评委调用；worker 数由 pool_workers 兜底（上限截断+串行强制）。"""
+    workers = pool_workers(conc, judges, serial_check=is_serial_model)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: run_one(*j), jobs):
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("exp_id", nargs="?", default="EXP-0911-B82D")
     ap.add_argument("--batch", default=None, help="只看该批次的已判条目（如 r15）")
     ap.add_argument("--all", action="store_true", help="该实验全部已判条目")
     ap.add_argument("--judges", default=DEFAULT_JUDGES)
-    ap.add_argument("--conc", type=int, default=4)
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"--judges 命中单账号 CLI 通道时强制串行 workers=1）")
     ap.add_argument("--no-context", action="store_true",
                     help="消融用：不给上文（=segment_only）。协议要求必须给上下文，"
                          "只有做对照实验时才用；会写成独立 prompt_version 避免与正式口径混淆")
     ap.add_argument("--dry-run", action="store_true", help="只列出将判的条目，不调用 API")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在任何库副作用之前：越界响亮报错退出
 
     if not args.batch and not args.all:
         args.batch = "r15"      # 默认小批，避免误烧额度
@@ -190,9 +203,7 @@ def main() -> None:
     pf.require_models(judges, source="pref_judge")
     jobs = [(args.exp_id, m, p, prompt_version) for m in judges for p in pairs]
     _counter["first_error"] = ""      # 本轮失败原因只属于本轮
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: run_one(*j), jobs):
-            pass
+    _run_pool(jobs, args.conc, judges)
     print(f"完成：ok={_counter['ok']} failed={_counter['failed']} skip={_counter['skip']}")
     if _counter["failed"]:
         print(f"       首条错误原文：{_counter['first_error'] or '（未捕获到异常文本）'}")

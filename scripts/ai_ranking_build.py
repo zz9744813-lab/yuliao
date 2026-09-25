@@ -32,10 +32,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import config, db  # noqa: E402
 from app.config import BLIND_REVIEW_PROMPT_VERSIONS  # noqa: E402
-from app.gateway import chat  # noqa: E402
+from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import Candidate, Segment, exclude_corpus_v2_segments  # noqa: E402
 from app.ids import new_id  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
+from _conc_guard import pool_workers  # noqa: E402  # 并发闸共用入口（上限真源 app/limits.MAX_CONCURRENCY + 串行纪律）
 
 # 评委名单可被调度覆盖（LG_RANKING_JUDGES=逗号分隔）；通道挂掉时降级
 # （如 2026-09-19 晚 deepseek 网关连败 → kimi+agnes 双评委，n_valid=2 需一致票）。
@@ -194,7 +195,11 @@ def build(n_pairs: int, seed: int, ver: str, out_dir: Path | None = None,
     todo = [pr for pr in pairs if pr["segment_id"] not in done_segs]
     with path.open("a", encoding="utf-8") as f:
         from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=6) as ex:
+        # 原先硬编码 6 绕过全部护栏；现作为**请求值**过并发闸：上限真源
+        # app/limits.MAX_CONCURRENCY 夹紧，LG_RANKING_JUDGES 指到单账号 CLI
+        # 通道（is_serial_model 命中）时强制串行 workers=1。界内 6 行为不变。
+        workers = pool_workers(6, JUDGES, serial_check=is_serial_model)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
             for row in ex.map(one, list(enumerate(todo))):
                 if row is None:
                     n_dropped += 1

@@ -2,20 +2,37 @@
 
 幂等：已存在的 (subject_type, subject_id, kind='naturalness_v2', model) 跳过（含 failed 重试）。
 """
+import argparse
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent))
+sys.path.insert(0, str(_HERE))
 
 from app import db
+from app.gateway import is_serial_model
 from app.judges import NATURALNESS_V2_PROMPT_VERSION, judge_naturalness_v2
 from app.models import Candidate, Experiment, JudgeRun, Segment
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
-EXP = sys.argv[1] if len(sys.argv) > 1 else "EXP-0911-B82D"
-JUDGE_MODEL = sys.argv[2] if len(sys.argv) > 2 else "moonshotai/kimi-k3"
-CONC = int(sys.argv[3]) if len(sys.argv) > 3 else 6
+# 位置参数口径与改前一致：argv[1]=实验号 argv[2]=评委模型 argv[3]=并发（默认 6）。
+# 解析挪进 parse_cli（作为脚本执行时才跑），import 本模块不再有 argv 副作用；
+# conc 越界由并发闸响亮报错退出（不再无界直开线程池）。
+EXP = "EXP-0911-B82D"
+JUDGE_MODEL = "moonshotai/kimi-k3"
+CONC = 6
+
+
+def parse_cli(argv: list[str]) -> tuple[str, str, int]:
+    exp = argv[1] if len(argv) > 1 else EXP
+    model = argv[2] if len(argv) > 2 else JUDGE_MODEL
+    ap = argparse.ArgumentParser(prog=argv[0] if argv else "run_nat_v2.py",
+                                 add_help=False)
+    conc = check_conc(ap, argv[3] if len(argv) > 3 else CONC, "conc（第 3 位置参数）")
+    return exp, model, conc
 
 _counter = {"n": 0}
 _lock = threading.Lock()
@@ -57,7 +74,8 @@ def main():
             jobs.append(("candidate", c.id, c.text))
     print(f"nat_v2 subjects: {len(jobs)} model={JUDGE_MODEL} conc={CONC}", flush=True)
     errs = 0
-    with ThreadPoolExecutor(max_workers=CONC) as pool:
+    workers = pool_workers(CONC, [JUDGE_MODEL], serial_check=is_serial_model)   # 运行时兜底：上限截断 + 串行强制
+    with ThreadPoolExecutor(max_workers=workers) as pool:
         for r in pool.map(lambda j: work(*j), jobs):
             if r.get("ok") is False:
                 errs += 1
@@ -65,4 +83,5 @@ def main():
 
 
 if __name__ == "__main__":
+    EXP, JUDGE_MODEL, CONC = parse_cli(sys.argv)
     main()

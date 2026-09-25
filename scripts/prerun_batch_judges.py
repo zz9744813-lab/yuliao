@@ -30,7 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import heldout_eval as he  # noqa: E402
 from app import db  # noqa: E402
 from app.context_ablation import scene_context  # noqa: E402
+from app.gateway import is_serial_model  # noqa: E402
 from app.models import Candidate, Segment  # noqa: E402
+from _conc_guard import check_conc, pool_workers  # noqa: E402  # 并发闸共用入口（上界 app/limits.MAX_CONCURRENCY + 运行时兜底）
 
 
 def load_cids(batch: str, db_path: Path | str | None = None,
@@ -82,19 +84,30 @@ def verify(cids: list[str], models: tuple[str, ...], variants: list[str],
     return gaps
 
 
+def _run_pool(jobs: list, conc: int, models, exp) -> None:
+    """执行本脚本全部评委补跑；worker 数由 pool_workers 兜底（上限截断+串行强制）。"""
+    workers = pool_workers(conc, models, serial_check=is_serial_model)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for _ in pool.map(lambda j: he.run_one(*j, exp=exp), jobs):
+            pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--batch", required=True, help="批次名（h30 / h31 …）")
     ap.add_argument("--variants", default="v3,v4",
                     help="要跑的口径，逗号分隔。默认 v3,v4 —— 与 heldout_eval 默认一致。")
     ap.add_argument("--models", default=",".join(he.JUDGES))
-    ap.add_argument("--conc", type=int, default=4)
+    ap.add_argument("--conc", type=int, default=4,
+                    help=f"线程池并发（上界 app/limits.MAX_CONCURRENCY，越界报错退出；"
+                         f"--models 命中单账号 CLI 通道时强制串行 workers=1）")
     ap.add_argument("--limit", type=int, default=0,
                     help="只跑前 N 题（冒烟用）。>0 时跳过最终覆盖断言。")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--exp", default=None,
                     help="实验号；默认由批次标签反查（跨语料批次属于别的实验）")
     args = ap.parse_args()
+    check_conc(ap, args.conc, "--conc")   # 闸在 db.init_db() 之前：越界响亮报错退出
 
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     for v in variants:
@@ -141,9 +154,7 @@ def main() -> None:
 
     jobs = [(cid, ctx_by_cid[cid], m, v)
             for m in models for v in variants for cid in cids]
-    with ThreadPoolExecutor(max_workers=args.conc) as pool:
-        for _ in pool.map(lambda j: he.run_one(*j, exp=exp), jobs):
-            pass
+    _run_pool(jobs, args.conc, models, exp)
     print(f"完成：ok={he._counter['ok']} failed={he._counter['failed']} "
           f"skip={he._counter['skip']}")
 
