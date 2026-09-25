@@ -226,6 +226,30 @@ def test_legacy_submit_without_pid_is_never_guessed():
     assert hv2["presentation_binding"] == "none"
     assert hv2["presentation_id"] is None
     assert hv2["winner_raw"] == "tie" and hv2["winner_resolved"] == "tie"
+    # 会审 qwen 席 [一般] 补覆盖：fallthrough 的其余两种非 A/B 判定同样走
+    # 「存原始值」而不是 500/409（这两条正是「served/pid_used 未初始化会 500」
+    # 那一支，必须真跑钉住）。同时钉住 `_stored()` 返回非 None（否则是 AttributeError
+    # 而非契约断言，报错信息会与契约无关）。
+    for w in ("both_bad", "cant_judge"):
+        rid = _seed("EXP-A5C", "bp5c")[0]
+        r3 = client.post(f"/review/{rid}/verdict",
+                         json={"winner": w, "reasons": [], "annotations": []})
+        assert r3.status_code == 200,             f"从无呈现的历史题投 {w} 应存原始值（不得 500/409），实得 {r3.status_code}"
+        hv3 = _stored(rid)
+        assert hv3 is not None, "_stored() 返回 None ⇒ 提交没落库"
+        assert hv3["presentation_binding"] == "none" and hv3["presentation_id"] is None
+        assert hv3["winner_raw"] == w and hv3["winner_resolved"] == w
+    # 会审 glm 席 [一般] 补覆盖：从无呈现行 + 带 side 批注 ⇒ 走 fallthrough 存原始值
+    # （批注 side 不参与盲评翻译：human_first is None ⇒ target=None、verified=False），
+    # 这是**保留语义**，必须钉住；否则日后有人把它改成 409 会静默改变既有契约。
+    rid = _seed("EXP-A5D", "bp5d")[0]
+    ann = {"side": "A", "start": 0, "end": 5, "text": "x", "kind": "用词"}
+    r4 = client.post(f"/review/{rid}/verdict",
+                     json={"winner": "tie", "reasons": [], "annotations": [ann]})
+    assert r4.status_code == 200, f"从无呈现 + 带批注应存原始值，实得 {r4.status_code}"
+    hv4 = _stored(rid)
+    assert hv4["presentation_binding"] == "none" and hv4["presentation_id"] is None
+    assert hv4["winner_raw"] == "tie"
 
 
 def test_presentations_survive_restart():

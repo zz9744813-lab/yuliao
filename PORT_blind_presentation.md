@@ -137,7 +137,7 @@ F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest tests/test_blind_presen
   `_load_cursor`，保存路径失败时目录多半已由 `mkdir` 建出、按 DATA_DIR 可推知，
   不扩大改动。
 
-### 4. 实跑检查与反向变异——**本轮未获执行，如实报告**
+### 4. 实跑检查与反向变异——**已由主控真跑补全（2026-09-25 23:2x）**
 
 验收命令：
 
@@ -145,28 +145,51 @@ F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest tests/test_blind_presen
 F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest tests/test_blind_presentation.py tests/test_review_batch.py tests/test_review_rejudge.py -q
 ```
 
-本整改会话内**未能执行**：所有调用 Python 解释器的 Bash 请求（含上述验收命令、
-`python --version` 最小探针、`py --version`）均停在无法应答的权限询问上（上一轮
-worker 的 exit 124 超时与此症状一致）。**没有真跑就没有原始输出可贴，本文档不声称
-通过**；交付状态为"代码与测试已按契约改写、静态核对完毕、等待主控独立执行验收门"。
+整改会话内**未能执行**（所有 Python 调用停在无法应答的权限询问上，与上一轮 exit 124
+同症状）。**主控独立补跑结果（原始输出）**：
 
-已完成的静态核对：
+```text
+$ F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest tests/test_blind_presentation.py     tests/test_review_batch.py tests/test_review_rejudge.py -q -p no:warnings --no-header
+.....................................                                    [100%]
+exit 0   （37 passed）
+```
 
-- `git diff` 逐行复核（仅 3 个白名单文件；工作树无其它改动，无临时脚本残留）；
-- 全仓 grep：`_blind_latest`、`legacy_review_id` 已无任何代码引用（仅历史注释/本文档）；
-- 三个验收测试文件内**全部** verdict 提交点逐一核对：带 pid、或本就断言 409/404，
-  与新分支逻辑一致（`test_pending_restart_rejects_unbound_ab` 走「有呈现行」409、
-  文案含「呈现绑定」；`test_pending_never_served_now_rejected` 走「从无呈现行」409）。
+**反向变异（主控真做，非配方）**：把 `verdict()` 无 pid 分支的
+`has_presentations = s.query(...)` 改为 `has_presentations = False and s.query(...)`
+（等价于「把 409 改回接受」），只跑 blind 文件：
 
-反向变异自检（交付物 2 要求，待主控执行复现）：将 `verdict()` 无 pid 分支两条
-`raise HTTPException(409, …)` 的条件临时改为恒假（即"把 409 改回接受"），预期转红：
-`test_legacy_submit_without_pid_is_never_guessed`、
-`test_legacy_without_any_presentation_rejected`（以上 blind 文件）、
-`test_pending_restart_rejects_unbound_ab`、`test_pending_never_served_now_rejected`
-（以上 rejudge 文件）——至少 4 条；恢复后应回到全绿。若按另一方案只把新测试里的
-409 断言改成 200，则该用例本身必红。**本节粘贴的是复现配方，不是运行结果**；
-运行结果缺失即本整改的已知未闭环项。
+```text
+$ ... -m pytest tests/test_blind_presentation.py -q -p no:warnings --no-header
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+tests	est_blind_presentation.py:217: AssertionError
+FAILED tests/test_blind_presentation.py::test_legacy_submit_without_pid_is_never_guessed
+```
 
+⇒ 门**确实有方向**（变异即红）。恢复原判据（`cp` 回备份、`git diff --stat` 与变异前
+逐字一致）后复跑 37 passed exit 0。变异期间只改工作树内 `app/api.py`，未 commit、
+未落任何变异产物。
+
+**会审两席意见的处置（主控补，2026-09-25 23:3x，两席对 fd7b589 出 BLOCK）**：
+
+- qwen 席 `[严重]` ①「`served`/`pid_used` 未初始化 ⇒ fallthrough 会 UnboundLocalError」——
+  **不成立，已实证**：`served = None` 与 `pid_used: str | None = None` 在 `if pid_given:`
+  **之前**初始化（`app/api.py:1043-1046`）；补跑「从无呈现 + tie」用例返回 200（非 500）。
+  为把该分支钉死，测试已补 `both_bad`/`cant_judge` 两种 fallthrough（见下条）。
+- qwen 席 `[严重]` ②「提交信息写反向变异自检但未执行」——**本轮已由主控真跑补全**（上文原始输出），
+  且本节标题已从「未获执行」改为如实记录补跑结果。
+- qwen 席 `[一般]` 第二个 409 文案与判据不符 ⇒ **已改**为「该题从未端出过呈现（pre-A01 历史题）
+  ——A/B 指向一个从未存在过的排列」。
+- qwen 席 `[一般]` + glm 席 `[一般]` 新用例覆盖面偏窄 ⇒ **已补**：`both_bad`/`cant_judge`
+  的 fallthrough（各真跑 200 + `binding=none` + `presentation_id is None`）、
+  「从无呈现行 + 带 side 批注 ⇒ 存原始值」这条保留语义，并显式断言 `_stored() is not None`。
+- qwen 席 `[一般]` 口径收紧（无呈现行 + A/B 由 200 变 409）需主控确认 ⇒ **主控裁定：接受**。
+  依据：main 该分支原本就走 409（`56ddc43:app/api.py` 原文），本整改是**恢复**而非新增收紧；
+  且既有测试 `test_pending_never_served_now_rejected`（f17cb93 已合入，不在本次白名单内）
+  把「从未端出的题投 A/B」钉为 409，口径服从测试。**无存量纯 API 客户端依赖证据**：
+  该路径是 pre-A01 历史题专用（全库呈现行由本服务产生），重启/清理场景另有 409 覆盖。
+- 两席 `[建议]`（`_BLIND_LAST` 注释语气、第 7 条头注释）⇒ 注释已补「本索引不参与任何判定，
+  不是防线；上限只为落盘体积」。
 ### 5. 未改动部分（整改轮）
 
 - `app/static/index.html`、`app/models.py`、`data/` 未动；无 pid 时前端会收到 409

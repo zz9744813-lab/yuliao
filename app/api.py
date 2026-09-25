@@ -513,6 +513,8 @@ _BLIND_LAST: dict[str, str] = {}       # review_id → 最近一次 presentation
                                        # 整改后（无 pid ⇒ 409，见 verdict）**不再有读取方**：
                                        # 猜义路径 _blind_latest 已删，这里只为落盘格式
                                        # （blind_presentations.json 的 "last" 键）与审计保留。
+                                       # 会审两席建议（2026-09-25）：本索引**不参与任何判定**，
+                                       # 不是防线；上限 _BLIND_LAST_CAP 只为落盘体积。
 _BLIND_LOCK = threading.Lock()
 _BLIND_LOADED_FOR: str | None = None   # 已装载的呈现文件路径（懒加载哨兵，见 _blind_ensure_loaded）
 _SERVE_CURSOR: dict[str, int] = {}   # 批次轮换游标（进程内缓存；真值落盘，见下）
@@ -1102,8 +1104,8 @@ def verdict(review_id: str, body: Verdict):
                     # 仅 tie/both_bad/cant_judge、及无归属语义的纯批注，
                     # 才走上面注释说的「存原始值」unresolved 路径（binding=none）。
                     raise HTTPException(
-                        409, "提交未带呈现绑定（页面过期/旧客户端），且本服务已无该题的呈现映射"
-                             "（未端出/重启过/已被清理）——A/B 含义无法确定，禁止按最近呈现猜义；"
+                        409, "提交未带呈现绑定（页面过期/旧客户端），且该题从未端出过呈现"
+                             "（pre-A01 历史题）——A/B 指向一个从未存在过的排列，含义无法确定；"
                              "请重新端题后再提交")
         human_first = served.get("human_first") if served else None
         prev = r.human_verdict if r.status == "done" else None
