@@ -39,41 +39,11 @@ from app.models import (Candidate, ControlledCorruption, Experiment, Frame, Segm
                         Work, exclude_corpus_v2_segments)
 from app.experiments import stage_extract_frames  # noqa: E402
 from app.gateway import is_serial_model  # noqa: E402
+from _conc_guard import check_conc as _check_conc, pool_workers as _pool_workers  # noqa: E402  # 并发闸唯一实现（2026-09-25 去重）
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
 from clean_text import clean_rules, looks_broken, needs_llm  # noqa: E402
 import preflight_models as pf  # noqa: E402  # 批量防呆①：开跑前校验模型名在网关池内
 import source_check  # noqa: E402  # 扩产的源校勘闸门（MODEL 也在这里定义）
-
-
-def _pool_workers(conc: int, models=()) -> int:
-    """并发数的运行时兜底（上限真源：app/limits.py::MAX_CONCURRENCY）。
-
-    CLI 闸（_check_conc）已对越界**报错退出**；本脚本**不自建线程池**，但会把
-    conc 写进 `exp.config["concurrency"]` 并透传给 `source_check.run(conc=)`
-    （source_check 自己开池，不在本脚本改动范围）——所以必须在**写入/下传之前**
-    就地夹紧：越界按上限截断并打印（不静默）；命中单账号 CLI 模型
-    （app.gateway.is_serial_model，判定口径唯一）→ 恒 1 并打印「串行强制」。
-    界内正常值原样返回、零额外输出：默认路径与改前逐字一致。
-    """
-    requested = max(1, int(conc))
-    workers = min(requested, limits.MAX_CONCURRENCY)
-    hits = [m for m in models if is_serial_model(m)]
-    if hits:
-        print(f"[conc] 串行强制：命中单账号 CLI 模型 {hits} → workers=1（请求 conc={conc}）",
-              flush=True)
-        return 1
-    if workers != requested:
-        print(f"[conc] 越界截断：conc={conc} → workers={workers}"
-              f"（上限 app/limits.MAX_CONCURRENCY={limits.MAX_CONCURRENCY}）", flush=True)
-    return workers
-
-
-def _check_conc(ap, value: int, flag: str) -> None:
-    """`--conc` 硬上界闸：超界响亮报错退出（parser.error → SystemExit(2)），不静默 clamp。"""
-    if value > limits.MAX_CONCURRENCY:
-        ap.error(f"{flag}={value} 超过上限 {limits.MAX_CONCURRENCY}"
-                 f"（单一真源 app/limits.py::MAX_CONCURRENCY）；"
-                 f"本脚本拒绝静默 clamp，越界即报错退出")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -156,7 +126,8 @@ def run(n: int, seed: int, conc: int, exp_id: str, min_chars: int = 60) -> dict:
     # exp.config["concurrency"]（落库）、source_check.run(conc=)（它自建线程池，
     # 不在本脚本改动范围）、stage_extract_frames→_pool_map（执行侧已有同闸）。
     # 入口兜底保证任何一条路径都拿不到越界值；串行模型命中则整链压成 1。
-    conc = _pool_workers(conc, [config.DEFAULT_LLM_MODEL, source_check.MODEL])
+    conc = _pool_workers(conc, [config.DEFAULT_LLM_MODEL, source_check.MODEL],
+                         serial_check=is_serial_model)
     # 批量防呆①（P0 死 id 事故）：开跑前先把要用的模型名问一遍网关。
     # 死 id 的表现是"源校勘通过 0/300 → 抽到 0 帧"，看上去像池子耗尽，实际全在 503。
     blocked = pf.preflight_block([config.DEFAULT_LLM_MODEL, source_check.MODEL],

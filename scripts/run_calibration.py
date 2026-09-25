@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import config, corpus, db, experiments, limits  # noqa: E402
 from app.gateway import is_serial_model  # noqa: E402
+from _conc_guard import check_conc as _check_conc, pool_workers as _pool_workers  # noqa: E402  # 并发闸唯一实现（2026-09-25 去重）
 
 # 导入阶段的退出码：守卫拒绝 ≠ 文件不存在（后者沿用既有行为，打印后继续跑）
 EXIT_IMPORT_REFUSED = 3
@@ -33,41 +34,6 @@ _GUARD_RULES_FALLBACK = (
     "import_ext_not_allowed", "import_too_large",
 )
 IMPORT_ROOTS_ENV = getattr(corpus, "IMPORT_ROOTS_ENV", "LG_IMPORT_ROOTS")
-
-
-def _pool_workers(conc: int, models=()) -> int:
-    """并发数的运行时兜底（上限真源：app/limits.py::MAX_CONCURRENCY）。
-
-    本脚本不自建线程池，但把 `--concurrency` **写进实验 config**（overrides →
-    create_experiment 落库）；执行侧 `app/experiments._pool_map` 已有同闸+串行
-    纪律，这里保证写入口就拿不到越界值：越界按上限截断并打印（不静默）；
-    CLI 显式指定的模型命中单账号 CLI 通道（app.gateway.is_serial_model，判定
-    口径唯一，不许本脚本自比前缀）→ 写 1 并打印「串行强制」。
-    界内正常值原样返回、零额外输出：默认路径与改前逐字一致。
-    """
-    requested = max(1, int(conc))
-    workers = min(requested, limits.MAX_CONCURRENCY)
-    hits = [m for m in models if is_serial_model(m)]
-    if hits:
-        print(f"[conc] 串行强制：命中单账号 CLI 模型 {hits} → workers=1（请求 conc={conc}）",
-              flush=True)
-        return 1
-    if workers != requested:
-        print(f"[conc] 越界截断：conc={conc} → workers={workers}"
-              f"（上限 app/limits.MAX_CONCURRENCY={limits.MAX_CONCURRENCY}）", flush=True)
-    return workers
-
-
-def _check_conc(ap, value: int, flag: str) -> None:
-    """`--concurrency` 硬上界闸：超界响亮报错退出（parser.error → SystemExit(2)），不静默 clamp。
-
-    命令行数值是操作者声明的意图；写进实验 config 的值若与命令行不一致（静默
-    改写），事后审计会把实验配置当成操作者本意——比失败更危险。
-    """
-    if value > limits.MAX_CONCURRENCY:
-        ap.error(f"{flag}={value} 超过上限 {limits.MAX_CONCURRENCY}"
-                 f"（单一真源 app/limits.py::MAX_CONCURRENCY）；"
-                 f"本脚本拒绝静默 clamp，越界即报错退出")
 
 
 def _arg_models(args) -> list[str]:
@@ -87,7 +53,8 @@ def build_overrides(args) -> dict:
         "temperatures": [float(x) for x in args.temps.split(",")],
         "samples_per_pair": args.samples,
         "adversarial_k": args.adversarial_k,
-        "concurrency": _pool_workers(args.concurrency, _arg_models(args)),
+        "concurrency": _pool_workers(args.concurrency, _arg_models(args),
+                                     serial_check=is_serial_model),
     }
 
 
