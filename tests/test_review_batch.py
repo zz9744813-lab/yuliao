@@ -207,7 +207,7 @@ def test_serve_cursor_survives_process_restart():
     这里模拟重启：清掉进程内缓存（不清磁盘），再取题必须是后面的题。
     """
     _reset_cursor()
-    api_mod._CURSOR_FILE.unlink(missing_ok=True)
+    api_mod._cursor_file().unlink(missing_ok=True)
     _seed("EXP-RV40", "c40", 3)
     seen = [client.get("/experiments/EXP-RV40/review/next",
                        params={"batch": "c40"}).json()["review_id"] for _ in range(2)]
@@ -221,8 +221,8 @@ def test_serve_cursor_survives_process_restart():
 
 def test_serve_cursor_file_is_written():
     _reset_cursor()
-    api_mod._CURSOR_FILE.unlink(missing_ok=True)
+    api_mod._cursor_file().unlink(missing_ok=True)
     _seed("EXP-RV41", "c41", 2)
     client.get("/experiments/EXP-RV41/review/next", params={"batch": "c41"})
-    data = json.loads(api_mod._CURSOR_FILE.read_text(encoding="utf-8"))
+    data = json.loads(api_mod._cursor_file().read_text(encoding="utf-8"))
     assert "c41" in data and data["c41"] >= 1

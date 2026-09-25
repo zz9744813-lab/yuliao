@@ -97,7 +97,7 @@ def test_mapping_survives_verdict():
     _seed("EXP-RJ1", "rj1")
     item = client.get("/experiments/EXP-RJ1/review/next?batch=rj1").json()
     assert _judge(item, "A").status_code == 200
-    assert api_mod._blind_get(item["review_id"]) is not None, "判定后映射被弹掉了"
+    assert api_mod._blind_get(item["presentation_id"]) is not None, "判定后呈现被弹掉了"
 
 
 def test_rejudge_overwrites_with_rejudged_flag():
@@ -189,17 +189,25 @@ def test_pending_restart_rejects_unbound_ab():
     assert hv["presentation_id"]
 
 
-def test_pending_never_served_records_raw():
-    """从未被新代码端过的历史待判题（无呈现行）直投：如实记原始 A/B。"""
+def test_pending_never_served_now_rejected():
+    """待判题 + 取不到呈现：**现在直接 409**，不再落"原始 A/B"。
+
+    口径变更（审计 A01，2026-09-20，随 6da2a18 移植）：旧行为（本测试前身
+    test_pending_never_served_records_raw）是照常落库 + 标 mapping_lost，
+    但"原始 A/B"落库后没人知道它按哪套排列解读 —— 与已判题那条 409 规则自相矛盾，
+    也正是审计要清的污染源。现在宁可让评审人重端一次，也不写语义不明的判定。
+
+    （6da2a18 同名义的 test_pending_without_presentation_now_rejected 在本分支
+    落在**从未端出**的题上：呈现行 + 进程内映射都在=可解释，DB 兜底会照常解读，
+    拿不到"无从解释"这一态；从未端出的题才是 legacy 无绑定的真实拒绝场景。）"""
     _reset()
-    rid = _seed("EXP-RJ4B", "rj4b")[0]   # 不走 next/serve——不产生呈现行
+    rid = _seed("EXP-RJ4B", "rj4b")[0]   # 不走 next/serve——不产生任何呈现
     r = client.post(f"/review/{rid}/verdict",
                     json={"winner": "A", "reasons": [], "annotations": []})
-    assert r.status_code == 200
-    assert r.json()["mapping_note"] and "mapping_lost" in r.json()["mapping_note"]
+    assert r.status_code == 409, f"无呈现可解释时必须 409，实得 {r.status_code}"
     with db.session() as s:
         hv = s.get(ReviewItem, rid).human_verdict
-    assert hv["human_was_a"] is None and hv["winner_resolved"] == "A"
+    assert not hv or not hv.get("winner_raw"), "被拒的提交不许落库"
 
 
 def test_annotation_offset_verified():
@@ -278,13 +286,19 @@ def test_batch_done_list_and_404():
     assert row["rejudged"] is False and row["n_annotations"] == 0
 
 
-def test_blind_map_fifo_cap():
-    """映射表有 FIFO 上限：超出后最旧的被逐出，不会无限膨胀。"""
+def test_blind_map_fifo_cap(monkeypatch):
+    """映射表有 FIFO 上限：超出后最旧的被逐出，不会无限膨胀。
+
+    落盘打桩：本测试只验**内存**淘汰语义，不该真往 DATA_DIR 写呈现文件
+    （原写法会把副作用渗到同目录其它测试，见会审 qwen 席意见）。
+    """
     _reset()
+    monkeypatch.setattr(api_mod, "_blind_save_locked", lambda: None)
     api_mod._BLIND_CAP = 2
     try:
         for i in range(3):
-            api_mod._blind_put(f"RV-cap{i}", {"human_first": True, "ctx_mode": "x"})
+            api_mod._blind_put(f"RV-cap{i}", {"review_id": f"RV-cap{i}", "human_first": True,
+                                              "ctx_mode": "x"})
         assert len(api_mod._BLIND_MAP) == 2
         assert "RV-cap0" not in api_mod._BLIND_MAP
         assert "RV-cap2" in api_mod._BLIND_MAP
