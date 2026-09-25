@@ -345,3 +345,138 @@ def test_repo_root_default_is_script_derived():
     assert (Path(a.repo_root) / "scripts" / "k5_criteria_check.py").is_file(), \
         "推导出的仓库根须真的含本脚本——硬编码主仓路径做不到这一点"
 
+
+# ── 晋升链缺口只读预检（gui 任务 2026-09-25）：四项机械判定 ──
+import sqlite3
+
+
+def _mk_ro_db(tmp_path, cards, reviews=(), n_packages=0, n_conditions=0):
+    """离线假库：tmp_path/data/language_genome.db（raw sqlite，最小列集）。
+    cards=[(key,status,scope,obs)]；reviews={key:[verdict,...]}。"""
+    data = tmp_path / "data"
+    data.mkdir(exist_ok=True)
+    db = data / "language_genome.db"
+    con = sqlite3.connect(db)
+    con.executescript("""
+    CREATE TABLE expression_strategies_v2(
+      id TEXT, strategy_key TEXT, version INTEGER, status TEXT,
+      scope TEXT, observation_status TEXT);
+    CREATE TABLE strategy_reviews(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, strategy_id TEXT,
+      judge_kind TEXT, reviewer_model TEXT, verdict TEXT,
+      evidence_support INTEGER, distinct_flag INTEGER, sufficiency REAL,
+      confidence REAL, seconds REAL, created_at TEXT, note TEXT);
+    CREATE TABLE knowledge_packages(id TEXT);
+    CREATE TABLE strategy_conditions(id TEXT);
+    """)
+    ids = {}
+    for i, (key, status, scope, obs) in enumerate(cards):
+        sid = f"ESV2-{i:03d}"
+        ids[key] = sid
+        con.execute("INSERT INTO expression_strategies_v2 VALUES (?,?,?,?,?,?)",
+                    (sid, key, 1, status, scope, obs))
+    for key, verdicts in reviews.items():
+        for j, v in enumerate(verdicts):
+            con.execute("INSERT INTO strategy_reviews (strategy_id, judge_kind,"
+                        " reviewer_model, verdict, created_at) VALUES "
+                        "(?,?,?,?,?)",
+                        (ids[key], "semantic_card", f"seat-{j}", v, "t"))
+    for _ in range(n_packages):
+        con.execute("INSERT INTO knowledge_packages VALUES ('KP-x')")
+    for _ in range(n_conditions):
+        con.execute("INSERT INTO strategy_conditions VALUES ('SC-x')")
+    con.commit()
+    con.close()
+    return tmp_path
+
+
+def _artifact_pkg(arms_nonempty):
+    """A 臂收据口径夹具：arms_nonempty={'A':0/1,'B':...}，n_techniques 按臂。"""
+    pkgs = []
+    for i in (1, 2, 3):
+        for arm in "AB":
+            pkgs.append({"scene": f"s{i}", "arm": arm,
+                         "n_techniques": 2 if arms_nonempty.get(arm) else 0})
+    return {"live": True, "channel_changed": True,
+            "artifacts": {"prose": [], "packages": pkgs, "failures": [],
+                          "skipped": [], "receipts": []}}
+
+
+def test_gap_conclusion_card_not_promoted(tmp_path):
+    """机械判定①：全部卡 hypothesis（无论席位一致与否）⇒『卡未晋升』——
+    K3 可服务卡数=0，缺口在晋升链，不进 K3 过滤层。三席一致 N/M 如实。"""
+    root = _mk_ro_db(
+        tmp_path,
+        cards=[("卡甲", "hypothesis", "UNCERTAIN", "hypothesis"),
+               ("卡乙", "hypothesis", "UNCERTAIN", "hypothesis"),
+               ("卡丙", "hypothesis", "UNCERTAIN", "observed")],
+        reviews={"卡甲": ["retire", "retire", "retire"],   # 三席全一致
+                 "卡乙": ["retire", "merge", "rewrite"]},  # 三席不一致
+        n_packages=0, n_conditions=0)
+    art = _write(tmp_path, "art.json", _artifact_pkg({"A": 0, "B": 0}))
+    sec = k5c.promotion_gap_preflight(root, art)
+    assert sec["db_unavailable"] is False
+    assert sec["conclusion"]["verdict"] == "卡未晋升"
+    assert sec["conclusion"]["n_k3_eligible_cards"] == 0
+    assert sec["(1)_counts"] == {"knowledge_packages": 0,
+                                "strategy_conditions": 0}
+    seats = sec["(3)_seats"]
+    assert seats["cards_with_reviews"] == 2
+    assert seats["verdict_fully_consistent_cards"] == 1  # 只有卡甲
+    by_key = {c["strategy_key"]: c for c in sec["(2)_cards"]}
+    assert by_key["卡甲"]["verdict_consistent"] is True
+    assert by_key["卡乙"]["verdict_consistent"] is False
+    assert by_key["卡丙"]["k3_eligible"] is False  # observed 但 status 未晋升
+
+
+def test_gap_conclusion_k3_filter_when_eligible_exists(tmp_path):
+    """机械判定②：存在 K3 可服务卡（verified+observed）而 A 臂仍空
+    ⇒『K3 过滤』——缺口定位到查询侧，逐卡 scope 附证据。"""
+    root = _mk_ro_db(
+        tmp_path,
+        cards=[("卡甲", "verified", "WORK", "observed"),
+               ("卡乙", "hypothesis", "UNCERTAIN", "hypothesis")],
+        reviews={"卡甲": ["verified", "verified", "verified"]},
+        n_packages=1, n_conditions=2)
+    art = _write(tmp_path, "art.json", _artifact_pkg({"A": 0, "B": 0}))
+    sec = k5c.promotion_gap_preflight(root, art)
+    assert sec["conclusion"]["verdict"] == "K3 过滤"
+    assert sec["conclusion"]["n_k3_eligible_cards"] == 1
+    assert sec["(1)_counts"]["knowledge_packages"] == 1
+    assert sec["(1)_counts"]["strategy_conditions"] == 2
+    assert sec["(3)_seats"]["verdict_fully_consistent_cards"] == 1
+
+
+def test_gap_a_arm_nonempty_is_not_applicable(tmp_path):
+    """机械判定③：收据 A 臂非空 ⇒ not_applicable（本预检不构成缺口，
+    不许在非缺口态硬套『卡未晋升/K3 过滤』）。"""
+    root = _mk_ro_db(tmp_path,
+                     cards=[("卡甲", "verified", "UNCERTAIN", "observed")],
+                     reviews={})
+    art = _write(tmp_path, "art.json", _artifact_pkg({"A": 1, "B": 1}))
+    sec = k5c.promotion_gap_preflight(root, art)
+    assert sec["conclusion"]["verdict"] == "not_applicable"
+    assert sec["a_arm_nonempty_packages"] == 3  # 三场各一个非空 A 臂包
+
+
+def test_gap_db_unavailable_never_guesses(tmp_path):
+    """机械判定④：库不可读 ⇒ insufficient_evidence——不许猜。"""
+    sec = k5c.promotion_gap_preflight(tmp_path / "no-such-root")
+    assert sec["db_unavailable"] is True
+    assert sec["conclusion"]["verdict"] == "insufficient_evidence"
+    assert "(1)_counts" not in sec      # 缺数据就缺，不造半套
+
+
+def test_report_adds_only_new_section_by_default(tmp_path):
+    """默认语义零变化：不加任何参数，报告除新增
+    promotion_gap_preflight section 外逐字不变（键集=旧键集+1，
+    criteria/verdict 口径原样——旧用例全绿即为行为不变的另一半证明）。"""
+    art = _write(tmp_path, "perfect.json", _perfect_artifact())
+    report = k5c.build_report(art)
+    old_keys = {"mode", "generated_at", "doc", "k4_artifact", "criteria",
+                "n_criteria", "n_satisfied", "k5_established", "verdict"}
+    assert set(report) == old_keys | {"promotion_gap_preflight"},         set(report)
+    assert report["k5_established"] is False
+    assert "未通" in report["verdict"]
+    # 新 section 缺库（工作树无真库）也要机械诚实：
+    assert report["promotion_gap_preflight"]["db_unavailable"] is True
