@@ -22,7 +22,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import config, corpus, db, experiments  # noqa: E402
+from app import config, corpus, db, experiments, limits  # noqa: E402
+from app.gateway import is_serial_model  # noqa: E402
 
 # 导入阶段的退出码：守卫拒绝 ≠ 文件不存在（后者沿用既有行为，打印后继续跑）
 EXIT_IMPORT_REFUSED = 3
@@ -34,7 +35,63 @@ _GUARD_RULES_FALLBACK = (
 IMPORT_ROOTS_ENV = getattr(corpus, "IMPORT_ROOTS_ENV", "LG_IMPORT_ROOTS")
 
 
-def parse_args():
+def _pool_workers(conc: int, models=()) -> int:
+    """并发数的运行时兜底（上限真源：app/limits.py::MAX_CONCURRENCY）。
+
+    本脚本不自建线程池，但把 `--concurrency` **写进实验 config**（overrides →
+    create_experiment 落库）；执行侧 `app/experiments._pool_map` 已有同闸+串行
+    纪律，这里保证写入口就拿不到越界值：越界按上限截断并打印（不静默）；
+    CLI 显式指定的模型命中单账号 CLI 通道（app.gateway.is_serial_model，判定
+    口径唯一，不许本脚本自比前缀）→ 写 1 并打印「串行强制」。
+    界内正常值原样返回、零额外输出：默认路径与改前逐字一致。
+    """
+    requested = max(1, int(conc))
+    workers = min(requested, limits.MAX_CONCURRENCY)
+    hits = [m for m in models if is_serial_model(m)]
+    if hits:
+        print(f"[conc] 串行强制：命中单账号 CLI 模型 {hits} → workers=1（请求 conc={conc}）",
+              flush=True)
+        return 1
+    if workers != requested:
+        print(f"[conc] 越界截断：conc={conc} → workers={workers}"
+              f"（上限 app/limits.MAX_CONCURRENCY={limits.MAX_CONCURRENCY}）", flush=True)
+    return workers
+
+
+def _check_conc(ap, value: int, flag: str) -> None:
+    """`--concurrency` 硬上界闸：超界响亮报错退出（parser.error → SystemExit(2)），不静默 clamp。
+
+    命令行数值是操作者声明的意图；写进实验 config 的值若与命令行不一致（静默
+    改写），事后审计会把实验配置当成操作者本意——比失败更危险。
+    """
+    if value > limits.MAX_CONCURRENCY:
+        ap.error(f"{flag}={value} 超过上限 {limits.MAX_CONCURRENCY}"
+                 f"（单一真源 app/limits.py::MAX_CONCURRENCY）；"
+                 f"本脚本拒绝静默 clamp，越界即报错退出")
+
+
+def _arg_models(args) -> list[str]:
+    """CLI 显式指定的全部模型名（串行纪律判定对象；缺省模型由执行侧 _pool_map 兜底）。"""
+    out: list[str] = []
+    for raw in (args.models, args.judge_models, args.extract_models):
+        if raw:
+            out += [m.strip() for m in raw.split(",") if m.strip()]
+    return out
+
+
+def build_overrides(args) -> dict:
+    """实验 overrides 的公共口径。`concurrency` 在这里就夹紧，写入前不留越界值。"""
+    return {
+        "n_segments": args.segments,
+        "granularities": args.granularities.split(","),
+        "temperatures": [float(x) for x in args.temps.split(",")],
+        "samples_per_pair": args.samples,
+        "adversarial_k": args.adversarial_k,
+        "concurrency": _pool_workers(args.concurrency, _arg_models(args)),
+    }
+
+
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--segments", type=int, default=24)
     p.add_argument("--granularities", default="S,M,L")
@@ -49,13 +106,17 @@ def parse_args():
     p.add_argument("--temps", default="0.5,0.9")
     p.add_argument("--samples", type=int, default=2)
     p.add_argument("--adversarial-k", type=int, default=8)
-    p.add_argument("--concurrency", type=int, default=4)
+    p.add_argument("--concurrency", type=int, default=4,
+                   help=f"写入实验 config 的并发（上界 app/limits.MAX_CONCURRENCY="
+                        f"{limits.MAX_CONCURRENCY}，越界报错退出）")
     p.add_argument("--mock", action="store_true", help="不发请求：用确定性假模型过全流程")
     p.add_argument("--use-fixtures", action="store_true", help="把 data/fixtures 当 inbox 导一次")
     p.add_argument("--use-distiller", action="store_true")
     p.add_argument("--distiller-db", default=r"F:\agi\novel-distiller\data\app.sqlite3")
     p.add_argument("--distiller-root", default=r"F:\agi\novel-distiller")
-    return p.parse_args()
+    args = p.parse_args(argv)
+    _check_conc(p, args.concurrency, "--concurrency")
+    return args
 
 
 def _abs(raw: str) -> str:
@@ -169,14 +230,7 @@ def main() -> int:
             return rc
         print("corpus:", corpus.segment_stats(s))
 
-        overrides = {
-            "n_segments": args.segments,
-            "granularities": args.granularities.split(","),
-            "temperatures": [float(x) for x in args.temps.split(",")],
-            "samples_per_pair": args.samples,
-            "adversarial_k": args.adversarial_k,
-            "concurrency": args.concurrency,
-        }
+        overrides = build_overrides(args)
         if args.models:
             overrides["recon_models"] = args.models.split(",")
         if args.judge_models:
