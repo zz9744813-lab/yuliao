@@ -1,0 +1,87 @@
+{
+ "artifact": "F:\\agi\\language-genome\\out_k4_3_mc22_v2\\k4_paired.json",
+ "live": true,
+ "worlds_dir": "C:\\Users\\6\\AppData\\Local\\Temp\\k4_worlds_0taf6d2a",
+ "rows": [
+  {
+   "scene": "s1",
+   "arm": "A",
+   "result": "committed",
+   "verdict": "pass",
+   "basis": [
+    "prose.status=committed；receipt.job_id=scene-9d834bbfb1f746ebbc95bb4d",
+    "usage：calls=2，tokens=1063，verifier_invalid_retries=0",
+    "live=True，channel_changed=True"
+   ],
+   "note": ""
+  },
+  {
+   "scene": "s1",
+   "arm": "B",
+   "result": "committed",
+   "verdict": "pass",
+   "basis": [
+    "prose.status=committed；receipt.job_id=scene-db5acd62d45932c91e268a80",
+    "usage：calls=2，tokens=1104，verifier_invalid_retries=0",
+    "live=True，channel_changed=True"
+   ],
+   "note": ""
+  },
+  {
+   "scene": "s2",
+   "arm": "A",
+   "result": "failed",
+   "verdict": "honest_failure",
+   "basis": [
+    "failures[s2,A].error=call_budget_exhausted",
+    "error_type=RuntimeFault，rollback_failed=False",
+    "世界库 job=scene-02a053017bed5a6f64f715a3：status=running，calls=6（max_calls=6，max_rewrites=2），非 succeeded 调用行=0",
+    "自洽：calls == max_calls（6==6）且全部 succeeded ⇒ 预算闸在下次调用前拒 ⇒ 诚实"
+   ],
+   "note": "机械判据三连成立：闸拒绝码 + 无产出 + 世界库自洽"
+  },
+  {
+   "scene": "s2",
+   "arm": "B",
+   "result": "failed",
+   "verdict": "honest_failure",
+   "basis": [
+    "failures[s2,B].error=rewrite_budget_exhausted:missing_or_unplanned_event,state_patch_not_authorized_b",
+    "error_type=RuntimeFault，rollback_failed=False",
+    "世界库 job=scene-4aef41c9e16416d2d9f32f0f：status=running，calls=6（max_calls=6，max_rewrites=2），非 succeeded 调用行=0",
+    "自洽：核验错误清单非空（missing_or_unplanned_event,state_patch_not_authorized_by_pla…），calls=6 ≤ max_calls（改稿轮全用尽的常规形=6）⇒ 诚实"
+   ],
+   "note": "机械判据三连成立：闸拒绝码 + 无产出 + 世界库自洽"
+  },
+  {
+   "scene": "s3",
+   "arm": "A",
+   "result": "skipped",
+   "verdict": "cascade_skip",
+   "basis": [
+    "skipped_after=s2；reason=前场失败，本臂世界未推进，本场景未执行"
+   ],
+   "note": "连锁跳过随 parent 失败定性，不算独立判"
+  },
+  {
+   "scene": "s3",
+   "arm": "B",
+   "result": "skipped",
+   "verdict": "cascade_skip",
+   "basis": [
+    "skipped_after=s2；reason=前场失败，本臂世界未推进，本场景未执行"
+   ],
+   "note": "连锁跳过随 parent 失败定性，不算独立判"
+  }
+ ],
+ "summary": {
+  "pass": 2,
+  "honest_failure": 2,
+  "defect_undetermined": 0,
+  "insufficient_evidence": 0,
+  "cascade_skip": 2,
+  "total": 6
+ },
+ "mode": "read_only",
+ "generated_at": "2026-09-25T14:56:18"
+}
