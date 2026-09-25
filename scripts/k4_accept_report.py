@@ -12,8 +12,14 @@
     拒绝码），且 failure.rollback_failed 为假（回滚干净）；
   ② 无产出：prose[(scene,arm)] 不存在 committed 行；
   ③ 收据/世界库**自洽**：
-     - call_budget_exhausted ⇒ 该 job 的 calls 行数 == budget.max_calls
-       且全部 succeeded、job.status != 'committed'；
+     - call_budget_exhausted ⇒ **优先消费 failures[].budget_diag 硬
+       证据**（gui-k4-s2-contract 合入 b5c8685 起产出）：
+       actual_calls == max_calls；无 budget_diag（旧收据）或
+       store_unavailable=true ⇒ **退回旧口径**：世界库 calls 行数 ==
+       budget.max_calls（世界库 request 未记预算时取收据 budget_calls）
+       且全部 succeeded、job.status != 'committed'。退回旧口径**不因
+       缺字段判 defect**；store_unavailable 必须在报告里如实标注
+       「诊断取数失败、退回旧口径」，不许静默；
      - rewrite_budget_exhausted ⇒ 失败串冒号后带非空核验错误清单
        （validate_review errors），calls 全 succeeded，
        calls 行数 == (max_rewrites+1)*2 或 ≤ max_calls，
@@ -74,8 +80,17 @@ def _job_for(con, scene: str, arm: str):
 
 
 def _self_consistent(con, job_id: str, code: str, failure_error: str,
-                     basis: list[str]) -> tuple[bool, str]:
-    """闸拒绝码与世界库逐行核对（机械自洽）。返回 (ok, 不自洽说明)。"""
+                     basis: list[str], diag: dict | None = None,
+                     receipt_budget_calls=None) -> tuple[bool, str]:
+    """闸拒绝码与世界库逐行核对（机械自洽）。返回 (ok, 不自洽说明)。
+
+    预算诊断接入（gui-k4-s2-contract 合入 b5c8685，2026-09-25）：
+    call_budget_exhausted 的诚实判定**优先**用 failures[].budget_diag
+    .actual_calls == max_calls（失败时刻的调用数硬证据）；缺
+    budget_diag、store_unavailable=true 或 diag 无 actual_calls ⇒
+    退回旧口径（世界库逐行核对），退回不翻判 defect，取数失败如实
+    标注。budget_diag 不替代世界库核对：世界库不可读时仍走证据不足。
+    """
     req = None
     jstatus = calls_n = None
     row = con.execute("SELECT status, request FROM jobs WHERE id=?",
@@ -86,6 +101,12 @@ def _self_consistent(con, job_id: str, code: str, failure_error: str,
     req = json.loads(req_raw)
     budget = req.get("budget") or {}
     max_calls = int(budget.get("max_calls", 0))
+    if not max_calls and receipt_budget_calls is not None:
+        # 旧口径回退源：世界库 request 未记预算时取收据 budget_calls
+        # （生效上限逐条落收据，b5c8685 起）。旧收据无此键 ⇒ 口径不变。
+        max_calls = int(receipt_budget_calls)
+        basis.append(f"生效上限取自收据 budget_calls={max_calls}"
+                     "（世界库 jobs.request 未记预算）")
     max_rewrites = int(budget.get("max_rewrites", 2))
     rows = con.execute(
         "SELECT status FROM calls WHERE job=?", (job_id,)).fetchall()
@@ -99,6 +120,32 @@ def _self_consistent(con, job_id: str, code: str, failure_error: str,
     if n_failed_calls:
         return False, f"存在非 succeeded 调用行 ×{n_failed_calls}（非干净闸拒）"
     if code == "call_budget_exhausted":
+        diag_calls = None
+        if diag is not None and not diag.get("store_unavailable") \
+                and isinstance(diag.get("actual_calls"), int):
+            diag_calls = diag["actual_calls"]
+        if diag is not None:
+            if diag.get("store_unavailable"):
+                basis.append("budget_diag.store_unavailable=true ⇒ 诊断"
+                             "取数失败，退回旧口径（世界库逐行核对）")
+            elif diag_calls is None:
+                basis.append("budget_diag 无 actual_calls ⇒ 无硬证据，"
+                             "退回旧口径（世界库逐行核对）")
+        if diag_calls is not None:
+            d_max = int(diag.get("max_calls", max_calls))
+            basis.append(f"budget_diag 硬证据优先：actual_calls={diag_calls}"
+                         f"，max_calls={d_max}（configured="
+                         f"{diag.get('configured')}，failed_calls="
+                         f"{diag.get('failed_calls')}，repair_calls="
+                         f"{diag.get('repair_calls')}）")
+            if diag_calls != d_max:
+                return False, (f"budget_diag 硬证据：actual_calls="
+                               f"{diag_calls} ≠ max_calls={d_max}"
+                               "——预算未用尽却声称 call_budget_exhausted")
+            basis.append(f"自洽（硬证据路）：actual_calls == max_calls"
+                         f"（{diag_calls}=={d_max}）且世界库无非 succeeded "
+                         "调用行 ⇒ 闸在下次调用前拒 ⇒ 诚实")
+            return True, ""
         if calls_n != max_calls:
             return False, (f"声称预算闸拒但 calls={calls_n} ≠ "
                            f"max_calls={max_calls}")
@@ -176,9 +223,16 @@ def classify(artifact_path: Path | None) -> dict:
                 f = failures[key]
                 err = f.get("error") or ""
                 code = err.split(":", 1)[0]
+                diag = f.get("budget_diag")
+                diag = diag if isinstance(diag, dict) else None
                 basis = [f"failures[{sc},{arm}].error={err[:80]}",
                          f"error_type={f.get('error_type')}，"
                          f"rollback_failed={f.get('rollback_failed')}"]
+                if diag is not None:
+                    # 诊断字段逐条落依据（含 rollback_failed / 世界库不可读
+                    # 等早退分支）——store_unavailable 不许静默。
+                    basis.append("budget_diag=" + json.dumps(
+                        diag, ensure_ascii=False, sort_keys=True))
                 if f.get("rollback_failed"):
                     rows.append(_row(sc, arm, "failed",
                                      "defect_undetermined", basis,
@@ -205,7 +259,10 @@ def classify(artifact_path: Path | None) -> dict:
                                      "世界库中无该 (scene,arm) 的 job 行——"
                                      "自洽性不可核"))
                     continue
-                ok, why_not = _self_consistent(con, job[0], code, err, basis)
+                ok, why_not = _self_consistent(
+                    con, job[0], code, err, basis, diag=diag,
+                    receipt_budget_calls=(receipts.get(key) or {}).get(
+                        "budget_calls"))
                 if ok:
                     rows.append(_row(sc, arm, "failed", "honest_failure",
                                     basis, "机械判据三连成立：闸拒绝码 + "
