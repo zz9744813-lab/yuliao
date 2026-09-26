@@ -515,7 +515,11 @@ _BLIND_LAST: dict[str, str] = {}       # review_id → 最近一次 presentation
                                        # （blind_presentations.json 的 "last" 键）与审计保留。
                                        # 会审两席建议（2026-09-25）：本索引**不参与任何判定**，
                                        # 不是防线；上限 _BLIND_LAST_CAP 只为落盘体积。
-_BLIND_LOCK = threading.Lock()
+# 可重入锁（会审 glm 席 [一般] 残留整改，2026-09-26）：懒加载的"清空 + 装载 + 置哨兵"
+# 必须待在**同一个**持锁段里，而装载本身也要在这段里做 —— 不可重入的 Lock 做不到
+# （持锁调 _blind_load 会自锁死），所以换成 RLock：同线程嵌套取锁合法，
+# 跨线程仍然是互斥（读路径绝看不到"已清空、未装载"的中间态）。
+_BLIND_LOCK = threading.RLock()
 _BLIND_LOADED_FOR: str | None = None   # 已装载的呈现文件路径（懒加载哨兵，见 _blind_ensure_loaded）
 _SERVE_CURSOR: dict[str, int] = {}   # 批次轮换游标（进程内缓存；真值落盘，见下）
 
@@ -578,12 +582,26 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
         raise
 
 
-def _blind_load() -> None:
-    """启动时把落盘的呈现映射读回内存（重启后旧页面仍可安全提交）。
+def _blind_backup_corrupt(path: Path, err: Exception, consequence: str) -> None:
+    """把损坏/读不出的呈现文件改名备份成 .corrupt，保住现场（调用方须持锁）。
 
-    文件缺失 = 正常（首次运行）；文件**损坏** = 备份为 .corrupt 并告警 ——
-    不让"静默加载成空映射"把问题藏起来（会审两席）。
+    读路径与写路径**共用**这一个函数（会审 glm 席 [一般] 残留：两处口径原本不一致 ——
+    装载会备份、保存却直接覆盖写，把损坏现场一并抹掉，事后无从判断当时坏在哪）。
+    备份自身失败也只告警：现场保不住是坏消息，但不能因此让读/写路径抛出去。
     """
+    backup = path.with_suffix(path.suffix + ".corrupt")
+    try:
+        path.replace(backup)
+    except Exception as be:
+        logger.warning("盲评呈现文件损坏（%s）：%s；备份到 %s 失败（%s），%s",
+                       path, err, backup, be, consequence)
+        return
+    logger.warning("盲评呈现文件损坏（%s）：%s；已备份到 %s，%s",
+                   path, err, backup, consequence)
+
+
+def _blind_load_locked() -> None:
+    """把落盘呈现并入内存（**调用方须持锁**，见 _blind_ensure_loaded）。"""
     path = _present_file()
     try:
         raw = path.read_text(encoding="utf-8")
@@ -595,22 +613,28 @@ def _blind_load() -> None:
     try:
         data = json.loads(raw)
     except Exception as e:
-        backup = path.with_suffix(path.suffix + ".corrupt")
-        try:
-            path.replace(backup)
-        except Exception:
-            pass
-        logger.warning("盲评呈现文件损坏（%s）：%s；已备份到 %s，本次从空映射开始", path, e, backup)
+        _blind_backup_corrupt(path, e, "本次从空映射开始")
         return
+    for pid, entry in (data.get("presentations") or {}).items():
+        _BLIND_MAP[pid] = entry
+    for rid, pid in (data.get("last") or {}).items():
+        _BLIND_LAST[rid] = pid
+    while len(_BLIND_MAP) > _BLIND_CAP:
+        _BLIND_MAP.pop(next(iter(_BLIND_MAP)))
+    while len(_BLIND_LAST) > _BLIND_LAST_CAP:
+        _BLIND_LAST.pop(next(iter(_BLIND_LAST)))
+
+
+def _blind_load() -> None:
+    """启动时把落盘的呈现映射读回内存（重启后旧页面仍可安全提交）。
+
+    文件缺失 = 正常（首次运行）；文件**损坏** = 备份为 .corrupt 并告警 ——
+    不让"静默加载成空映射"把问题藏起来（会审两席）。
+    对外入口保持"自己取锁"，所以测试/重启路径可以直接调它；
+    已在持锁段里的调用方改调 `_blind_load_locked`（RLock 可重入，两种都对）。
+    """
     with _BLIND_LOCK:
-        for pid, entry in (data.get("presentations") or {}).items():
-            _BLIND_MAP[pid] = entry
-        for rid, pid in (data.get("last") or {}).items():
-            _BLIND_LAST[rid] = pid
-        while len(_BLIND_MAP) > _BLIND_CAP:
-            _BLIND_MAP.pop(next(iter(_BLIND_MAP)))
-        while len(_BLIND_LAST) > _BLIND_LAST_CAP:
-            _BLIND_LAST.pop(next(iter(_BLIND_LAST)))
+        _blind_load_locked()
 
 
 def _load_cursor(key: str) -> int:
@@ -644,8 +668,10 @@ def _save_cursor(key: str, value: int) -> None:
 
 
 def _blind_put(presentation_id: str, entry: dict) -> None:
-    _blind_ensure_loaded()
+    # 整段持锁（RLock 允许 _blind_ensure_loaded 内部再取）：若在"ensure 完"与"写入"之间
+    # 放开锁，另一个线程的换目录重装载可以把这条刚写进内存、还没落盘的呈现清掉。
     with _BLIND_LOCK:
+        _blind_ensure_loaded()
         _BLIND_MAP[presentation_id] = entry
         _BLIND_LAST[entry["review_id"]] = presentation_id
         while len(_BLIND_MAP) > _BLIND_CAP:
@@ -671,7 +697,10 @@ def _blind_save_locked() -> None:
         except FileNotFoundError:
             pass
         except Exception as e:
-            logger.warning("盲评呈现文件读不出（%s）：%s；本次直接覆盖写", path, e)
+            # 口径统一（会审 glm 席 [一般] 残留）：既然紧接着就要覆盖写，先把现场按
+            # `_blind_load` 同款备份成 .corrupt —— 旧写法"只告警、直接覆盖写"会把损坏
+            # 现场一并抹掉，事后无从判断当时坏在哪、丢了谁的呈现。
+            _blind_backup_corrupt(path, e, "本次跳过合并、直接覆盖写")
         merged_p.update(_BLIND_MAP)
         merged_l.update(_BLIND_LAST)
         # 逐出按 created_at 从旧到新：只按插入序会把 disk 上先到的条目排在队首，
@@ -694,6 +723,12 @@ def _blind_ensure_loaded() -> None:
     会审两席：读写路径已改成每次从 config.DATA_DIR 派生，若装载仍固化在导入那一刻，
     "先 import 再改 DATA_DIR"就变成"写新目录、内存里却还是旧目录的映射"——
     方向相反的同类污染（把真实环境的呈现带进测试进程）。目录变了就整块换一套。
+
+    会审 glm 席 [一般] 残留整改（2026-09-26）：**清空、装载、置哨兵必须在同一个持锁段里
+    一次做完**。旧形态是"持锁清空 → 释放锁 → _blind_load() → 再持锁置哨兵"，中间那段锁
+    是放开、哨兵也未置位的：另一个线程的读路径正好落进"已清空、未装载"就拿到 None，
+    把**有效** pid 判成过期（对客户端就是一个还活着的呈现收到 409）。单 worker/测试下
+    看不出来，多线程部署下是真缺陷。现在读路径要么拿到旧一整套、要么拿到新一整套。
     """
     global _BLIND_LOADED_FOR
     path = str(_present_file())
@@ -704,8 +739,7 @@ def _blind_ensure_loaded() -> None:
             return
         _BLIND_MAP.clear()
         _BLIND_LAST.clear()
-    _blind_load()                      # 自己取锁，别在持锁时调用（Lock 不可重入）
-    with _BLIND_LOCK:
+        _blind_load_locked()           # 同段装载：不把"已清空、未装载"露给读路径
         _BLIND_LOADED_FOR = path
 
 
@@ -715,9 +749,13 @@ def _sha16(t: str) -> str:
 
 
 def _blind_get(presentation_id: str) -> dict | None:
-    """按**呈现**取映射：拿不到就是过期/未知，调用方必须拒绝，不许回退猜测。"""
-    _blind_ensure_loaded()
+    """按**呈现**取映射：拿不到就是过期/未知，调用方必须拒绝，不许回退猜测。
+
+    取表与懒加载在同一个持锁段里（会审 glm 席 [一般] 残留）：分开写就仍然可能出现
+    "ensure 刚过、读之前别人正在这块表上做整块换一套"，读路径必须永远看不到空表。
+    """
     with _BLIND_LOCK:
+        _blind_ensure_loaded()
         return _BLIND_MAP.get(presentation_id)
 
 
