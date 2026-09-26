@@ -862,7 +862,9 @@ function showDone(title, sub, kind){
 }
 function openDoneRecords(){
   queueTab('done');
-  if($('#rv-q-wrap').style.display === 'none') toggleQueue();
+  // 会审 87bd95235d #3：内联 style 只在初始 display:none 时成立，
+  // class/CSS 隐藏时恒 false 会把队列反向收起——改用 getComputedStyle 判定真实可见性
+  if(getComputedStyle($('#rv-q-wrap')).display === 'none') toggleQueue();
   $('#rv-q-wrap').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function showLive(){
@@ -1311,8 +1313,11 @@ function queueTab(mode){
 }
 function toggleQueue(){
   const w = $('#rv-q-wrap');
-  const open = w.style.display === 'none';
-  w.style.display = open ? '' : 'none';
+  // 同 #3：可见性判定必须走 getComputedStyle，内联 style 判定在 class 隐藏时失真
+  const open = getComputedStyle(w).display === 'none';
+  // 会审 e029d88 严重①：清除内联样式('')无法压过 class/样式表的 display:none
+  // ⇒ 必须显式设 'block' 才真的展开（否则文案已翻「收起」而元素仍隐藏）
+  w.style.display = open ? 'block' : 'none';
   $('#rv-q-btn').textContent = open ? '收起' : '展开';
   if(open) queueTab(queueMode);
 }

@@ -14,8 +14,11 @@ html[data-theme="dark"]{
   --n-300:#354038;--n-400:#4a544a;--n-500:#707a6f;--n-600:#a0a99e;
   --n-700:#c0c7bb;--n-800:#dbded3;--n-900:#f0eee4;--n-950:#faf7ec;
   --acc-100:#322b1c;--acc-300:#b79862;--acc-500:#d1b079;--acc-600:#dfc18d;--acc-700:#ecd4a5;
-  --bg:#111712;--surface:#1c231d;--surface-2:#202920;
-  --line:#354036;--line-2:#465348;--fg:#f0eee4;--fg-2:#c0c7bb;--dim:#a0a99e;
+  /* 语义层改刻度别名（会审 87bd95235d #4 口径对齐）：原裸值 #111712/#1c231d/#202920/
+     #354036/#465348 与本文件自身刻度不一致（#354036≠--n-300 的 #354038 等），
+     现统一指向刻度，由 tests/test_editorial_residual.py 与 app 侧对账钉住。 */
+  --bg:var(--n-100);--surface:var(--n-0);--surface-2:var(--n-50);
+  --line:var(--n-300);--line-2:var(--n-400);--fg:var(--n-900);--fg-2:var(--n-700);--dim:var(--n-600);
   --row-hover:#273027;--shadow-sm:0 1px 2px rgba(0,0,0,.2);--shadow-md:0 12px 38px rgba(0,0,0,.36);
   --nav-bg:#0e140f;--nav-line:#303b31;--nav-fg:#e7e5d9;--nav-dim:#a6ab9e;--nav-accent:#d0af78;
 }
