@@ -35,15 +35,19 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from . import access, config, console, corpus, db, engine, experiments, observability
+from . import access, config, console, db, engine, experiments, observability
+from .corpus_routes import (DistillerImport, FileImport, _MAX_SEGMENT_LIMIT,
+                            _MAX_SEGMENT_SCAN, corpus_stats, import_distiller,
+                            import_file, import_inbox, list_segments, list_works,
+                            router as corpus_router)
 from .ids import new_id
 from .models import (Candidate, Experiment, Job, ReviewItem, ReviewPresentation,
-                     Segment, Work, LlmCall)
+                     Segment, LlmCall)
 
 app = FastAPI(title="Language Genome — SemanticFrame Calibration Lab", version="0.2.0")
 logger = logging.getLogger(__name__)
@@ -79,95 +83,8 @@ if (_WEBSRC / "_shared").is_dir():
     app.mount("/lab/_shared", StaticFiles(directory=_WEBSRC / "_shared"), name="lab-shared")
 
 
-# ── 语料 ────────────────────────────────────────────────────
-# 以下三个导入端点 = 建段/扩产入口，只认管理档（app/access.requires_admin）；
-# 评审令牌走这里一律 403。既有行为/实现零改动，档位由访问门中间件裁决。
-
-@app.post("/corpus/import-inbox")
-def import_inbox():
-    with db.session() as s:
-        return corpus.import_inbox(s)
-
-
-class FileImport(BaseModel):
-    # 审计 P1（2026-09-23）：形状校验挡空串/超长；真正的内容闸在
-    # corpus.import_file（允许根 + 扩展名白名单 + 体积上限）。
-    path: str = Field(min_length=1, max_length=1024)
-    title: str | None = None
-    author: str | None = None
-    note: str | None = None
-
-
-@app.post("/corpus/import-file")
-def import_file(body: FileImport):
-    with db.session() as s:
-        # 守卫拒因（import_root_not_allowed 等）以 HTTP 200 + error 字段
-        # **原样透出**——与既有错误返回风格一致，不改 500。
-        return corpus.import_file(s, body.path, title=body.title,
-                                  author=body.author, note=body.note)
-
-
-class DistillerImport(BaseModel):
-    # 默认值留在签名里（既有调用方依赖）；corpus.import_distiller 把这两个
-    # 逐字路径列为内置精确白名单例外（见 app/corpus.py 的
-    # _DISTILLER_BUILTIN_EXACT 注释），其余路径必须在 LG_IMPORT_ROOTS 允许根内。
-    db_path: str = r"F:\agi\novel-distiller\data\app.sqlite3"
-    root: str = r"F:\agi\novel-distiller"
-
-
-@app.post("/corpus/import-distiller")
-def import_distiller(body: DistillerImport):
-    with db.session() as s:
-        return corpus.import_distiller(s, body.db_path, body.root)
-
-
-@app.get("/works")
-def list_works():
-    with db.session() as s:
-        works = s.query(Work).order_by(Work.created_at).all()
-        out = []
-        for w in works:
-            n = s.query(Segment).filter_by(work_id=w.id).count()
-            out.append({"id": w.id, "title": w.title, "author": w.author,
-                        "source": w.source, "note": w.note,
-                        "segments": n, "created_at": w.created_at})
-        return out
-
-
-# /segments 翻页上界收口（独立审查 2026-09-23 F2 [严重]，lg-fix-server-caps-residual）：
-# 旧签名 limit/offset 无上界，配合 [:80] 预览可对整库正文无界翻页外流（该端点
-# 同时是审计 P1「评审令牌可读取」的读出口）。口径 = 越界一律 422、**不 clamp**
-# （与 ExperimentIn 同一纪律：clamp 让调用者拿到的页与意图不符）。
-#   · limit ∈ [1, 200]：前端实际只用 ?limit=8（index.html:1433），200 封顶单页；
-#   · offset ≥ 0 且 offset+limit ≤ 5000（总量闸）：单令牌可外流的正文总量
-#     封顶在 5000×80 字；再往外翻必须按 work_id 收窄或走受控导出。
-_MAX_SEGMENT_LIMIT = 200
-_MAX_SEGMENT_SCAN = 5000
-
-
-@app.get("/segments")
-def list_segments(work_id: str | None = None,
-                  limit: int = Query(default=20, ge=1, le=_MAX_SEGMENT_LIMIT),
-                  offset: int = Query(default=0, ge=0)):
-    if offset + limit > _MAX_SEGMENT_SCAN:
-        raise HTTPException(
-            422, f"offset+limit 超过总量闸 ≤{_MAX_SEGMENT_SCAN}"
-                 f"（收到 offset={offset}, limit={limit}）；请按 work_id 收窄翻页")
-    with db.session() as s:
-        q = s.query(Segment).order_by(Segment.id)
-        if work_id:
-            q = q.filter(Segment.work_id == work_id)
-        rows = q.offset(offset).limit(limit).all()
-        # [:80] 是响应里段文本预览的**硬上限**（审计 P1：防整库正文经列表端点
-        # 批量外流）。长度/字段语义已定，不要放宽或改名。
-        return [{"id": x.id, "work": x.work_id, "chars": x.n_chars, "sents": x.n_sentences,
-                 "text": x.text[:80] + "…"} for x in rows]
-
-
-@app.get("/corpus/stats")
-def corpus_stats():
-    with db.session() as s:
-        return corpus.segment_stats(s)
+# 语料端点独立为 router；访问档位仍由全局 app.access 中间件裁决。
+app.include_router(corpus_router)
 
 
 # ── 实验 ────────────────────────────────────────────────────

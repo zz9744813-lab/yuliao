@@ -17,7 +17,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import config, db, observability
@@ -125,8 +125,19 @@ def _dashboard(s: Session) -> dict:
 
 def _corpus(s: Session) -> dict:
     total = _count(s, s.query(Segment))
-    src = s.query(Segment.integrity).all()
     src_ok = src_bad = src_unverified = 0
+    if s.bind is not None and s.bind.dialect.name == "sqlite":
+        # 生产库已逾千万段，绝不能把整列 .all() 搬进 Python。所有写入端都
+        # 使用标准 JSON 键；额外包含 \u 转义，兼容历史/外部写入的转义键名。
+        # 先在 SQLite 中筛出候选，再由 Python 保留严格布尔与 truthiness 口径。
+        src = s.execute(text("""
+            SELECT integrity FROM segments
+            WHERE instr(integrity, 'src_ok') > 0
+               OR instr(integrity, '\\u') > 0
+        """))
+    else:
+        # 其他方言没有 SQLite instr；流式兜底至少不会持有全表 JSON。
+        src = s.query(Segment.integrity).yield_per(1000)
     for (raw,) in src:
         try:
             d = json.loads(raw or "{}")

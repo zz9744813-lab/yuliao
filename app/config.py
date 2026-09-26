@@ -2,7 +2,7 @@
 
 优先级：真实环境变量 > 项目根 .env > 本文件默认值。
 
-- LG_DATABASE_URL    默认 SQLite 文件；切 Postgres 时给 postgresql+psycopg://...
+- LG_DATABASE_URL    当前仅支持 SQLite；PostgreSQL 迁移和离线脚本适配未完成
 - LG_LLM_MODE        real | mock（mock 不调用网络，供 dry-run / 测试）
 - LG_GATEWAY_BASE_URL / LG_GATEWAY_API_KEY   OpenAI 兼容网关中转
 """

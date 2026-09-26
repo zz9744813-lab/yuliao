@@ -804,8 +804,8 @@ async function initReview(){
     const exps = await api('/experiments');
     const others = exps.filter(e => e.id !== curExp && e.review_pending > 0);
     $('#rv-exp').innerHTML =
-      `<option value="${curExp}">${curExp}（本批 ${info.pending} 待评）</option>` +
-      others.map(e=>`<option value="${e.id}">${e.id} · ${e.review_pending} 待评</option>`).join('');
+      `<option value="${escHtml(curExp)}">${escHtml(curExp)}（本批 ${escHtml(info.pending)} 待评）</option>` +
+      others.map(e=>`<option value="${escHtml(e.id)}">${escHtml(e.id)} · ${escHtml(e.review_pending)} 待评</option>`).join('');
     renderProgress();
     applyCtxState();
     loadNext();
@@ -1167,7 +1167,7 @@ function renderMarks(){
     listEl.innerHTML = marks[side].map(m =>
       `<div class="mi"><b>${escHtml(m.kind)}</b>
          <span class="tx">「${escHtml(m.text.slice(0,24))}${m.text.length>24?'…':''}」</span>
-         <span class="del" data-del="${m.id}">删除</span></div>`).join('');
+         <span class="del" data-del="${escHtml(m.id)}">删除</span></div>`).join('');
   }
   const n = marks.A.length + marks.B.length;
   $('#rv-mark-hint').textContent = n
@@ -1330,9 +1330,9 @@ async function loadReviewQueue(){
     $('#rv-table').innerHTML =
       `<thead><tr><th>priority</th><th>入队原因</th><th>review_id</th></tr></thead><tbody>` +
       list.map(r =>
-        `<tr><td>${r.priority}</td>
-         <td>${(r.reasons||[]).filter(x=>!x.startsWith('batch_')).map(esc).join('；')}</td>
-         <td class="kv">${r.id}</td></tr>`).join('') +
+        `<tr><td>${escHtml(r.priority)}</td>
+         <td>${(r.reasons||[]).filter(x=>!x.startsWith('batch_')).map(escHtml).join('；')}</td>
+         <td class="kv">${escHtml(r.id)}</td></tr>`).join('') +
       `</tbody>`;
   }catch(e){ toast(e.message); }
 }
@@ -1351,11 +1351,14 @@ async function loadDoneList(){
       `<thead><tr><th>判定</th><th>批注</th><th>时间</th><th>review_id</th><th></th></tr></thead><tbody>` +
       d.items.map(it =>
         `<tr><td>${verdictChip(it.winner)}${it.rejudged?' <span class="chip">改</span>':''}</td>
-         <td>${it.n_annotations||0}</td>
-         <td class="muted">${(it.reviewed_at||'').slice(5,16).replace('T',' ')}</td>
-         <td class="kv">${it.id}</td>
-         <td><button class="act" onclick="rejudgeFromDone('${it.id}')">改判</button></td></tr>`).join('') +
+         <td>${escHtml(it.n_annotations||0)}</td>
+         <td class="muted">${escHtml((it.reviewed_at||'').slice(5,16).replace('T',' '))}</td>
+         <td class="kv">${escHtml(it.id)}</td>
+         <td><button class="act" data-rejudge-id="${escHtml(it.id)}">改判</button></td></tr>`).join('') +
       `</tbody>`;
+    $('#rv-table').querySelectorAll('button[data-rejudge-id]').forEach(btn => {
+      btn.addEventListener('click', () => rejudgeFromDone(btn.dataset.rejudgeId));
+    });
   }catch(e){
     $('#rv-table').innerHTML = `<thead><tr><th>该批次还没有已判题</th></tr></thead>`;
   }
@@ -1470,17 +1473,17 @@ async function loadReport(id){
 // ── 语料 ────────────────────────────────────────────────
 async function loadCorpus(){
   const st = await api('/corpus/stats');
-  $('#corpus-stats').innerHTML = Object.entries(st).map(([k,v])=>`${k}: ${v}`).join(' · ');
+  $('#corpus-stats').textContent = Object.entries(st).map(([k,v])=>`${k}: ${v}`).join(' · ');
   const works = await api('/works');
   $('#work-table tbody').innerHTML = works.map(w =>
-    `<tr><td class="kv">${w.id}</td><td>${esc(w.title)}</td><td>${esc(w.author||'')}</td>
-     <td>${w.segments}</td><td class="kv" style="font-size:11px">${esc(w.source)}</td>
-     <td class="muted">${esc(w.note||'')}</td></tr>`).join('');
+    `<tr><td class="kv">${escHtml(w.id)}</td><td>${escHtml(w.title)}</td><td>${escHtml(w.author||'')}</td>
+     <td>${escHtml(w.segments)}</td><td class="kv" style="font-size:11px">${escHtml(w.source)}</td>
+     <td class="muted">${escHtml(w.note||'')}</td></tr>`).join('');
   $('#f-work').innerHTML = '<option value="">全部语料</option>' +
-    works.map(w=>`<option value="${w.id}">${esc(w.title)}（${w.segments}段）</option>`).join('');
+    works.map(w=>`<option value="${escHtml(w.id)}">${escHtml(w.title)}（${escHtml(w.segments)}段）</option>`).join('');
   const segs = await api('/segments?limit=8');
   $('#seg-list').innerHTML = segs.map(s =>
-    `<div style="margin-bottom:8px">[${s.id}] ${esc(s.text)}</div>`).join('');
+    `<div style="margin-bottom:8px">[${escHtml(s.id)}] ${escHtml(s.text)}</div>`).join('');
 }
 async function importInbox(){ const r = await api('/corpus/import-inbox',{body:{}});
   toast(JSON.stringify(r)); loadCorpus(); }
@@ -1494,7 +1497,7 @@ async function loadUsage(){
   $('#mode-tag').textContent = '运行档位 · ' + (st.mode === 'real' ? '真实' : st.mode === 'mock' ? '演示' : st.mode);
   $('#usage-table tbody').innerHTML = Object.entries(st.by_purpose)
     .sort((a,b)=>b[1].tokens-a[1].tokens)
-    .map(([k,v])=>`<tr><td>${k}</td><td>${v.calls}</td><td>${v.tokens}</td><td>${v.failed}</td></tr>`)
+    .map(([k,v])=>`<tr><td>${escHtml(k)}</td><td>${escHtml(v.calls)}</td><td>${escHtml(v.tokens)}</td><td>${escHtml(v.failed)}</td></tr>`)
     .join('');
 }
 

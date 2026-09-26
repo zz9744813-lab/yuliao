@@ -15,6 +15,7 @@ import os
 import sqlite3
 from pathlib import Path
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from . import config
@@ -304,13 +305,17 @@ def import_distiller(session: Session, distiller_db: str, distiller_root: str) -
 
 
 def segment_stats(session: Session) -> dict:
-    segs = session.query(Segment).all()
-    n_chars = [s.n_chars for s in segs]
-    n_sents = [s.n_sentences for s in segs]
+    # /corpus/stats 是页面首屏请求。千万段真库不能把完整 ORM 行全部
+    # 实例化到进程；让数据库只返回一个聚合行。
+    n_segments, chars_total, sentences_total = session.query(
+        func.count(Segment.id),
+        func.coalesce(func.sum(Segment.n_chars), 0),
+        func.coalesce(func.sum(Segment.n_sentences), 0),
+    ).one()
     return {
-        "n_segments": len(segs),
+        "n_segments": n_segments,
         "n_works": session.query(Work).count(),
-        "chars_total": sum(n_chars),
-        "chars_mean": round(sum(n_chars) / max(len(n_chars), 1), 1),
-        "sentences_mean": round(sum(n_sents) / max(len(n_sents), 1), 2),
+        "chars_total": int(chars_total),
+        "chars_mean": round(chars_total / max(n_segments, 1), 1),
+        "sentences_mean": round(sentences_total / max(n_segments, 1), 2),
     }

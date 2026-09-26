@@ -1,7 +1,8 @@
-"""SQLAlchemy 引擎与会话。SQLite（默认）/ PostgreSQL（LG_DATABASE_URL）双兼容。"""
+"""SQLAlchemy 引擎与会话。当前数据迁移及部分脚本仅支持 SQLite。"""
 from __future__ import annotations
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from . import config
@@ -13,6 +14,12 @@ class Base(DeclarativeBase):
 
 def _make_engine():
     url = config.DATABASE_URL
+    # ORM 表面上可连 PostgreSQL，但 _migrate 及多个离线脚本仍只支持
+    # SQLite。现在拒绝切换，避免 API 连新库、脚本却静默读写旧库。
+    if make_url(url).get_backend_name() != "sqlite":
+        raise RuntimeError(
+            "LG_DATABASE_URL 当前仅支持 SQLite；PostgreSQL 迁移和脚本适配尚未完成"
+        )
     kwargs = {"future": True}
     if url.startswith("sqlite"):
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}

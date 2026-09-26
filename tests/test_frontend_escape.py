@@ -69,6 +69,12 @@ def _showexp_src() -> str:
     return src[start:src.index("function mdLite(", start)]
 
 
+def _html_esc_src() -> str:
+    src = HTML.read_text(encoding="utf-8")
+    start = src.index("function escHtml(")
+    return src[start:src.index("\nfunction buildMarkedHtml", start)]
+
+
 def _diff_esc_html_src() -> str:
     """从 diff.js 抽出 escHtml 函数源码（到函数收口的缩进 `  }` 为止）。"""
     src = DIFF_JS.read_text(encoding="utf-8")
@@ -262,3 +268,49 @@ def test_mark_open_tag_escapes_both_attrs():
     compose = dsrc[dsrc.index("function composeHtml"):dsrc.index("global.DiffLite")]
     assert "+ escHtml(mk.m.id) +" in compose, "composeHtml 的 data-mid 未走 escHtml"
     assert "escHtml(mk.m.kind)" in compose, "composeHtml 的 title 未走 escHtml"
+
+
+def test_done_list_id_cannot_inject_an_inline_handler():
+    src = HTML.read_text(encoding="utf-8")
+    block = src[src.index("function verdictChip("):src.index("// ── 实验", src.index("function verdictChip("))]
+    assert 'onclick="rejudgeFromDone(' not in block
+    payload = '\\"><img src=x onerror=alert(1)>'
+    result = _run_js(f"""
+      {_html_esc_src()}
+      const esc = escHtml;
+      const BATCH = 'sample';
+      const nodes = Object.create(null);
+      const $ = key => nodes[key] || (nodes[key] = {{innerHTML:'', textContent:'',
+        querySelectorAll: () => []}});
+      const api = async () => ({{done:1, items:[{{id:{json.dumps(payload)},
+        winner:'human', reviewed_at:'2026-09-26T10:00', n_annotations:0}}]}});
+      const rejudgeFromDone = () => {{}};
+      {block}
+      loadDoneList().then(() => console.log(JSON.stringify({{html:nodes['#rv-table'].innerHTML}})));
+    """)
+    assert "<img" not in result["html"]
+    assert "onclick=" not in result["html"]
+    assert "&quot;&gt;&lt;img" in result["html"]
+
+
+def test_corpus_list_escapes_server_fields():
+    src = HTML.read_text(encoding="utf-8")
+    block = src[src.index("async function loadCorpus("):src.index("async function importInbox(")]
+    payload = '\\"><img src=x onerror=alert(1)>'
+    result = _run_js(f"""
+      {_html_esc_src()}
+      const nodes = Object.create(null);
+      const $ = key => nodes[key] || (nodes[key] = {{innerHTML:'', textContent:''}});
+      const api = async path => path === '/works' ? [{{id:{json.dumps(payload)},
+        title:{json.dumps(payload)}, author:'author', source:'source', segments:1}}]
+        : path.startsWith('/segments') ? [{{id:{json.dumps(payload)}, text:{json.dumps(payload)}}}]
+        : {{n_segments:1}};
+      {block}
+      loadCorpus().then(() => console.log(JSON.stringify({{
+        works:nodes['#work-table tbody'].innerHTML,
+        options:nodes['#f-work'].innerHTML,
+        segments:nodes['#seg-list'].innerHTML
+      }})));
+    """)
+    assert all("<img" not in html for html in result.values())
+    assert all("&lt;img" in html for html in result.values())
