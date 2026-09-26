@@ -55,6 +55,14 @@ REVIEW_merge_plan.md）：靠"事后看文本归类"判 S1/S2（delta_new / delt
   pair_id、op 与 S1/S2 两个标签、六道门结果与拒绝理由、落库结果）追加
   写入 JSONL 账本（--pairs-ledger，默认 k2_pairs.jsonl）。不改任何既有
   表结构（真库建表史有 NOT NULL 无默认的坑，故走旁路文件）。
+- 离线门账本（--ledger-only，派工 lg-fix-gate-ledger-offline 2026-09-26）：
+  --dry-run 只出统计不写文件、真账本此前只有 --live 落库才产——门账本没有
+  任何离线产出路径，k5_promotion_wire_probe 的 A4 段恒「不可核」。本模式与
+  --dry-run 同为只读（零库写、零模型调用），逐对按既有 ledger_entry() 形状
+  写 JSONL 门账本：persist_outcome 如实标 "gated_out"（被门拒）/
+  "not_persisted"（过门但本次不落库），**绝不**伪写 "written"——探针的
+  n_written 因此为真值 0。行含 pair_id/gates_ok/persist_outcome 三个
+  GATE_LEDGER_MARKERS（探针 _classify_ledger_rows 认门账本的唯一依据）。
 
 纪律：
 - **纯离线**：AI 侧片段由调用方注入（--pairs-file / run_contrast 入参），
@@ -70,6 +78,8 @@ REVIEW_merge_plan.md）：靠"事后看文本归类"判 S1/S2（delta_new / delt
 
 用法：
     python scripts/k2_contrast_extract.py --dry-run --pairs-file pairs.json
+    python scripts/k2_contrast_extract.py --ledger-only --pairs-file pairs.json \
+        --pairs-ledger k2_pairs.jsonl      # 只读产门账本，零库写
     K2CONTRAST_ALLOW_LIVE=1 python scripts/k2_contrast_extract.py --live \
         --pairs-file pairs.json --extractor-model paired_contrast_v2
 """
@@ -713,6 +723,31 @@ def run_contrast(s, pairs: list[ContrastPair], *, live: bool,
     return rep
 
 
+def run_ledger_only(pairs: list[ContrastPair], *,
+                    ledger_path: str = "k2_pairs.jsonl") -> dict:
+    """离线产门账本（--ledger-only）：零库写、零模型调用，只写 JSONL 账本。
+
+    逐对跑六道门（与 live 同一 _run_gates 口径，不放宽任何判据），按既有
+    ledger_entry() 形状逐行落账本。persist_outcome 如实标注：被门拒
+    ="gated_out"，过门但本次不落库 ="not_persisted"——本模式永不产
+    "written" 行，探针（k5_promotion_wire_probe）读出的 n_written=0 是真值。
+    账本行含 pair_id/gates_ok/persist_outcome，满足探针
+    GATE_LEDGER_MARKERS 的门账本判别。账本追加写（与 live 同口径），
+    重跑同一 pairs 文件会追加同 pair_id 的行——消费方按 pair_id 去重。"""
+    rep = {"mode": "ledger_only", **summarize(pairs),
+           "written": 0, "skipped": {}}
+    entries = []
+    for p in pairs:
+        ok, reasons, detail = _run_gates(p)
+        entries.append(ledger_entry(
+            p, gates_ok=ok, gate_results=detail,
+            reasons=[] if ok else reasons,
+            outcome="not_persisted" if ok else "gated_out"))
+    n = write_pairs_ledger(ledger_path, entries)
+    rep["ledger"] = {"path": str(ledger_path), "entries": n}
+    return rep
+
+
 # --------------------------------------------------------------- CLI
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -721,15 +756,21 @@ def main() -> None:
                     const="dry_run", help="预演（默认）：零库写，只出统计与拒绝样本")
     ap.add_argument("--live", dest="mode", action="store_const", const="live",
                     help="真落库：需环境变量 K2CONTRAST_ALLOW_LIVE=1")
+    ap.add_argument("--ledger-only", dest="mode", action="store_const",
+                    const="ledger_only",
+                    help="离线产门账本：与 --dry-run 同为只读（零库写），"
+                         "逐对写 JSONL 账本（persist_outcome 如实标"
+                         " not_persisted/gated_out，绝不写 written）")
     ap.set_defaults(mode="dry_run")
     ap.add_argument("--pairs-file", default="",
                     help="成对片段 JSON（AI 侧由调用方注入；--live 必填）")
     ap.add_argument("--pairs-ledger", default="k2_pairs.jsonl",
-                    help="旁路账本 JSONL 路径（--live 落库时逐对追加完整配对，"
-                         "默认 k2_pairs.jsonl）")
+                    help="旁路账本 JSONL 路径（--live 落库/--ledger-only 离线"
+                         "产账本时逐对追加完整配对，默认 k2_pairs.jsonl）")
     ap.add_argument("--extractor-model", default=PROTOCOL)
     a = ap.parse_args()
     live = a.mode == "live"
+    ledger_only = a.mode == "ledger_only"
 
     if live and os.environ.get("K2CONTRAST_ALLOW_LIVE") != "1":
         raise SystemExit(
@@ -738,8 +779,16 @@ def main() -> None:
     if live and not a.pairs_file:
         raise SystemExit(
             "--live 需要 --pairs-file（AI 侧片段由调用方注入，本工具不联网生成）")
+    if ledger_only and not a.pairs_file:
+        raise SystemExit(
+            "--ledger-only 需要 --pairs-file（离线产账本须有配对输入，"
+            "空输入不出账本）")
 
     pairs = load_pairs_file(a.pairs_file) if a.pairs_file else []
+    if ledger_only:
+        rep = run_ledger_only(pairs, ledger_path=a.pairs_ledger)
+        print(json.dumps(rep, ensure_ascii=False, indent=1))
+        return
     if not live:
         print(json.dumps({"mode": "dry_run", **summarize(pairs)},
                          ensure_ascii=False, indent=1))
