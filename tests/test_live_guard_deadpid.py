@@ -21,6 +21,17 @@ running()/ _acquire_lock() 对能解析的锁一律硬拦。
 running 的 watch 参数语义。
 全部用例隔离开临时锁位（tmp_path + 覆写 config.DATA_DIR），**绝不触碰
 真实生产锁位** F:/agi/language-genome/data/live_run.lock。
+
+2026-09-26 第二批入册（同一来源 REVIEW_r6_lock_realrace.md 的 OPEN-6 /
+OPEN-7，交付文档 docs/R6守卫覆盖缺口入册第二批_20260926.md）：
+- OPEN-6（运维可处置性）：`test_open6_*` —— 拒绝信息本身必须带可复制的
+  `tasklist` 提示（pid/锁路径/runbook 路径按实参代入），且该改动是**纯文案**：
+  `_ops_dispose_hint` 不查进程表、不碰文件系统，引用的 runbook 固定路径必须
+  真实存在。
+- OPEN-7（POSIX 分支覆盖）：`test_open7_*` —— **平台无关**用例（win32 上真跑、
+  无 skipif），monkeypatch 伪造 `os.kill` 抛 `ProcessLookupError` 走 POSIX 判死
+  分支，断言其判定口径与 win32 的 EINVAL/winerror 87 **同结论**，端到端
+  （refuse 放行 + O_EXCL 接管 + 对照组仍拦）亦逐项一致。
 """
 from __future__ import annotations
 
@@ -269,3 +280,195 @@ def test_release_lock_conservative_after_takeover_not_regression():
         assert held and held["purpose"] == "t-second", \
             "前一实例退出删掉了接管者的锁——互斥被无声破坏"
     assert LG.live_run_active() is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-26 第二批入册：OPEN-6（运维可处置性）/ OPEN-7（POSIX 分支覆盖）
+# ---------------------------------------------------------------------------
+
+
+def test_open6_refusal_text_carries_copyable_tasklist_hint():
+    """OPEN-6 判据 (b)：守卫的**拒绝信息本身**必须带可复制的 `tasklist` 提示
+    （不只给锁路径），且 pid/锁路径/runbook 路径都按本例实参代入。
+
+    为什么这是收口项：硬杀残留有两种「只能人工处置」的形态（均出自
+    `REVIEW_r6_lock_realrace.md` OPEN-6 与 `app/live_guard.py` 模块 docstring）：
+    - 形态一（有限）：死 pid + mtime 尚在 15s 宽限内 → 整套件 fail-fast
+      exit 2 约 15s，宽限一过自动自愈（行为符合设计，非永久）；
+    - 形态二（**永久**）：锁内 pid 被系统复用给无关进程 → `_pid_looks_live`
+      永远按「存在」判 → 永不自动自愈。既有文案只给锁路径，运维不知道要
+      看 pid、也不知道用什么命令确认，只能靠猜。
+    故本用例钉死：拒了就必须给得出可复制的一手核查命令 + 清锁命令。"""
+    p = LG.lock_path()
+
+    # ---- 形态一：死 pid（真实死 pid）+ mtime 在宽限内 → 拒绝，文案带命令 ----
+    dpid = _dead_pid()
+    _write_lock(p, "k2_extract_backfill", dpid, fresh=True)
+    with pytest.raises(SystemExit) as ei1:
+        LG.refuse_if_live_running("open6 pytest", watch=p)
+    msg1 = str(ei1.value)
+    assert "tasklist" in msg1, f"拒绝信息缺可复制的 tasklist 提示：{msg1}"
+    assert f'PID eq {dpid}' in msg1, f"tasklist 未指向锁内真实 pid {dpid}：{msg1}"
+    assert str(p) in msg1, f"拒绝信息缺锁路径：{msg1}"
+    assert LG.OPS_RUNBOOK_DOC in msg1, f"拒绝信息未指向固定 runbook 路径：{msg1}"
+    assert "os.remove" in msg1, f"拒绝信息缺「确认后如何清锁」的可复制命令：{msg1}"
+    assert f"{LG.CORRUPT_LOCK_GRACE_SECONDS:g}s" in msg1, \
+        f"拒绝信息须点明自愈宽限，避免运维误手清仍活着的锁：{msg1}"
+
+    # ---- 形态二：pid 被复用（本进程 pid 冒充无关进程）⇒ 永不自动自愈 ----
+    # mtime 已拨过宽限仍必须拒（这正是「永久砖化」的机械证据），文案点明
+    # 「永不自动自愈」并给出 tasklist 核查命令。
+    _write_lock(p, "k2_extract_backfill", os.getpid(), fresh=False)
+    with pytest.raises(SystemExit) as ei2:
+        LG.refuse_if_live_running("open6 pytest", watch=p)
+    msg2 = str(ei2.value)
+    assert "tasklist" in msg2 and f'PID eq {os.getpid()}' in msg2, msg2
+    assert "永不" in msg2, f"形态二文案须点明该情形不会自动自愈：{msg2}"
+
+    # ---- live 侧（live_lock → _acquire_lock 的拒绝出口）同样必须带提示 ----
+    with pytest.raises(SystemExit) as ei3:
+        with LG.live_lock("t-open6"):
+            pass
+    msg3 = str(ei3.value)
+    assert "tasklist" in msg3 and f'PID eq {os.getpid()}' in msg3, msg3
+    assert LG.OPS_RUNBOOK_DOC in msg3 and str(p) in msg3, msg3
+
+    # ---- 损坏锁分支（无 pid 可核）也必须给可复制命令（否则该形态无出路） ----
+    p.unlink()
+    p.write_text("不是json", encoding="utf-8")
+    with pytest.raises(SystemExit) as ei4:
+        LG.refuse_if_live_running("open6 pytest", watch=p)
+    msg4 = str(ei4.value)
+    assert "tasklist" in msg4, msg4
+    assert 'IMAGENAME eq python.exe' in msg4, \
+        f"无 pid 可核时应给「列候选进程」而非按 pid 过滤的命令：{msg4}"
+    assert "os.remove" in msg4, msg4
+
+    # ---- 纪律不变式：全程只读/拒绝，锁内容逐字节未动（OPEN-6 是**纯文案**改动，
+    # 不得顺手改成「提示里说能删就删」）----
+    assert p.read_text(encoding="utf-8") == "不是json", "拒绝路径不得改/删锁"
+
+
+def test_open6_dispose_hint_is_pure_text_and_runbook_ships():
+    """OPEN-6 判据 (a) 的钉法：`_ops_dispose_hint` 是**纯文案**函数（不查进
+    程表、不碰文件系统、可重复），且被引用的运维 runbook 固定路径真实存在
+    （拒绝信息指向一个不存在的文档＝给了假出路）。"""
+    p = LG.lock_path()
+    live_hint = LG._ops_dispose_hint({"pid": 29828}, p)
+    corrupt_hint = LG._ops_dispose_hint({"corrupt_lock": True}, p)
+
+    # 纯函数：同样入参两次输出一致
+    assert live_hint == LG._ops_dispose_hint({"pid": 29828}, p)
+    # 两条分支都带字面量 tasklist
+    assert "tasklist" in live_hint and "tasklist" in corrupt_hint
+    # 不查进程表：把 os.kill 打成会抛的，任何进程表查询都会冒泡出来
+    def _kill_boom(_pid, _sig):
+        raise AssertionError("_ops_dispose_hint 不得查询进程表")
+    mp = pytest.MonkeyPatch()
+    mp.setattr(LG.os, "kill", _kill_boom)
+    try:
+        assert "tasklist" in LG._ops_dispose_hint({"pid": 29828}, p)
+    finally:
+        mp.undo()
+    # 不碰文件系统：调用前后隔离锁位目录内容一致
+    before = sorted(x.name for x in p.parent.iterdir())
+    assert not p.exists(), "前置：锁位应为空"
+    LG._ops_dispose_hint({"pid": 29828}, p)
+    assert sorted(x.name for x in p.parent.iterdir()) == before
+    # 被引用的 runbook 固定路径必须真实存在（拒绝信息不得指向空气）
+    assert (ROOT / LG.OPS_RUNBOOK_DOC).is_file(), \
+        f"拒绝信息引用的运维 runbook 不存在：{LG.OPS_RUNBOOK_DOC}"
+
+
+def test_open7_posix_processlookuperror_dead_path_parity_with_win32(monkeypatch):
+    """OPEN-7 收口（**平台无关**用例，win32 上真跑、无 skipif）：POSIX 的
+    `ProcessLookupError` 判死分支与 win32 的 `EINVAL/winerror 87` 判死分支必须
+    给出**同一口径**的判定；「查不出/查不动」的表现也必须一律按「存在」拦。
+
+    为什么不 skipif(sys.platform=="win32")：那等于把分支继续留空、把断言挪到
+    没人跑的机器上——判据明确禁止。本用例不依赖本机进程表的真实状态：只
+    monkeypatch `LG.os.kill` 让它按指定方式抛/不抛，断言的全是**平台无关的判
+    定口径**（同一组进程表表现 ⇒ 同一结论），故在 win32 与 POSIX 上跑出同一
+    结论且互为对照。
+
+    承重点（反向验证的变异点）：`app/live_guard.py::_pid_looks_live` 的
+    `except ProcessLookupError: return False`。把该分支改成「恒返回活着」，
+    本用例必转红（下面 `_kill_ple` 一组断言 `is False`）。注意
+    ProcessLookupError 是 OSError 的子类且 errno=ESRCH(3)≠EINVAL(22)——所以
+    「删掉 POSIX 专属子句、让它落进 `except OSError`」这种改法同样转红，
+    两条改法都被本用例钉住。"""
+    pid = 424242                                  # 任意值：本例只伪造进程表表现
+    p = LG.lock_path()
+    _write_lock(p, "k2_extract_backfill", pid, fresh=False)
+    info = json.loads(p.read_text(encoding="utf-8"))
+    assert info["pid"] == pid
+
+    class _WinError87(OSError):                  # win32 侧第二种死 pid 表现
+        winerror = 87
+
+    def _kill_ple(_pid, _sig):                   # POSIX：ESRCH
+        raise ProcessLookupError(errno.ESRCH, "No such process")
+
+    def _kill_einval(_pid, _sig):                # win32：OSError(EINVAL)
+        raise OSError(errno.EINVAL, "Invalid argument")
+
+    def _kill_winerror87(_pid, _sig):            # win32：winerror=87
+        raise _WinError87("Invalid parameter")
+
+    def _kill_live(_pid, _sig):                  # pid 活着：os.kill 无异常返回
+        return None
+
+    def _kill_eacces(_pid, _sig):                # 存在但受保护 → 不可知
+        raise OSError(errno.EACCES, "Access is denied")
+
+    def _kill_overflow(_pid, _sig):              # pid 超长不可转译 → 不可知
+        raise OverflowError("Python int too large to convert to C long")
+
+    # (1) 三种「确定不存在」的表现 ⇒ 同一结论：判死 + 判为可自愈残留
+    for maker in (_kill_ple, _kill_einval, _kill_winerror87):
+        monkeypatch.setattr(LG.os, "kill", maker)
+        assert LG._pid_looks_live(pid) is False, \
+            f"{maker.__name__} 是「确定不存在」，必须判死（POSIX 口径）"
+        assert LG._dead_pid_and_stale(p, info) is True, maker.__name__
+
+    # (2) 四种「存在/不可知」的表现 ⇒ 同一结论：按「有人持有」拦、不自愈
+    for maker in (_kill_live, _kill_eacces, _kill_overflow):
+        monkeypatch.setattr(LG.os, "kill", maker)
+        assert LG._pid_looks_live(pid) is True, maker.__name__
+        assert LG._dead_pid_and_stale(p, info) is False, \
+            f"{maker.__name__} 不得被判成可自愈残留（宁可拦，不可猜）"
+
+
+def test_open7_posix_dead_pid_lock_end_to_end_same_as_win32(monkeypatch):
+    """OPEN-7 端到端：POSIX 判死口径下，死 pid 残留锁在**整条守卫链路**上的
+    行为与 win32 口径逐项一致——`refuse_if_live_running` 放行（不 brick 套
+    件）并记 warning、`live_lock`/`whole_run_lock` 以 O_EXCL 接管重建；对照
+    组（os.kill 无异常＝pid 还活着）必须仍被拦且锁不被删。"""
+    pid = 515151
+    p = LG.lock_path()
+
+    def _kill_ple(_pid, _sig):
+        raise ProcessLookupError(errno.ESRCH, "No such process")
+
+    _write_lock(p, LG.PYTEST_LOCK_PURPOSE, pid, fresh=False)
+    monkeypatch.setattr(LG.os, "kill", _kill_ple)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        LG.refuse_if_live_running("open7 posix 复现", watch=p)   # 不得 SystemExit
+    assert any("死 pid" in str(w.message) for w in caught), \
+        f"POSIX 判死必须同样记自愈 warning：{caught}"
+    with LG.whole_run_lock("pytest", watch=p):
+        assert json.loads(p.read_text(encoding="utf-8"))["pid"] == os.getpid(), \
+            "POSIX 口径下也必须能 O_EXCL 接管重建（写入我方 pid）"
+    assert LG.live_run_active() is None, "接管-释放后锁位无残留"
+
+    # 对照：os.kill 无异常（＝pid 还活着）⇒ 同一把锁必须被拦、锁原封不动
+    _write_lock(p, "k2_extract_backfill", pid, fresh=False)
+    monkeypatch.setattr(LG.os, "kill", lambda *_a: None)
+    with pytest.raises(SystemExit, match="互斥守卫"):
+        LG.refuse_if_live_running("open7 对照", watch=p)
+    with pytest.raises(SystemExit, match="互斥守卫"):
+        with LG.live_lock("t-open7-live"):
+            pass
+    assert json.loads(p.read_text(encoding="utf-8"))["pid"] == pid, \
+        "pid 判活时不得接管/删锁"
