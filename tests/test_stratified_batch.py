@@ -125,8 +125,9 @@ def test_pool_invariants_documented():
     assert MSB.FEATURES and len(MSB.FEATURES) == 6
 
 
-def test_features_match_pref_drivers_top6():
-    """分层用的特征必须与 pref_drivers 的 top-6 一致，否则打分口径会漂。"""
-    import pref_drivers as PD
+def test_features_exist_in_det_residual_schema():
+    """分层特征必须由生产 det 计算器生成，不依赖本机历史数据库。"""
+    from app.metrics_det import det_residual
+    names = det_residual("雨停了。她推开门。", "雨停了！她缓缓推开门。")['delta']
     for k in MSB.FEATURES:
-        assert k in PD.load()[0], f"特征 {k} 不在 det 指标集里"
+        assert k in names, f"特征 {k} 不在 det 指标集里"

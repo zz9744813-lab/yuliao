@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 import warnings
@@ -34,6 +35,31 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import live_guard as LG                       # noqa: E402
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process probe regression")
+def test_windows_pid_probe_does_not_terminate_holder():
+    """探活不得杀掉锁持有者；旧版 os.kill(pid, 0) 在 Windows 会终止进程。"""
+    code = ("import os; from app.live_guard import _pid_looks_live; "
+            "assert _pid_looks_live(os.getpid()); print('alive', flush=True)")
+    self_probe = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT, capture_output=True,
+        text=True, encoding="utf-8", timeout=10,
+    )
+    assert self_probe.returncode == 0, self_probe.stderr
+    assert self_probe.stdout.strip() == "alive"
+
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
+    try:
+        assert LG._pid_looks_live(holder.pid)
+        assert holder.poll() is None, "探活把正在运行的锁持有者结束了"
+        holder.terminate()
+        holder.wait(timeout=5)
+        assert not LG._pid_looks_live(holder.pid)
+    finally:
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait(timeout=5)
 
 # OPEN-5（2026-09-26 入册）：模块导入期采集外部 LG_LOCK_DIR 覆盖（autouse
 # 夹具会逐用例 delenv 再恢复，会话级取值只能在这里采）。本文件的既有断言

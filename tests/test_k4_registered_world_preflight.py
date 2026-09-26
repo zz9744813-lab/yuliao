@@ -202,10 +202,11 @@ def test_default_build_plan_book_id_unchanged():
 
 # ── ⑤ --live 预检闸（真实模式生效）：未登记/空包 → 拒绝起跑、零真实调用 ──────
 
-def test_live_gate_refuses_unregistered_real_mode(monkeypatch):
+def test_live_gate_refuses_unregistered_real_mode(monkeypatch, tmp_path):
     """--live 叠加同一道闸：LLM_MODE=real 时，世界未登记（空包同理）即拒绝起跑，
     非零退出、零真实调用（GatewayClient 不得构造）。mock 模式不触发本闸（由
     test_k4_paired.test_live_double_gate 覆盖 GatewayClient 拒构）。"""
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
     db.init_db()
     with db.session() as s:
         _clear_strategies(s)

@@ -28,10 +28,10 @@ OPEN-7，交付文档 docs/R6守卫覆盖缺口入册第二批_20260926.md）：
   `tasklist` 提示（pid/锁路径/runbook 路径按实参代入），且该改动是**纯文案**：
   `_ops_dispose_hint` 不查进程表、不碰文件系统，引用的 runbook 固定路径必须
   真实存在。
-- OPEN-7（POSIX 分支覆盖）：`test_open7_*` —— **平台无关**用例（win32 上真跑、
-  无 skipif），monkeypatch 伪造 `os.kill` 抛 `ProcessLookupError` 走 POSIX 判死
-  分支，断言其判定口径与 win32 的 EINVAL/winerror 87 **同结论**，端到端
-  （refuse 放行 + O_EXCL 接管 + 对照组仍拦）亦逐项一致。
+- OPEN-7（POSIX 分支覆盖）：`test_open7_*` 在 win32 上直接测试
+  `_posix_pid_looks_live` 的 `ProcessLookupError` 判死与保守判活，端到端
+  覆盖 refuse 放行、O_EXCL 接管和对照组仍拦；Windows 探活由独立的
+  子进程存活回归验证，绝不再用 `os.kill(pid, 0)` 查 Windows pid。
 """
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def _isolated_lock_dir(tmp_path, monkeypatch):
 def _dead_pid() -> int:
     """拿到一个**确定不存在**的 pid：helper 子进程产一个短命孙进程后自身
     退出（所有句柄随之关闭、进程对象销毁），孙进程 pid 从进程表释放；
-    再经 os.kill(pid, 0) 实证其确实不在才返回（防 pid 被即时复用）。"""
+    再经只读探活确认其确实不在才返回（防 pid 被即时复用）。"""
     helper = (
         "import subprocess, sys\n"
         "p = subprocess.Popen([sys.executable, '-c', ''], "
@@ -84,15 +84,8 @@ def _dead_pid() -> int:
             pid = int(out.stdout.strip())
         except ValueError:
             continue
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not LG._pid_looks_live(pid):
             return pid
-        except OSError as e:                      # Windows 死 pid：EINVAL/87
-            if e.errno == errno.EINVAL or getattr(e, "winerror", None) == 87:
-                return pid
-        except Exception:                         # noqa: BLE001
-            pass
         time.sleep(0.05)
     pytest.fail("无法获得确定不存在的 pid（pid 被反复即时复用）")
 
@@ -192,15 +185,16 @@ def test_pid_query_failure_blocks_and_never_deletes():
         assert p.exists(), "查询失败时 live_lock 不许接管/删锁"
     finally:
         monkeypatch.undo()
-    # 场景 2：底层 os.kill(pid,0) 抛异常（权限/平台不支持）
+    # 场景 2：POSIX 零信号查询抛异常（权限/平台不支持）
     def _kill_boom(pid, sig):
         raise PermissionError(13, "Access is denied")
     monkeypatch2 = pytest.MonkeyPatch()
     monkeypatch2.setattr(LG.os, "kill", _kill_boom)
+    monkeypatch2.setattr(LG, "_pid_looks_live", LG._posix_pid_looks_live)
     try:
         with pytest.raises(SystemExit, match="互斥守卫"):
             LG.refuse_if_live_running("pytest", watch=p)
-        assert p.exists(), "os.kill 抛异常（按存在拦）时不许删锁"
+        assert p.exists(), "POSIX 探活异常（按存在拦）时不许删锁"
     finally:
         monkeypatch2.undo()
     before = p.read_text(encoding="utf-8")
@@ -380,40 +374,19 @@ def test_open6_dispose_hint_is_pure_text_and_runbook_ships():
         f"拒绝信息引用的运维 runbook 不存在：{LG.OPS_RUNBOOK_DOC}"
 
 
-def test_open7_posix_processlookuperror_dead_path_parity_with_win32(monkeypatch):
-    """OPEN-7 收口（**平台无关**用例，win32 上真跑、无 skipif）：POSIX 的
-    `ProcessLookupError` 判死分支与 win32 的 `EINVAL/winerror 87` 判死分支必须
-    给出**同一口径**的判定；「查不出/查不动」的表现也必须一律按「存在」拦。
-
-    为什么不 skipif(sys.platform=="win32")：那等于把分支继续留空、把断言挪到
-    没人跑的机器上——判据明确禁止。本用例不依赖本机进程表的真实状态：只
-    monkeypatch `LG.os.kill` 让它按指定方式抛/不抛，断言的全是**平台无关的判
-    定口径**（同一组进程表表现 ⇒ 同一结论），故在 win32 与 POSIX 上跑出同一
-    结论且互为对照。
-
-    承重点（反向验证的变异点）：`app/live_guard.py::_pid_looks_live` 的
-    `except ProcessLookupError: return False`。把该分支改成「恒返回活着」，
-    本用例必转红（下面 `_kill_ple` 一组断言 `is False`）。注意
-    ProcessLookupError 是 OSError 的子类且 errno=ESRCH(3)≠EINVAL(22)——所以
-    「删掉 POSIX 专属子句、让它落进 `except OSError`」这种改法同样转红，
-    两条改法都被本用例钉住。"""
+def test_open7_posix_processlookuperror_dead_path(monkeypatch):
+    """在 Windows 也验证 POSIX 分支：ESRCH 判死，其它异常保守判活。"""
     pid = 424242                                  # 任意值：本例只伪造进程表表现
     p = LG.lock_path()
     _write_lock(p, "k2_extract_backfill", pid, fresh=False)
     info = json.loads(p.read_text(encoding="utf-8"))
     assert info["pid"] == pid
 
-    class _WinError87(OSError):                  # win32 侧第二种死 pid 表现
-        winerror = 87
-
     def _kill_ple(_pid, _sig):                   # POSIX：ESRCH
         raise ProcessLookupError(errno.ESRCH, "No such process")
 
-    def _kill_einval(_pid, _sig):                # win32：OSError(EINVAL)
+    def _kill_einval(_pid, _sig):                # POSIX 其它错误：不可知
         raise OSError(errno.EINVAL, "Invalid argument")
-
-    def _kill_winerror87(_pid, _sig):            # win32：winerror=87
-        raise _WinError87("Invalid parameter")
 
     def _kill_live(_pid, _sig):                  # pid 活着：os.kill 无异常返回
         return None
@@ -424,22 +397,23 @@ def test_open7_posix_processlookuperror_dead_path_parity_with_win32(monkeypatch)
     def _kill_overflow(_pid, _sig):              # pid 超长不可转译 → 不可知
         raise OverflowError("Python int too large to convert to C long")
 
-    # (1) 三种「确定不存在」的表现 ⇒ 同一结论：判死 + 判为可自愈残留
-    for maker in (_kill_ple, _kill_einval, _kill_winerror87):
+    monkeypatch.setattr(LG, "_pid_looks_live", LG._posix_pid_looks_live)
+    # POSIX 的 ESRCH ⇒ 判死 + 判为可自愈残留
+    for maker in (_kill_ple,):
         monkeypatch.setattr(LG.os, "kill", maker)
         assert LG._pid_looks_live(pid) is False, \
             f"{maker.__name__} 是「确定不存在」，必须判死（POSIX 口径）"
         assert LG._dead_pid_and_stale(p, info) is True, maker.__name__
 
-    # (2) 四种「存在/不可知」的表现 ⇒ 同一结论：按「有人持有」拦、不自愈
-    for maker in (_kill_live, _kill_eacces, _kill_overflow):
+    # 其它「存在/不可知」的表现 ⇒ 按「有人持有」拦、不自愈
+    for maker in (_kill_live, _kill_eacces, _kill_einval, _kill_overflow):
         monkeypatch.setattr(LG.os, "kill", maker)
         assert LG._pid_looks_live(pid) is True, maker.__name__
         assert LG._dead_pid_and_stale(p, info) is False, \
             f"{maker.__name__} 不得被判成可自愈残留（宁可拦，不可猜）"
 
 
-def test_open7_posix_dead_pid_lock_end_to_end_same_as_win32(monkeypatch):
+def test_open7_posix_dead_pid_lock_end_to_end(monkeypatch):
     """OPEN-7 端到端：POSIX 判死口径下，死 pid 残留锁在**整条守卫链路**上的
     行为与 win32 口径逐项一致——`refuse_if_live_running` 放行（不 brick 套
     件）并记 warning、`live_lock`/`whole_run_lock` 以 O_EXCL 接管重建；对照
@@ -452,6 +426,7 @@ def test_open7_posix_dead_pid_lock_end_to_end_same_as_win32(monkeypatch):
 
     _write_lock(p, LG.PYTEST_LOCK_PURPOSE, pid, fresh=False)
     monkeypatch.setattr(LG.os, "kill", _kill_ple)
+    monkeypatch.setattr(LG, "_pid_looks_live", LG._posix_pid_looks_live)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         LG.refuse_if_live_running("open7 posix 复现", watch=p)   # 不得 SystemExit

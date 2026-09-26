@@ -64,8 +64,8 @@ DATABASE_URL = os.environ.get(
 GATEWAY_BASE_URL = os.environ.get("LG_GATEWAY_BASE_URL", "").rstrip("/")
 GATEWAY_API_KEY = os.environ.get("LG_GATEWAY_API_KEY", "")
 
-# 重建候选默认模型池（网关实测可用）
-# 2026-09-14：移除 glm-5.3（该模型已不可用，留在池里会产出 failed 调用）
+# 重建候选默认模型池；模型可用性须在实际路由上预检，不能由历史注释推断。
+# 2026-09-14 曾移除 glm-5.3；当前默认池再次包含它，需以运行时预检为准。
 # 2026-09-14：加入 agnes-3.0-flash（用户指定；网关 /models 确认存在，是 agnes 系最新 flash）
 # 2026-09-20（P0）：中转池内在册的是**无前缀** `deepseek-v4.1-flash`；带 `deepseek/`
 # 前缀的旧 id 已下线（503 model_not_found，09-19 20:00 起全线死）。全仓默认模型

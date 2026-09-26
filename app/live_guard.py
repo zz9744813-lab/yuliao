@@ -85,7 +85,6 @@
 from __future__ import annotations
 
 import datetime
-import errno
 import json
 import os
 import sys
@@ -153,25 +152,53 @@ def _warn_corrupt_stale(p: Path, held: dict) -> None:
 def _pid_looks_live(pid: int) -> bool:
     """pid 在本机进程表中是否（可能）存活。
 
-    用标准库 os.kill(pid, 0) 做存在性核验（零信号不发信号，纯查进程表；
-    POSIX 与 Windows 均支持，**不新增 psutil 依赖**）。只把**确定不存在**
-    的 pid 判为死亡，其余一律按「存在」拦：
-    - ProcessLookupError / Python 0 号信号查无进程 → 确定不存在（POSIX）；
-    - Windows（OpenProcess 查 pid）：不存在的 pid → OSError errno=EINVAL
-      (22) / winerror=87（ERROR_INVALID_PARAMETER）——实测本机死 pid 与
-      越界 pid 均此表现，故按「确定不存在」处理；存在但受保护的系统 pid
-      → ACCESS_DENIED(5)/EACCES → 按「存在」；
-    - 查询失败/权限不足/平台不支持/pid 超长不可转译（OverflowError）/
-      其它意外 → 一律 True（按存在拦，宁可拦，不可猜）。
+    Windows 的 os.kill(pid, 0) 会调用 TerminateProcess，不能用于探活。
+    用 Win32 OpenProcess + WaitForSingleObject(0) 只读查看进程状态；
+    POSIX 才用零信号。仅在确定进程不存在或已退出时返回 False，
+    权限不足和其它异常一律按存活处理（宁可拦，不误接管锁）。
     """
+    return (_windows_pid_looks_live(pid) if os.name == "nt"
+            else _posix_pid_looks_live(pid))
+
+
+def _windows_pid_looks_live(pid: int) -> bool:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        open_process.restype = wintypes.HANDLE
+        wait_for_single_object = kernel32.WaitForSingleObject
+        wait_for_single_object.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        wait_for_single_object.restype = wintypes.DWORD
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        # SYNCHRONIZE 只允许等待进程句柄，不授予终止进程的权限。
+        handle = open_process(0x00100000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() != 87  # ERROR_INVALID_PARAMETER
+        try:
+            state = wait_for_single_object(handle, 0)
+            if state == 0:      # WAIT_OBJECT_0：进程已退出
+                return False
+            return True         # WAIT_TIMEOUT 或查询失败：保守视作存活
+        finally:
+            close_handle(handle)
+    except Exception:          # noqa: BLE001 —— 权限/平台异常时绝不接管锁
+        return True
+
+
+def _posix_pid_looks_live(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    except OSError as e:
-        if e.errno == errno.EINVAL or getattr(e, "winerror", None) == 87:
-            return False                       # Windows 死 pid（表外/已回收）
-        return True                            # ACCESS_DENIED 等 → 存在/不可知
+    except OSError:
+        return True                            # 权限不足等 → 存在/不可知
     except Exception:                          # noqa: BLE001 —— OverflowError 等
         return True
     return True

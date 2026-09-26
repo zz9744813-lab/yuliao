@@ -204,6 +204,7 @@ def test_live_double_gate(tmp_path, monkeypatch):
     `config.LLM_MODE`——调用期模块属性访问，setattr 即确定生效；
     守卫在构造函数内先于任何网络构造 raise，「RuntimeFault 抛出」
     本身就是「未发起真实调用」的直接断言。"""
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
     monkeypatch.delenv("K4_ALLOW_LIVE", raising=False)
     monkeypatch.setattr(sys, "argv", ["k4", "--live",
                                      "--writer-model", "a",
@@ -508,7 +509,7 @@ def test_gateway_host_strips_userinfo_in_receipts(tmp_path, monkeypatch):
             f"userinfo 泄进收据：{r['gateway_host']}"
 
 
-def test_main_live_refused_when_lock_held(monkeypatch):
+def test_main_live_refused_when_lock_held(monkeypatch, tmp_path):
     """R6 接线回归 + 顺序钉：锁被持有时 --live 必须**守卫先抛**
     SystemExit(互斥守卫)，GatewayClient 构造与 run_paired 零触达。
     与环境无关（2026-09-23 实测教训：干净 worktree 无 .env 时旧顺序
@@ -517,6 +518,7 @@ def test_main_live_refused_when_lock_held(monkeypatch):
     即红，等于钉死「即使网关未配置/构造必炸，锁在也必须守卫先拒」，
     不再依赖本机是否配了网关）。"""
     from app import live_guard as LG
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
     import app.scene_runtime.client as client_mod
     monkeypatch.setenv("K4_ALLOW_LIVE", "1")
     from app import config as _cfg

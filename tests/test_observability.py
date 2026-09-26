@@ -249,7 +249,7 @@ def _cli(*extra: str) -> subprocess.CompletedProcess:
 
 
 def test_cli_json_and_md_smoke():
-    r = _cli("--hours", "168", "--exp", EXP_A, "--json")
+    r = _cli("--hours", "168", "--now", NOW, "--exp", EXP_A, "--json")
     assert r.returncode == 0, r.stderr
     body = json.loads(r.stdout)
     assert body["exp"] == EXP_A and body["hours"] == 168
@@ -259,7 +259,7 @@ def test_cli_json_and_md_smoke():
     assert body["n_full_table"] == 7
     assert 1 <= body["n_calls"] < body["n_full_table"]
     # --md：markdown 表里有真实行
-    r = _cli("--hours", "168", "--exp", EXP_A, "--md")
+    r = _cli("--hours", "168", "--now", NOW, "--exp", EXP_A, "--md")
     assert r.returncode == 0, r.stderr
     assert "| 模型 |" in r.stdout and "mA" in r.stdout
     assert "n=" in r.stdout

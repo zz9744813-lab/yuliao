@@ -65,7 +65,8 @@ def _run_node(body: str, **subs: str) -> dict:
         script = script.replace("%" + key + "%", json.dumps(val))
     import subprocess
 
-    proc = subprocess.run([_node(), "-e", script], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([_node(), "-e", script], capture_output=True,
+                          text=True, encoding="utf-8", timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f"node 失败:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])

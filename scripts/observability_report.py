@@ -29,6 +29,8 @@ def main() -> None:
                     help="输出 markdown 表（配 --out 写文件，否则 stdout）")
     ap.add_argument("--out", default=None, help="markdown 写入的文件路径")
     ap.add_argument("--top", type=int, default=10, help="失败原因 Top-N（默认 10）")
+    ap.add_argument("--now", default=None,
+                    help="统计截止时间（ISO 8601 UTC；默认当前时间）")
     args = ap.parse_args()
 
     from app import db, observability
@@ -37,7 +39,7 @@ def main() -> None:
     try:
         with db.session() as s:
             snap = observability.snapshot(s, hours=args.hours, exp=args.exp,
-                                          top_errors=args.top)
+                                          now=args.now, top_errors=args.top)
     except ValueError as e:
         print(f"✗ {e}", file=sys.stderr)
         raise SystemExit(1)

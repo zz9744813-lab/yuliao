@@ -40,7 +40,7 @@ Calibration Report v1 → data/reports/<EXP>/
 ```
 
 工程原则：
-- SQLite 起步（WAL），`LG_DATABASE_URL` 一行切 Postgres
+- SQLite 起步（WAL）；部分脚本仍直接读取 SQLite，Postgres 迁移尚未完成，不能仅改 `LG_DATABASE_URL`
 - Job 表跑 stage 链（pending/running/completed/failed/retry），幂等可重入
 - 全部 prompt 版本化入库；全部 LLM 调用记 token/延迟/状态
 - 中转站单价未知 → cost 一律 None，只记 token（沿用 novel-distiller 约定）

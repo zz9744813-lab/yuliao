@@ -169,6 +169,7 @@ def _wire_fake_live(monkeypatch, tmp_path, created):
     """live 测试公共接线：双闸环境 + LLM_MODE=mock（预检闸不适用，与
     test_live_double_gate 同口径）+ mkdtemp 换绑 tmp_path +
     GatewayClient 换 FxClient + freeze 强绑 False（零 LG 库写）。"""
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
     monkeypatch.setenv("K4_ALLOW_LIVE", "1")
     assert _cfg.LLM_MODE == "mock"      # 前提钉死，不赌环境默认值
     monkeypatch.setattr(k4.tempfile, "mkdtemp",
