@@ -17,7 +17,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from sqlalchemy import func, text
+from sqlalchemy import case, func, text
 from sqlalchemy.orm import Session
 
 from . import config, db, observability
@@ -63,7 +63,8 @@ def _count(s: Session, q) -> int:
 
 
 def _group_counts(s: Session, column) -> dict[str, int]:
-    rows = s.query(column, func.count(column)).group_by(column).all()
+    # COUNT(column) 会把 NULL 组计为 0；角色未标注时尤其会误报。
+    rows = s.query(column, func.count()).group_by(column).all()
     return {str(k or "∅"): v for k, v in rows}
 
 
@@ -124,9 +125,32 @@ def _dashboard(s: Session) -> dict:
 # ── 2 corpus ────────────────────────────────────────────────
 
 def _corpus(s: Session) -> dict:
-    total = _count(s, s.query(Segment))
+    sqlite = s.bind is not None and s.bind.dialect.name == "sqlite"
+    if sqlite:
+        # 一次分组扫描同时得到总量、清洗量、字数与两个分类维度；
+        # 千万段库上分开做 COUNT/SUM/GROUP BY 会重复扫全表。
+        rows = (s.query(
+            Segment.role, Segment.seg_version, func.count(),
+            func.coalesce(func.sum(case((Segment.text_clean.isnot(None), 1), else_=0)), 0),
+            func.coalesce(func.sum(Segment.n_chars), 0),
+        ).group_by(Segment.role, Segment.seg_version).all())
+        total = cleaned = chars = 0
+        roles: dict[str, int] = defaultdict(int)
+        seg_versions: dict[str, int] = defaultdict(int)
+        for role, version, n, clean_n, char_n in rows:
+            total += n
+            cleaned += int(clean_n)
+            chars += int(char_n)
+            roles[str(role or "∅")] += n
+            seg_versions[str(version or "∅")] += n
+    else:
+        total = _count(s, s.query(Segment))
+        cleaned = _count(s, s.query(Segment).filter(Segment.text_clean.isnot(None)))
+        chars = s.query(func.sum(Segment.n_chars)).scalar() or 0
+        roles = _group_counts(s, Segment.role)
+        seg_versions = _group_counts(s, Segment.seg_version)
     src_ok = src_bad = src_unverified = 0
-    if s.bind is not None and s.bind.dialect.name == "sqlite":
+    if sqlite:
         # 生产库已逾千万段，绝不能把整列 .all() 搬进 Python。所有写入端都
         # 使用标准 JSON 键；额外包含 \u 转义，兼容历史/外部写入的转义键名。
         # 先在 SQLite 中筛出候选，再由 Python 保留严格布尔与 truthiness 口径。
@@ -152,13 +176,15 @@ def _corpus(s: Session) -> dict:
             src_bad += 1
         elif "src_ok" in d or d.get("src_ok_unverified"):
             src_unverified += 1            # 类型不严/显式未校验态：不算完好也不算判坏
-    cleaned = _count(s, s.query(Segment).filter(Segment.text_clean.isnot(None)))
-    chars = s.query(func.sum(Segment.n_chars)).scalar() or 0
+    recent = s.query(Work).order_by(Work.id.desc()).limit(_TOP).all()
+    counts = (dict(s.query(Segment.work_id, func.count())
+                   .filter(Segment.work_id.in_([w.id for w in recent]))
+                   .group_by(Segment.work_id).all()) if recent else {})
     works = []
-    for w in s.query(Work).order_by(Work.id.desc()).limit(_TOP).all():
+    for w in recent:
         works.append({
             "id": w.id, "title": w.title, "author": w.author,
-            "segments": _count(s, s.query(Segment).filter(Segment.work_id == w.id)),
+            "segments": counts.get(w.id, 0),
         })
     return {
         "works": _count(s, s.query(Work)),
@@ -168,8 +194,8 @@ def _corpus(s: Session) -> dict:
         "integrity": {"checked": src_ok + src_bad, "src_ok": src_ok, "src_bad": src_bad,
                       "src_unverified": src_unverified,
                       "unchecked": total - src_ok - src_bad - src_unverified},
-        "roles": _group_counts(s, Segment.role),
-        "seg_versions": _group_counts(s, Segment.seg_version),
+        "roles": dict(roles),
+        "seg_versions": dict(seg_versions),
         "recent_works": works,
     }
 

@@ -15,7 +15,8 @@ from app.models import Segment, Work
 def test_corpus_stats_and_integrity_keep_exact_semantics():
     db.init_db()
     with db.session() as s:
-        before = console._corpus(s)["integrity"]
+        old_console = console._corpus(s)
+        before = old_console["integrity"]
         old_stats = corpus.segment_stats(s)
         w = Work(title="stats-scale-test", source="test:stats-scale")
         s.add(w)
@@ -40,7 +41,8 @@ def test_corpus_stats_and_integrity_keep_exact_semantics():
     event.listen(db.engine, "before_cursor_execute", capture)
     try:
         with db.session() as s:
-            after = console._corpus(s)["integrity"]
+            new_console = console._corpus(s)
+            after = new_console["integrity"]
             stats = corpus.segment_stats(s)
     finally:
         event.remove(db.engine, "before_cursor_execute", capture)
@@ -51,10 +53,15 @@ def test_corpus_stats_and_integrity_keep_exact_semantics():
     assert after["unchecked"] - before["unchecked"] == 4
     assert stats["n_segments"] - old_stats["n_segments"] == len(payloads)
     assert stats["chars_total"] - old_stats["chars_total"] == 4 * len(payloads)
+    assert new_console["roles"]["∅"] - old_console["roles"].get("∅", 0) == len(payloads)
+    assert (new_console["seg_versions"]["1"]
+            - old_console["seg_versions"].get("1", 0) == len(payloads))
     assert any("select integrity from segments" in q and "where instr" in q
                for q in statements)
     assert any("sum(segments.n_chars)" in q and "sum(segments.n_sentences)" in q
                for q in statements), "首屏统计必须由数据库聚合"
+    assert any("group by segments.role, segments.seg_version" in q
+               for q in statements), "深度概览应合并分类扫描"
 
 
 def test_postgres_config_fails_before_any_connection(tmp_path):
