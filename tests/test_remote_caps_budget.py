@@ -237,6 +237,24 @@ def test_budget_released_when_claim_fails(client, monkeypatch):
     hold.hold.set()
 
 
+def test_thread_start_failure_releases_budget_and_claim(client, monkeypatch):
+    """领取后若线程未能启动，不得永久占住预算和实验执行权。"""
+    monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)
+    _seed("EXP-RCAPSTART1")
+
+    def fail_to_start(*args, **kwargs):
+        raise RuntimeError("spawn failed")
+
+    monkeypatch.setattr(engine, "run_experiment_background", fail_to_start)
+    with pytest.raises(RuntimeError, match="spawn failed"):
+        client.post("/experiments/EXP-RCAPSTART1/run", json={})
+
+    assert api._budget_active_count() == 0
+    row = _exp_row("EXP-RCAPSTART1")
+    assert row.status == "failed" and row.run_owner is None
+    assert "后台线程启动失败" in (row.error or "")
+
+
 def test_budget_blocked_requests_leave_counter_untouched(client, monkeypatch):
     """连续超限请求不得让计数漂移（拒绝路径不碰计数）。"""
     monkeypatch.delenv("LG_MAX_RUNNING_EXPERIMENTS", raising=False)

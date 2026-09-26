@@ -546,6 +546,22 @@ def claim_run(exp_id: str, token: str) -> bool:
     return False       # 不可达兜底：控制流不许靠异常穿透的偶然性
 
 
+def abort_unstarted_run(exp_id: str, token: str, error: Exception) -> bool:
+    """线程启动失败时，只撤销本次领取；不得碰已易主的实验。"""
+    with session() as s:
+        n = (s.query(Experiment)
+             .filter(Experiment.id == exp_id,
+                     Experiment.status == "running",
+                     Experiment.run_owner == token)
+             .update({Experiment.status: "failed",
+                      Experiment.run_owner: None,
+                      Experiment.error: f"后台线程启动失败：{type(error).__name__}",
+                      Experiment.updated_at: _now()},
+                     synchronize_session=False))
+        s.commit()
+        return n > 0
+
+
 def release_run(exp_id: str) -> dict:
     """显式释放执行权（A07 运维口径，CLI --release）——**立即夺权，
     延迟让位**。

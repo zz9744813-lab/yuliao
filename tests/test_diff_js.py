@@ -41,7 +41,8 @@ def _node() -> str:
 
 
 def _run_js(js: str) -> dict:
-    proc = subprocess.run([_node(), "-e", js], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([_node(), "-e", js], capture_output=True, text=True,
+                          encoding="utf-8", timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f"node 失败:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])

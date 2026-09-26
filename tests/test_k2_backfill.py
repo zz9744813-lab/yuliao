@@ -260,10 +260,13 @@ def test_observe_update_fact_layer_only_and_idempotent():
     assert rep3["would_update"] == 0, "幂等：observed 的不再动"
 
 
-def test_main_live_refused_when_lock_held(monkeypatch):
+def test_main_live_refused_when_lock_held(monkeypatch, tmp_path):
     """R6 接线回归（9e02916 会审建议项）：--live 在锁被持有时必须
     SystemExit 拒绝且**未发起任何调用**（run_backfill 不许被触达）。"""
     from app import live_guard as LG
+    # 本用例在整轮 pytest 锁内运行；用独立锁位造「另一个 live 持锁」，
+    # 避免把整轮守卫本身误认成测试要模拟的持有者。
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
     monkeypatch.setenv("K2_ALLOW_LIVE", "1")
     monkeypatch.setattr(k2b, "LLM_MODE", "real")
     import preflight_models as PF

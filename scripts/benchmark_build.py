@@ -44,7 +44,6 @@ import argparse
 import json
 import os
 import random
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -53,7 +52,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from app import db  # noqa: E402
-from app.models import (BenchmarkItem, BenchmarkSet, ControlledCorruption, Segment,  # noqa: E402
+from app.models import (BenchmarkItem, BenchmarkRun, BenchmarkSet, ControlledCorruption, Segment,  # noqa: E402
                         exclude_corpus_v2_segments)
 from app.ids import new_id  # noqa: E402
 from k2_extract_backfill import src_ok_strict  # noqa: E402  src_ok 读取侧唯一入口（同源消费）
@@ -541,11 +540,11 @@ def scan() -> dict:
         for st in sets:
             n = s.query(BenchmarkItem).filter_by(set_id=st.id).count()
             out.append((st.id, st.name, st.version, st.kind, st.n_items, n))
-    con = sqlite3.connect(str(ROOT / "data" / "language_genome.db"))
-    runs = {}
-    for r in con.execute("select set_id, model, n, accuracy from benchmark_runs"):
-        runs.setdefault(r[0], []).append((r[1], r[2], r[3]))
-    con.close()
+        runs = {}
+        for sid, model, n, accuracy in s.query(
+                BenchmarkRun.set_id, BenchmarkRun.model,
+                BenchmarkRun.n, BenchmarkRun.accuracy).all():
+            runs.setdefault(sid, []).append((model, n, accuracy))
     print(f"{'集合':<34}{'名称':<16}{'版本':>4}{'口径':<24}{'条目':>6}{'实存':>6}")
     for sid, name, ver, kind, ni, n in out:
         print(f"{sid:<34}{name:<16}{ver:>4}{kind:<24}{ni:>6}{n:>6}")

@@ -1429,12 +1429,12 @@ async function showExp(id, quiet){
     $('#d-id').textContent = id + ' · ' + e.status;
     const stages = e.stats && e.stats.stages || {};
     $('#d-stages').innerHTML = Object.entries(e.job_states||{}).map(([k,v]) =>
-      `<div class="stage-cell"><b>${k.replace('stage:','')}
-        <span class="tag ${v.status}">${v.status}</span></b>
+      `<div class="stage-cell"><b>${escHtml(k.replace('stage:',''))}
+        <span class="tag ${escHtml(v.status)}">${escHtml(v.status)}</span></b>
         ${stages[k.replace('stage:','')] ?
           Object.entries(stages[k.replace('stage:','')]).filter(([x])=>x!=='done')
-            .map(([a,b])=>`${a}=${typeof b==='object'?JSON.stringify(b):b}`).join(' ') : ''}
-        ${v.last_error? `<div style="color:var(--bad)">${v.last_error.slice(0,120)}</div>`:''}
+            .map(([a,b])=>`${escHtml(a)}=${escHtml(typeof b==='object'?JSON.stringify(b):b)}`).join(' ') : ''}
+        ${v.last_error? `<div style="color:var(--bad)">${escHtml(String(v.last_error).slice(0,120))}</div>`:''}
       </div>`).join('');
     $('#d-stats').textContent = JSON.stringify(e.stats||{}, null, 2).slice(0, 4000);
     if(!quiet && e.status==='done') loadReport(id);

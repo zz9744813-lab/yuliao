@@ -116,17 +116,21 @@ def test_ai_flavor_does_not_claim_what_it_cannot_do():
     assert isinstance(obvious("随便一句话。"), bool)
 
 
-def test_span_flavor_detector_contract(tmp_path):
+def test_span_flavor_detector_contract(monkeypatch):
     """片段级检测器的**接口**契约（有效性另有外部验证，不在这里断言）。
 
     有效性证据见 docs/phase1.5-plan.md §⑳-1：按题分组 AUC 0.710、
     构造劣化对外部验证 75.9%。有一折 AUC 0.446（低于随机）→ 不稳定，
     所以这里只钉"给得出片段、分数有界、不因空文本崩"。
     """
-    # fastembed 是可选依赖（bge-small-zh 向量，未在 requirements 声明，flavor_train.py 懒加载）。
-    # 这不是跳过缺陷：依赖未装时该契约无从判定，只能显式 skip，不能算 fail。
-    pytest.importorskip("fastembed", reason="可选依赖：bge-small-zh 向量，未在 requirements 声明")
+    # 这里只验滑窗、排序和返回结构；固定模型权重是本机数据产物，
+    # 干净检出里没有它。用确定性分数替身，避免测试结果取决于是否装了 fastembed。
+    np = pytest.importorskip("numpy")
     import flavor_span as FS
+
+    monkeypatch.setattr(FS, "_load", lambda: {"w": None, "b": 0.0})
+    monkeypatch.setattr(FS, "embed", lambda texts: texts)
+    monkeypatch.setattr(FS, "predict", lambda xs, w, b: np.linspace(0.1, 0.9, len(xs)))
     r = FS.score_spans("她停了一拍，问：那要是喜欢陆姐姐，还能喜欢别人吗？")
     assert set(r) >= {"max", "mean_top", "spans"}
     assert 0.0 <= r["max"] <= 1.0

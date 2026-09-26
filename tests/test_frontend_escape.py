@@ -44,7 +44,8 @@ def _node() -> str:
 
 
 def _run_js(js: str) -> dict:
-    proc = subprocess.run([_node(), "-e", js], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([_node(), "-e", js], capture_output=True, text=True,
+                          encoding="utf-8", timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f"node 失败:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
@@ -60,6 +61,12 @@ def _loadexps_src() -> str:
     start = src.index("async function loadExps()")
     end = src.index("async function createExp()")
     return src[start:end]
+
+
+def _showexp_src() -> str:
+    src = HTML.read_text(encoding="utf-8")
+    start = src.index("async function showExp(")
+    return src[start:src.index("function mdLite(", start)]
 
 
 def _diff_esc_html_src() -> str:
@@ -217,6 +224,32 @@ def test_loadexps_uses_dom_construction():
 def test_loadexps_no_inline_event_handler():
     src = _loadexps_src()
     assert "onclick=" not in src, "loadExps 不该再拼内联 onclick（id 会进 JS 字符串上下文）"
+
+
+def test_experiment_detail_escapes_job_errors_and_stage_stats():
+    """网关错误和阶段统计是服务端数据，不能变成浏览器可执行的标签。"""
+    payload = '<img src=x onerror=alert(1)>'
+    js = """
+      const nodes = Object.create(null);
+      const $ = key => nodes[key] || (nodes[key] = {style:{}, textContent:'', innerHTML:''});
+      const api = async () => ({status:'running',
+        stats:{stages:{extract:{detail:PAYLOAD}}},
+        job_states:{'stage:extract':{status:'failed', last_error:PAYLOAD}}});
+      const toast = () => {};
+      const clearInterval = () => {};
+      let autoTimer = null;
+      function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+      SHOWEXP_SOURCE
+      showExp('EXP-TEST').then(() => console.log(JSON.stringify({
+        html: nodes['#d-stages'].innerHTML,
+        status: nodes['#d-id'].textContent,
+      })));
+    """.replace("PAYLOAD", json.dumps(payload)).replace("SHOWEXP_SOURCE", _showexp_src())
+    r = _run_js(js)
+    assert "<img" not in r["html"], r["html"]
+    assert "&lt;img" in r["html"], "错误文本应继续可读，但必须转义"
+    assert r["status"] == "EXP-TEST · running"
 
 
 def test_mark_open_tag_escapes_both_attrs():

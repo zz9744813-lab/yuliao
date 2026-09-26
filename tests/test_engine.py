@@ -241,7 +241,7 @@ def test_cli_dry_run_json():
         [sys.executable, str(ROOT / "scripts" / "run_experiment.py"),
          "--exp", "EXP-ENGINE-CLI", "--dry-run", "--json"],
         capture_output=True, text=True, encoding="utf-8",
-        env=dict(os.environ), cwd=str(ROOT), timeout=180)
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"}, cwd=str(ROOT), timeout=180)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["experiment"] == "EXP-ENGINE-CLI"
@@ -255,7 +255,7 @@ def test_cli_mock_end_to_end():
         [sys.executable, str(ROOT / "scripts" / "run_experiment.py"),
          "--exp", eid, "--mock", "--json"],
         capture_output=True, text=True, encoding="utf-8",
-        env=dict(os.environ), cwd=str(ROOT), timeout=300)
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"}, cwd=str(ROOT), timeout=300)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
     assert out["ok"] is True

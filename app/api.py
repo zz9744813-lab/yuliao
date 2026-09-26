@@ -422,7 +422,19 @@ def run_exp(exp_id: str, body: RunIn | None = None):
                 raise HTTPException(404, "experiment 不存在")
         raise HTTPException(409, "already_running：执行权被持有（存量卡死排查用 "
                                  "run_experiment.py --list-stuck / --release）")
-    t = engine.run_experiment_background(exp_id, stages, token=token)
+    try:
+        t = engine.run_experiment_background(exp_id, stages, token=token)
+    except Exception as exc:
+        # claim_run 已经提交；线程未启动时引擎的 finally 不会收尾。
+        # 清掉本次 owner 并归还预算，避免一次启动失败永久锁死后续实验。
+        try:
+            if not engine.abort_unstarted_run(exp_id, token, exc):
+                logger.error("后台线程启动失败后，实验 %s 的执行权已变化", exp_id)
+        except Exception:
+            logger.exception("后台线程启动失败，撤销实验 %s 领取时再次出错", exp_id)
+        finally:
+            _budget_release()
+        raise
     _watch_budget_release(t)   # 后台 run 结束（或替身不可 join）时归还预算位
     return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
 
