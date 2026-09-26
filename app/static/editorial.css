@@ -1,17 +1,27 @@
 /* 盲评台 · 编辑档案室。A/B 两侧在判定前采用完全相同的视觉权重。 */
 :root{
-  --bg:#f2eee5;--surface:#fffdf8;--surface-2:#f9f6ef;
-  --line:#d8d1c3;--line-2:#c3baa9;--fg:#202720;--fg-2:#4d524b;--dim:#6b6c63;
-  --accent:#82643b;--accent-soft:#f3ebda;--accent-strong:#6c502f;
-  --paper-bg:#fffdf8;--ctx-fg:#666b61;--radius:4px;
+  /* 调色板刻度（原语层）：与 websrc/_shared/editorial.css 逐值一致，
+     tests/test_editorial_residual.py 做机械对账，任一侧漂移即红。 */
+  --n-0:#fffdf8;--n-50:#f9f6ef;--n-100:#f2eee5;--n-200:#e9e3d8;
+  --n-300:#d8d1c3;--n-400:#c3baa9;--n-500:#938d81;--n-600:#6b6c63;
+  --n-700:#4d524b;--n-800:#343a34;--n-900:#202720;--n-950:#151b16;
+  --acc-100:#f3ebda;--acc-300:#c5a36b;--acc-500:#82643b;--acc-600:#6c502f;--acc-700:#513c24;
+  /* 语义层别名：沿用 index.html 历史命名，全部指向刻度——口径同 tokens.css 的两层令牌架构。
+     禁止再写裸色值（回归钉住）。 */
+  --bg:var(--n-100);--surface:var(--n-0);--surface-2:var(--n-50);
+  --line:var(--n-300);--line-2:var(--n-400);--fg:var(--n-900);--fg-2:var(--n-700);--dim:var(--n-600);
+  --accent:var(--acc-500);--accent-soft:var(--acc-100);--accent-strong:var(--acc-600);
+  --paper-bg:var(--n-0);--ctx-fg:var(--n-600);
+  --radius:4px;
   --shadow-sm:0 1px 2px rgba(32,39,32,.035);--shadow-card:0 1px 3px rgba(32,39,32,.05);
   --shadow-dock:0 -8px 25px rgba(32,39,32,.08);
 }
 html[data-theme="dark"]{
-  --bg:#111712;--surface:#1c231d;--surface-2:#202920;
-  --line:#354036;--line-2:#465348;--fg:#f0eee4;--fg-2:#c0c7bb;--dim:#a0a99e;
-  --accent:#d1b079;--accent-soft:#322b1c;--accent-strong:#dfc18d;
-  --paper-bg:#202620;--ctx-fg:#b8bcb1;
+  /* 暗色仅覆写刻度：语义别名在 :root 已指向刻度名，随主题自动解析 */
+  --n-0:#202620;--n-50:#1a211b;--n-100:#141a15;--n-200:#2a322b;
+  --n-300:#354038;--n-400:#4a544a;--n-500:#707a6f;--n-600:#a0a99e;
+  --n-700:#c0c7bb;--n-800:#dbded3;--n-900:#f0eee4;--n-950:#faf7ec;
+  --acc-100:#322b1c;--acc-300:#b79862;--acc-500:#d1b079;--acc-600:#dfc18d;--acc-700:#ecd4a5;
   --shadow-sm:0 1px 2px rgba(0,0,0,.16);--shadow-card:0 1px 3px rgba(0,0,0,.23);
   --shadow-dock:0 -8px 25px rgba(0,0,0,.2);
 }
