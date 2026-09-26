@@ -17,7 +17,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from sqlalchemy import case, func, text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from . import config, db, observability
@@ -65,7 +65,7 @@ def _count(s: Session, q) -> int:
 def _group_counts(s: Session, column) -> dict[str, int]:
     # COUNT(column) 会把 NULL 组计为 0；角色未标注时尤其会误报。
     rows = s.query(column, func.count()).group_by(column).all()
-    return {str(k or "∅"): v for k, v in rows}
+    return {str("∅" if k is None else k): v for k, v in rows}
 
 
 def _head(s: Session, column, n: int = _TOP):
@@ -125,43 +125,30 @@ def _dashboard(s: Session) -> dict:
 # ── 2 corpus ────────────────────────────────────────────────
 
 def _corpus(s: Session) -> dict:
-    sqlite = s.bind is not None and s.bind.dialect.name == "sqlite"
-    if sqlite:
-        # 一次分组扫描同时得到总量、清洗量、字数与两个分类维度；
-        # 千万段库上分开做 COUNT/SUM/GROUP BY 会重复扫全表。
-        rows = (s.query(
-            Segment.role, Segment.seg_version, func.count(),
-            func.coalesce(func.sum(case((Segment.text_clean.isnot(None), 1), else_=0)), 0),
-            func.coalesce(func.sum(Segment.n_chars), 0),
-        ).group_by(Segment.role, Segment.seg_version).all())
-        total = cleaned = chars = 0
-        roles: dict[str, int] = defaultdict(int)
-        seg_versions: dict[str, int] = defaultdict(int)
-        for role, version, n, clean_n, char_n in rows:
-            total += n
-            cleaned += int(clean_n)
-            chars += int(char_n)
-            roles[str(role or "∅")] += n
-            seg_versions[str(version or "∅")] += n
-    else:
-        total = _count(s, s.query(Segment))
-        cleaned = _count(s, s.query(Segment).filter(Segment.text_clean.isnot(None)))
-        chars = s.query(func.sum(Segment.n_chars)).scalar() or 0
-        roles = _group_counts(s, Segment.role)
-        seg_versions = _group_counts(s, Segment.seg_version)
+    # db._make_engine 已拒绝非 SQLite 配置；只维护一个聚合口径。
+    # text_clean 的旧口径是「非 NULL 即已清洗」，空字符串也计入。
+    rows = s.execute(text("""
+        SELECT role, seg_version, COUNT(*), SUM(text_clean IS NOT NULL), SUM(n_chars)
+        FROM segments GROUP BY role, seg_version
+    """))
+    total = cleaned = chars = 0
+    roles: dict[str, int] = defaultdict(int)
+    seg_versions: dict[str, int] = defaultdict(int)
+    for role, version, n, clean_n, char_n in rows:
+        total += n
+        cleaned += int(clean_n or 0)
+        chars += int(char_n or 0)
+        roles[str("∅" if role is None else role)] += n
+        seg_versions[str("∅" if version is None else version)] += n
     src_ok = src_bad = src_unverified = 0
-    if sqlite:
-        # 生产库已逾千万段，绝不能把整列 .all() 搬进 Python。所有写入端都
-        # 使用标准 JSON 键；额外包含 \u 转义，兼容历史/外部写入的转义键名。
-        # 先在 SQLite 中筛出候选，再由 Python 保留严格布尔与 truthiness 口径。
-        src = s.execute(text("""
-            SELECT integrity FROM segments
-            WHERE instr(integrity, 'src_ok') > 0
-               OR instr(integrity, '\\u') > 0
-        """))
-    else:
-        # 其他方言没有 SQLite instr；流式兜底至少不会持有全表 JSON。
-        src = s.query(Segment.integrity).yield_per(1000)
+    # 生产库已逾千万段，不能把整列 .all() 搬进 Python。先筛候选，
+    # 再保留 Python 的严格布尔与 JSON truthiness 判定。
+    # \u 分支兼容被转义的 JSON 键名，例如 "\u0073rc_ok"。
+    src = s.execute(text("""
+        SELECT integrity FROM segments
+        WHERE instr(integrity, 'src_ok') > 0
+           OR instr(integrity, '\\u') > 0
+    """))
     for (raw,) in src:
         try:
             d = json.loads(raw or "{}")

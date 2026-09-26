@@ -60,8 +60,27 @@ def test_corpus_stats_and_integrity_keep_exact_semantics():
                for q in statements)
     assert any("sum(segments.n_chars)" in q and "sum(segments.n_sentences)" in q
                for q in statements), "首屏统计必须由数据库聚合"
-    assert any("group by segments.role, segments.seg_version" in q
+    assert any("group by role, seg_version" in q
                for q in statements), "深度概览应合并分类扫描"
+    assert sum("group by segments.work_id" in q for q in statements) == 1, (
+        "最近作品段数应批量统计，不能每本书单独 COUNT")
+
+
+def test_group_counts_distinguishes_null_from_empty_role():
+    db.init_db()
+    with db.session() as s:
+        before = console._group_counts(s, Segment.role)
+        w = Work(title="group-null-test", source="test:group-null")
+        s.add(w)
+        s.flush()
+        for ordinal, role in enumerate((None, "")):
+            s.add(Segment(work_id=w.id, ordinal=ordinal, role=role,
+                          text="一句话。", n_chars=4, n_sentences=1))
+        s.commit()
+    with db.session() as s:
+        after = console._group_counts(s, Segment.role)
+    assert after["∅"] - before.get("∅", 0) == 1
+    assert after[""] - before.get("", 0) == 1
 
 
 def test_postgres_config_fails_before_any_connection(tmp_path):
