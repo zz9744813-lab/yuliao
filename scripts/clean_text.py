@@ -46,6 +46,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -131,8 +132,24 @@ LLM_SYSTEM = ("你是中文文本修复器。只把被盗版工具换成拼音�
 GUARD_ENV = "CLEAN_TEXT_GUARD"
 GUARD_MIN_LEN = 20       # 去空白后低于此长度 → 视为垃圾输出（如"已修复"），拒
 GUARD_MIN_RATIO = 0.6    # 相对长度下限：out < 0.6×src → 视为截断，拒
+GUARD_MAX_RATIO = 1.2    # 相对长度上限：out > 1.2×src → 视为"原文 + 垃圾追加"，拒
+                         # （1.2 = 允许 LLM 把拼音写回汉字带来的长度浮动，
+                         #  超出即认为多出了原文以外的内容；审计建议同值）
+GUARD_MIN_SIMILARITY = 0.6  # 相似卡：SequenceMatcher(None, src, out).ratio() 低于此
+                         # → 视为跑题改写（内容换掉但长度没露馅）。取 0.6 是因为合法
+                         # 修复只动少量字符（拼音还原、水印剥离），ratio 实测 ≥0.8；
+                         # 跑题段落与原文几乎无公共字符，ratio 接近 0，两侧余量都大。
+GUARD_MAX_LATIN_RATIO = 0.3 # 拉丁占比卡：out 里 [A-Za-z] 占比 > 此 而 src 不 > 此
+                         # → 视为"原文中文、结果被整段拼音化（无声调）"。中文小说正文
+                         # 拉丁占比通常在 10% 以下，拼音化会推到 50% 以上，0.3 留一倍余量；
+                         # src 自己就超阈值（本来就是大段英文/拉丁）时本卡保持沉默，
+                         # 因为那种形态不是"拼音化污染"，误杀代价高于漏判。
 GUARD_SHORT_SRC = 40     # 短原文豁免口径：src 去空白后 ≤ 40 字时**不做比例卡**，
                          # 只卡绝对下限——否则 25 字的正常短段会被 0.6 比例误伤全拒。
+                         # 上限卡/相似卡/拉丁占比卡同口径豁免：短段里"合理改写"天然会
+                         # 动掉大半字符，长度比、相似度、拉丁占比在小分母下都失真，
+                         # 误杀是整段拒绝落库（好正文永远修不掉），代价高于漏判。
+_LATIN_CHAR = re.compile(r"[A-Za-z]")
 # 分批：一段一次调用要跑 1 万多段（≈11 小时）。10 段一包，调用数掉到约 1/10，
 # 且同包内互相不干扰（编号返回，顺序可校验）。
 LLM_BATCH = 10
@@ -156,22 +173,45 @@ _stat = {"rule_ok": 0, "llm_ok": 0, "llm_failed": 0, "llm_rejected": 0,
          "llm_identical": 0, "skip": 0, "still_broken": 0}
 
 
+def _latin_ratio(text: str) -> float:
+    """拉丁字母（A-Za-z）占字符数比例；空串返回 0.0。"""
+    return len(_LATIN_CHAR.findall(text)) / len(text) if text else 0.0
+
+
 def guard_verdict(src: str, out: str) -> str:
-    """正文保留门的判定：返回 'accept' / 'identical' / 'too_short' / 'truncated'。
+    """正文保留门的判定：返回 'accept' / 'identical' / 'too_short' / 'truncated'
+    / 'latinized' / 'oversize' / 'divergent'（除 'accept'/'identical' 外一律不落库）。
 
     口径（见 GUARD_* 常量注释）：
     - out 去空白后与 src 去空白后完全相同 → 'identical'（幂等，免无谓 UPDATE，非拒绝）；
     - out 去空白后 < GUARD_MIN_LEN → 'too_short'（垃圾输出，如"已修复"）；
     - src 去空白后 > GUARD_SHORT_SRC 且 out < GUARD_MIN_RATIO×src → 'truncated'；
       短原文豁免比例卡，避免把正常短段全拒。
+    三张补强卡（审计《language-genome-code-audit-20260923》非阻断项 §4 的三种放行
+    反例；与 truncated 同享 GUARD_SHORT_SRC 短原文豁免，语义互不覆盖）：
+    - 'latinized'：out 拉丁占比 > GUARD_MAX_LATIN_RATIO 而 src 不超 → 整段无声调拼音化
+      （反例 c）。放在最前：拼音化必然同时拉长文本、拉低相似度，先判才能给出贴病灶的
+      态名，否则同一污染会被笼统记成 oversize/divergent，统计归因失真；
+    - 'oversize'：out > GUARD_MAX_RATIO×src → 原文照抄外加垃圾追加（反例 b）；
+    - 'divergent'：SequenceMatcher(None, s_src, s_out).ratio() < GUARD_MIN_SIMILARITY
+      → 长度相当但内容跑题（反例 a）。
     """
     s_src, s_out = (src or "").strip(), (out or "").strip()
     if s_out == s_src:
         return "identical"
     if len(s_out) < GUARD_MIN_LEN:
         return "too_short"
-    if len(s_src) > GUARD_SHORT_SRC and len(s_out) < GUARD_MIN_RATIO * len(s_src):
-        return "truncated"
+    if len(s_src) > GUARD_SHORT_SRC:
+        n_src, n_out = len(s_src), len(s_out)
+        if n_out < GUARD_MIN_RATIO * n_src:
+            return "truncated"
+        if (_latin_ratio(s_out) > GUARD_MAX_LATIN_RATIO
+                and _latin_ratio(s_src) <= GUARD_MAX_LATIN_RATIO):
+            return "latinized"
+        if n_out > GUARD_MAX_RATIO * n_src:
+            return "oversize"
+        if SequenceMatcher(None, s_src, s_out).ratio() < GUARD_MIN_SIMILARITY:
+            return "divergent"
     return "accept"
 
 
@@ -323,7 +363,7 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False,
                         with _lock:
                             _stat["llm_identical"] += 1
                         continue
-                    if verdict != "accept":          # 过短/截断 → 保留原值不写
+                    if verdict != "accept":          # 过短/截断/拼音化/超长/跑题 → 保留原值不写
                         with _lock:
                             _stat["llm_rejected"] += 1
                         continue
