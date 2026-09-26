@@ -154,7 +154,8 @@ def _run_js(body: str) -> dict:
         "})().then(() => { console.log(JSON.stringify(out)); },",
         "  e => { console.error('HARNESS_ERROR: ' + (e && e.stack || e)); process.exit(1); });",
     ])
-    proc = subprocess.run([_node(), "-e", script], capture_output=True, text=True, timeout=60)
+    proc = subprocess.run([_node(), "-e", script], capture_output=True, text=True,
+                          encoding="utf-8", timeout=60)
     if proc.returncode != 0:
         raise AssertionError(f"node 失败:\nSTDOUT:{proc.stdout}\nSTDERR:{proc.stderr}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
