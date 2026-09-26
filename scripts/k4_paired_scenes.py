@@ -55,6 +55,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -197,6 +198,25 @@ class FxClient:
                 "finish_reason": "stop"}
 
 
+def gateway_host_from_url(url) -> str:
+    """收据 gateway_host 口径（孤儿裁定 #13 收口，2026-09-26）：取
+    urllib.parse.urlsplit 的 hostname（含有效端口时保留 host:port）——
+    **绝不携带 userinfo**。旧 split("//") 形态下
+    LG_GATEWAY_BASE_URL=http://u:p@host:3000/v1 会把 u:p@host:3000 原样
+    落进收据（凭据进入产物面）。空/不可解析（无 netloc、非法端口等）
+    按既有口径落空串，不抛异常。"""
+    try:
+        parts = urlsplit(url or "")
+        host = parts.hostname
+        if not host:
+            return ""
+        if parts.port is not None:
+            return f"{host}:{parts.port}"
+        return host
+    except ValueError:
+        return ""
+
+
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
                freeze: bool = False, n_scenes: int = 3,
                channel_changed: bool = False,
@@ -287,8 +307,7 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                 gw_host = ""
                 if live:
                     from app import config as _cfg
-                    gw_host = (_cfg.GATEWAY_BASE_URL or ""
-                               ).split("//")[-1].split("/")[0]
+                    gw_host = gateway_host_from_url(_cfg.GATEWAY_BASE_URL)
                 v_attempts = [{"stage": a["stage"],
                                "model": a.get("requested_model"),
                                "status": a["status"]}
