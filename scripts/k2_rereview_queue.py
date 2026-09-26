@@ -214,18 +214,32 @@ def _execute_rereview(plan: list[dict], extractor_model: str) -> dict:
 
     client = _Adapter()
     results = []
+    stopped_by_budget = False
+    budget_note = ""
     with db.session() as s:
         for item in plan:
             st = s.get(ExpressionStrategyV2, item["strategy_id"])
             seg = s.get(Segment, item["segment_id"])
             text = (seg.text_clean or seg.text or "") if seg is not None else ""
-            r = KE.extract_segment(
-                client, strategy_id=item["strategy_id"],
-                strategy_version=item["strategy_version"],
-                work_id=item["work_id"], segment_id=item["segment_id"],
-                text=text, text_version=item["text_version"],
-                budget=budget, live=True,
-                strategy_def=build_strategy_def(st) if st is not None else None)
+            try:
+                r = KE.extract_segment(
+                    client, strategy_id=item["strategy_id"],
+                    strategy_version=item["strategy_version"],
+                    work_id=item["work_id"], segment_id=item["segment_id"],
+                    text=text, text_version=item["text_version"],
+                    budget=budget, live=True,
+                    strategy_def=build_strategy_def(st) if st is not None else None)
+            except KE.ExtractBudgetExceeded as exc:
+                # 预算墙**不是失败**：ExtractBudget 是「一次 run」的闸，
+                # max_calls=20 ⇒ 单 run 最多复审 20 条。旧写法把 s.commit()
+                # 放在整批末尾，第 21 条一抛异常就整个会话回滚 ⇒ 前 20 条
+                # 已完成的复审连同样本调用全丢（白烧），且 --limit>20 永远
+                # 不可能成功。这里改为：已完成的逐条提交、预算墙按「本轮到此
+                # 为止」如实收口，剩余的交下一轮（队列按 reviewer_version 为空
+                # 枚举，天然续跑，不会重复计费）。
+                stopped_by_budget = True
+                budget_note = str(exc)
+                break
             inst = s.query(StrategyInstance).filter_by(
                 id=item["instance_id"]).one()
             # 复审只写标记位——不改 status / span 任何一行（审计明令）：
@@ -238,8 +252,11 @@ def _execute_rereview(plan: list[dict], extractor_model: str) -> dict:
                 "span_agree": (r.get("span_start") == inst.span_start
                                and r.get("span_end") == inst.span_end),
                 "reviewer_version": REVIEW_MARKER})
-        s.commit()
+            s.commit()          # ← 逐条提交：预算墙/异常不再回滚已完成的复审
     return {"mode": "live", "n_rereviewed": len(results),
+            "stopped_by_budget": stopped_by_budget,
+            "budget_note": budget_note,
+            "remaining_in_plan": len(plan) - len(results),
             "budget": {"calls": budget.calls, "tokens": budget.tokens,
                        "max_calls": budget.max_calls,
                        "max_tokens": budget.max_tokens},
