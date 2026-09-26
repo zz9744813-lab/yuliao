@@ -5,6 +5,7 @@
 """
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -428,15 +429,83 @@ def test_channel_changed_marked_on_receipts(tmp_path):
 
 
 def test_worlds_dir_recorded_in_output(tmp_path, monkeypatch):
-    """审计非阻断项收口：worlds_dir 记入产物（live 留库作收据——tokens
-    对账要读 arm*/k4.sqlite 的 calls 表）；离线跑也记录（可诊断、可清理）。"""
+    """审计非阻断项收口 + **离线可证伪**（孤儿裁定 #13 收口，2026-09-26）：
+    旧断言 `is_dir() or not live` 在离线跑恒真（兜底吞掉一切缺陷）。现改
+    为：monkeypatch 换绑 tempfile.mkdtemp 拿到本次自建目录，断言产物
+    worlds_dir **就是**该目录（记错/不记即红），且与 exists 语义一致——
+    离线收口 main 用后即删，产物时刻目录实况必须已不存在（清理失效即红）。"""
+    seed_knowledge()
     out_dir = tmp_path / "out"
+    created = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def fake_mkdtemp(*args, **kw):
+        kw["dir"] = str(tmp_path)          # 不往系统临时目录丢东西
+        d = real_mkdtemp(*args, **kw)
+        created.append(d)
+        return d
+    monkeypatch.setattr(k4.tempfile, "mkdtemp", fake_mkdtemp)
     monkeypatch.setattr(sys, "argv",
                         ["k4", "--out", str(out_dir)])
     k4.main()
     art = json.loads((out_dir / "k4_paired.json").read_text(encoding="utf-8"))
-    assert Path(art["worlds_dir"]).is_dir() or not art["live"], art["worlds_dir"]
-    assert "worlds_dir" in art and art["live"] is False
+    assert art["live"] is False
+    assert created, "前提：mkdtemp 走的是本测试换绑的假实现"
+    assert "worlds_dir" in art
+    assert Path(art["worlds_dir"]) == Path(created[0]), \
+        f"产物 worlds_dir 不是本次自建目录：{art['worlds_dir']} vs {created[0]}"
+    recorded = Path(art["worlds_dir"])
+    assert recorded.is_absolute(), recorded
+    assert not recorded.exists(), \
+        f"worlds_dir 与 exists 语义不一致：离线收口后 {recorded} 仍在（未清理）"
+
+
+def test_gateway_host_forms():
+    """收据 gateway_host 构造 helper（孤儿裁定 #13）：urlsplit hostname
+    形态——剥 userinfo（凭据不得进产物面）、含端口保留 host:port、
+    空/None/不可解析/非法端口一律落空串且不抛。"""
+    assert k4.gateway_host_from_url(
+        "http://user:secretpw@GW.Example:3000/v1") == "gw.example:3000"
+    assert k4.gateway_host_from_url("http://plain.example/path") == \
+        "plain.example"
+    assert k4.gateway_host_from_url("http://127.0.0.1:3000") == \
+        "127.0.0.1:3000"
+    assert k4.gateway_host_from_url("http://user:p@h.example/v1") == \
+        "h.example"
+    assert k4.gateway_host_from_url("") == ""
+    assert k4.gateway_host_from_url(None) == ""
+    assert k4.gateway_host_from_url("not a url at all") == ""
+    assert k4.gateway_host_from_url("http://bad:99x99/") == ""  # 非法端口不抛
+
+
+def test_gateway_host_strips_userinfo_in_receipts(tmp_path, monkeypatch):
+    """承重钉：live 收据逐条 gateway_host 必须是 host:port 形态、**无
+    userinfo**——LG_GATEWAY_BASE_URL=http://user:secretpw@GW.Example:3000/v1
+    时旧 split("//") 形态把 user:secretpw@GW.Example:3000 原样落进收据
+    （凭据进入产物面）。monkeypatch 调用期模块属性，与环境 .env 无关。"""
+    seed_knowledge()
+    from app import config as _cfg
+    monkeypatch.setattr(_cfg, "GATEWAY_BASE_URL",
+                        "http://user:secretpw@GW.Example:3000/v1")
+    dirs = {"n": 0}
+
+    def factory():
+        d = tmp_path / f"gh{dirs['n']}"; dirs["n"] += 1
+        store = Store(d / "k4.sqlite")
+        store.create_world(k4.build_world())
+        return store
+    wd = tmp_path / "worlds"
+    wd.mkdir()
+    with db.session() as s:
+        four = k4.run_paired(factory, k4.FxClient(), s, live=True,
+                             freeze=False, worlds_dir=str(wd),
+                             worlds_created_at="2026-09-26T00:00:00Z")
+    assert not four["failures"], four["failures"]
+    assert len(four["receipts"]) == 6, "前提：收据逐条产出（防空断言）"
+    for r in four["receipts"]:
+        assert r["gateway_host"] == "gw.example:3000", r["gateway_host"]
+        assert "@" not in r["gateway_host"], \
+            f"userinfo 泄进收据：{r['gateway_host']}"
 
 
 def test_main_live_refused_when_lock_held(monkeypatch):
