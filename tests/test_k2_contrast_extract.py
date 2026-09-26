@@ -753,3 +753,170 @@ def test_pairs_ledger_records_full_pair(tmp_path):
     g = by_outcome["gated_out"]
     assert g["gates_ok"] is False and g["reject_reasons"], "拒绝理由必须入账"
     assert g["ai_text"] == HUMAN_S2, "被拒对的完整配对同样留档"
+
+
+# ============================ --ledger-only 离线门账本（lg-fix-gate-ledger-offline）
+# 钉住的事（派工 2026-09-26）：
+# ① --ledger-only 与 --dry-run 同为只读：零库写、绝不触 _persist_one/
+#    run_contrast（写库路径放断言炸弹）；
+# ② 账本行 schema 与探针口径逐字对齐：每行含 GATE_LEDGER_MARKERS
+#    （pair_id/gates_ok/persist_outcome），形状 = ledger_entry()；
+# ③ persist_outcome 如实标注：过门对 ="not_persisted"、被拒对 ="gated_out"，
+#    绝不伪写 "written" ⇒ 探针读出 n_written=0 是真值；
+# ④ 探针闭环：_parse_ledger 判 kind="gate"，n_gates_ok=过门数、n_written=0；
+# ⑤ 反向验证：探针分类只看 schema 标记、不看行数——把门账本标记
+#    （pair_id/gates_ok/persist_outcome）从行里拿掉后 _classify_ledger_rows
+#    不再返回 "gate"。注：探针 _hit 为**任一模记命中即算**（any 口径，
+#    见 k5_promotion_wire_probe._classify_ledger_rows），只删 gates_ok 而
+#    留着 pair_id/persist_outcome 时 kind 仍判 "gate"、但 n_gates_ok 必掉到
+#    0——两条都钉成断言，反向验证不许口头化。
+# ⑥ --dry-run 既有输出格式一字不动（回归 test_dry_run_zero_writes 已在）。
+
+def _probe_mod():
+    """独立名加载探针模块（与 test_k5_promotion_wire_probe_ledger 同法）。"""
+    name = "k5pl_k2_ledger_only"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = _u.spec_from_file_location(name, ROOT / "scripts" /
+                                      "k5_promotion_wire_probe.py")
+    mod = _u.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write_pairs_file(tmp_path) -> Path:
+    """1 过门对 + 1 被拒对（与 test_gate_pair_collects_all 同款构造）。"""
+    pf = tmp_path / "pairs.json"
+    pf.write_text(json.dumps({"pairs": [
+        {"human_text": HUMAN_S1, "ai_text": AI_S1,
+         "op": k2c.OP_ADD_INTERPRETATION, "scene_keys": list(SCENES),
+         "span_start": 0, "span_end": len(HUMAN_S1)},
+        {"human_text": HUMAN_S2, "ai_text": HUMAN_S2,
+         "op": k2c.OP_SPLIT_BEATS, "scene_keys": list(SCENES),
+         "span_start": 0, "span_end": len(HUMAN_S2)},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    return pf
+
+
+def _run_ledger_only_cli(tmp_path, monkeypatch):
+    """真走 CLI --ledger-only；写库入口全部放断言炸弹。返回账本行列表。"""
+    def _boom(*_a, **_k):               # pragma: no cover
+        raise AssertionError("--ledger-only 不许写库/走 live 路径")
+
+    monkeypatch.setattr(k2c, "_persist_one", _boom)
+    monkeypatch.setattr(k2c, "run_contrast", _boom)
+    pf = _write_pairs_file(tmp_path)
+    led = tmp_path / "gate_ledger.jsonl"
+    monkeypatch.setattr(sys, "argv", ["k2c", "--ledger-only",
+                                      "--pairs-file", str(pf),
+                                      "--pairs-ledger", str(led)])
+    k2c.main()
+    return [json.loads(l) for l in
+            led.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def test_ledger_only_zero_db_writes_and_truthful_outcomes(tmp_path, monkeypatch):
+    _seed()
+    with db.session() as s:
+        before = s.query(StrategyInstance).count()
+    recs = _run_ledger_only_cli(tmp_path, monkeypatch)
+    with db.session() as s:
+        assert s.query(StrategyInstance).count() == before, \
+            "--ledger-only 写了库——违反只读承诺"
+    assert len(recs) == 2
+    assert {r["persist_outcome"] for r in recs} == {"not_persisted", "gated_out"}, \
+        "persist_outcome 必须如实标注本次没有落库，绝不伪写 written"
+    assert all(r["persist_outcome"] != "written" for r in recs)
+    ok_row = next(r for r in recs if r["gates_ok"] is True)
+    bad_row = next(r for r in recs if r["gates_ok"] is False)
+    assert ok_row["persist_outcome"] == "not_persisted"
+    assert ok_row["reject_reasons"] == [] and \
+        set(ok_row["gate_results"].values()) == {"pass"}
+    assert bad_row["persist_outcome"] == "gated_out" and bad_row["reject_reasons"]
+    # schema 与 ledger_entry() 逐字对齐（同键集，探针认账本的唯一依据）
+    probe = _probe_mod()
+    for r in recs:
+        assert set(r) == set(k2c.ledger_entry(
+            k2c.ContrastPair(human_text=r["human_text"], ai_text=r["ai_text"],
+                             scene_keys=set(r["scene_keys"]), op=r["op"],
+                             span_start=r["span_start"],
+                             span_end=r["span_end"],
+                             human_sha256=r["human_sha256"]),
+            gates_ok=r["gates_ok"], gate_results=r["gate_results"],
+            reasons=r["reject_reasons"], outcome=r["persist_outcome"])), \
+            "账本行键集必须与 live 路径 ledger_entry() 完全一致"
+        assert set(probe.GATE_LEDGER_MARKERS) <= set(r), \
+            f"探针门账本标记缺位：{probe.GATE_LEDGER_MARKERS}"
+        assert isinstance(r["gates_ok"], bool) and r["pair_id"].startswith("k2pair-")
+
+
+def test_ledger_only_ledger_accepted_by_probe(tmp_path, monkeypatch, capsys):
+    """探针闭环：--ledger-only 产物喂 _parse_ledger ⇒ kind=gate、
+    n_gates_ok=过门真值、n_written=0（没落库，0 是真值不是错）。"""
+    _run_ledger_only_cli(tmp_path, monkeypatch)
+    rep = json.loads(capsys.readouterr().out)
+    assert rep["mode"] == "ledger_only" and rep["written"] == 0
+    assert rep["n_pairs"] == 2 and rep["passed"] == 1 and rep["rejected"] == 1
+    probe = _probe_mod()
+    led = probe._parse_ledger(Path(rep["ledger"]["path"]))
+    assert led["kind"] == "gate", led
+    assert led["n_gates_ok"] == 1 and led["n_written"] == 0
+    assert led["n_rows"] == 2 and led["error"] is None
+
+
+def test_ledger_only_reverse_verification_gate_markers_required(tmp_path,
+                                                                monkeypatch):
+    """反向验证（真做）：探针按 schema 标记认门账本，不看行数。
+    ① 拿掉全部三个 GATE_LEDGER_MARKERS ⇒ _classify_ledger_rows 不再判
+       "gate"（退化版「有行就算门账本」在此必红）；
+    ② 只拿掉 gates_ok（探针 any 口径下 pair_id/persist_outcome 仍命中）⇒
+       kind 仍 "gate" 但 n_gates_ok 掉到 0——gates_ok 缺失即无一行可计为
+       过门，同样钉死，不许口头化。"""
+    recs = _run_ledger_only_cli(tmp_path, monkeypatch)
+    probe = _probe_mod()
+    assert probe._classify_ledger_rows(recs) == "gate"   # 基线：本产物是门账本
+
+    stripped = [{k: v for k, v in r.items()
+                 if k not in probe.GATE_LEDGER_MARKERS} for r in recs]
+    assert probe._classify_ledger_rows(stripped) != "gate", \
+        "拿掉门账本标记后仍判 gate ⇒ 分类器退化成了「有行就算门账本」"
+
+    no_gates_ok = [{k: v for k, v in r.items() if k != "gates_ok"}
+                   for r in recs]
+    f = tmp_path / "no_gates_ok.jsonl"
+    f.write_text("\n".join(json.dumps(r, ensure_ascii=False)
+                           for r in no_gates_ok), encoding="utf-8")
+    led = probe._parse_ledger(f)
+    assert led["kind"] == "gate" and led["n_gates_ok"] == 0, \
+        "只缺 gates_ok：any 口径下仍判 gate（探针现实现如此，如实钉住），" \
+        "但绝不能再报出任何过门数"
+    assert led["n_written"] == 0
+
+
+def test_ledger_only_requires_pairs_file_and_keeps_dry_run_format(tmp_path,
+                                                                  monkeypatch):
+    """fail-closed：--ledger-only 空输入不出账本；--dry-run 既有输出格式
+    一字不动（mode=dry_run、无 ledger 键、不落任何文件）。"""
+    monkeypatch.setattr(sys, "argv", ["k2c", "--ledger-only"])
+    with pytest.raises(SystemExit, match="pairs-file"):
+        k2c.main()
+    pf = _write_pairs_file(tmp_path)
+    led = tmp_path / "should_not_exist.jsonl"
+    monkeypatch.setattr(sys, "argv", ["k2c", "--dry-run",
+                                      "--pairs-file", str(pf),
+                                      "--pairs-ledger", str(led)])
+    out = _capture_stdout_json(k2c)
+    assert out["mode"] == "dry_run" and "ledger" not in out
+    assert out["n_pairs"] == 2 and out["passed"] == 1 and out["rejected"] == 1
+    assert not led.exists(), "--dry-run 写了账本文件——既有零写承诺被改"
+
+
+def _capture_stdout_json(mod) -> dict:
+    """跑 mod.main()（argv 已由 monkeypatch 设好）并回收其 stdout JSON。"""
+    import io
+    from contextlib import redirect_stdout
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        mod.main()
+    return json.loads(buf.getvalue())
