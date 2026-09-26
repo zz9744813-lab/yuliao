@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Language Genome · 校准实验室</title>
+<title>文本校准室 · 语言基因组</title>
 <script>
   // 首次绘制前定主题，避免浅→深闪烁：优先 localStorage，否则跟随系统
   (function(){
@@ -465,10 +465,11 @@
               background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");}
   html[data-theme="dark"] body::after{mix-blend-mode:overlay;opacity:.07;}
 </style>
+<link rel="stylesheet" href="/static/editorial.css">
 </head>
 <body>
 <header>
-  <h1><i class="hmark">◆</i>语言基因组 <b>SemanticFrame 校准实验室</b></h1>
+  <h1><i class="hmark" aria-hidden="true">言</i>语言基因组 <b>文本校准室</b></h1>
   <span class="mode" id="mode-tag">…</span>
   <nav>
     <button data-tab="review" class="on">盲评</button>
@@ -478,7 +479,7 @@
   </nav>
   <div class="spop-wrap">
     <a class="tool" id="lab-entry" href="/lab/overview.html"
-       title="研究台（第二界面）：16 模块只读台账；判题仍在本页">研究台 ↗</a>
+       title="查看研究目录与只读台账；判题仍在本页">研究目录 ↗</a>
     <button class="tool" id="rv-theme-btn" onclick="toggleThemeCycle()"
             title="日间 / 夜间切换（也记忆选择）">☾</button>
     <button class="tool" id="rv-settings-btn" onclick="toggleSettings(event)"
@@ -853,8 +854,16 @@ function showDone(title, sub, kind){
   $('#rv-dlegend').style.display='none';
   $('#rv-rj').style.display='none';
   hidePop();
+  const actions = kind === 'err'
+    ? '<div class="done-actions"><button type="button" onclick="initReview()">重新读取批次</button></div>'
+    : '<div class="done-actions"><button type="button" onclick="openDoneRecords()">查看已判记录</button><a href="/lab/overview.html">打开研究目录 ↗</a></div>';
   $('#rv-hint').innerHTML = `<div class="done-panel${kind==='err'?' err':''}"><div class="big">${esc(title)}</div>
-    <div class="sub">${esc(sub||'')}</div></div>`;
+    <div class="sub">${esc(sub||'')}</div>${actions}</div>`;
+}
+function openDoneRecords(){
+  queueTab('done');
+  if($('#rv-q-wrap').style.display === 'none') toggleQueue();
+  $('#rv-q-wrap').scrollIntoView({behavior:'smooth',block:'start'});
 }
 function showLive(){
   $('#rv-ab').style.display=''; $('#rv-dock').style.display='';
@@ -936,7 +945,7 @@ async function loadNext(){
     const done = /清空/.test(e.message);
     if(done){
       batchDone = batchTotal; renderProgress();
-      showDone('本批 ' + batchTotal + ' 题已全部判定', '接下来跑 scripts/judge_matrix.py 并表 Human Prediction Matrix。');
+      showDone('本批 ' + batchTotal + ' 题已全部判定', '判定已归档。可回看已判记录，或前往研究目录查看各项统计。');
     } else { showDone('取题失败', e.message, 'err'); }
   }
 }
@@ -1477,7 +1486,7 @@ async function importFile(){ const p = $('#imp-path').value.trim(); if(!p) retur
 // ── 用量 ────────────────────────────────────────────────
 async function loadUsage(){
   const st = await api('/llm/stats');
-  $('#mode-tag').textContent = 'mode: '+st.mode;
+  $('#mode-tag').textContent = '运行档位 · ' + (st.mode === 'real' ? '真实' : st.mode === 'mock' ? '演示' : st.mode);
   $('#usage-table tbody').innerHTML = Object.entries(st.by_purpose)
     .sort((a,b)=>b[1].tokens-a[1].tokens)
     .map(([k,v])=>`<tr><td>${k}</td><td>${v.calls}</td><td>${v.tokens}</td><td>${v.failed}</td></tr>`)

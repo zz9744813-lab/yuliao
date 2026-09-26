@@ -1,0 +1,78 @@
+/* 盲评台 · 编辑档案室。A/B 两侧在判定前采用完全相同的视觉权重。 */
+:root{
+  --bg:#f2eee5;--surface:#fffdf8;--surface-2:#f9f6ef;
+  --line:#d8d1c3;--line-2:#c3baa9;--fg:#202720;--fg-2:#4d524b;--dim:#6b6c63;
+  --accent:#82643b;--accent-soft:#f3ebda;--accent-strong:#6c502f;
+  --paper-bg:#fffdf8;--ctx-fg:#666b61;--radius:4px;
+  --shadow-sm:0 1px 2px rgba(32,39,32,.035);--shadow-card:0 1px 3px rgba(32,39,32,.05);
+  --shadow-dock:0 -8px 25px rgba(32,39,32,.08);
+}
+html[data-theme="dark"]{
+  --bg:#111712;--surface:#1c231d;--surface-2:#202920;
+  --line:#354036;--line-2:#465348;--fg:#f0eee4;--fg-2:#c0c7bb;--dim:#a0a99e;
+  --accent:#d1b079;--accent-soft:#322b1c;--accent-strong:#dfc18d;
+  --paper-bg:#202620;--ctx-fg:#b8bcb1;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.16);--shadow-card:0 1px 3px rgba(0,0,0,.23);
+  --shadow-dock:0 -8px 25px rgba(0,0,0,.2);
+}
+body{background:var(--bg);background-image:none;color:var(--fg)}
+body::after,html[data-theme="dark"] body::after{display:none}
+header{height:66px;padding:0 clamp(18px,3.4vw,54px);gap:20px;background:var(--surface);border-bottom:1px solid var(--line);backdrop-filter:none;-webkit-backdrop-filter:none}
+header h1{font:600 18px/1.3 var(--serif);letter-spacing:.08em;white-space:nowrap}
+header h1 b{font:400 11px/1.4 var(--sans);letter-spacing:.1em;color:var(--dim);margin-left:5px}
+header .hmark{width:32px;height:32px;border-radius:2px;background:var(--fg);color:var(--surface);box-shadow:none;font:600 18px/1 var(--serif)}
+header .mode{border-radius:2px;font-size:10px;padding:3px 8px}
+nav{height:100%;align-items:stretch;gap:0}
+nav button{border-radius:0;padding:5px 16px;border-bottom:2px solid transparent;font-size:12px}
+nav button.on{background:transparent;color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
+nav button:hover{background:var(--surface-2)}
+main{max-width:1260px;padding:34px 25px 70px}
+.rv-top{background:transparent;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:0 0 18px;margin-bottom:18px}
+.rv-top::before{content:'READING ROOM  /  BLIND REVIEW';display:block;font:10px/1.2 ui-monospace,Consolas,monospace;letter-spacing:.17em;color:var(--accent);margin-bottom:12px}
+.rv-title{font:500 25px/1.25 var(--serif);letter-spacing:.03em}
+.rv-title #rv-batch{font:600 14px/1 var(--sans);letter-spacing:0}
+.rv-title small{font:11px/1.4 var(--sans)}
+.bar{height:4px;border:0;border-radius:0}.bar i{background:var(--accent);border-radius:0}
+.tool,button.act,input,select,.spop,.seg,.tgrp,.tgrp .tool{border-radius:3px}
+.tgrp{background:var(--surface);padding:2px}.chips{margin-top:16px}.chip{border-radius:2px}
+.hint{border-top-style:solid;margin-top:16px;padding-top:12px}
+.ctx,.ab-card,.done-panel{border-radius:3px;box-shadow:none}
+.ctx-head{padding:10px 17px;font-size:11px;letter-spacing:.09em}
+.ctx-body{background:var(--surface);padding:18px 27px}
+.ab-wrap{gap:16px}
+.ab-card{background:var(--paper-bg);border:1px solid var(--line);transition:border-color .18s ease}
+.ab-card.a,.ab-card.b{border-top:1px solid var(--line-2)}
+.ab-label{background:var(--surface);backdrop-filter:none;-webkit-backdrop-filter:none;padding:12px 21px;letter-spacing:.08em}
+.ab-card.a .ab-label,.ab-card.b .ab-label{color:var(--fg-2)}
+.ab-card.a .badge,.ab-card.b .badge,html[data-theme="dark"] .ab-card.a .badge,html[data-theme="dark"] .ab-card.b .badge{background:transparent;color:var(--fg);border:1px solid var(--line-2);box-shadow:none;border-radius:2px;width:27px;height:27px;font-family:var(--serif);font-size:16px}
+.ab-card.a.win-a,.ab-card.b.win-b{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent)}
+.ab-text{max-width:38em;padding:calc(var(--rv-pad) + 10px) calc(var(--rv-pad) + 12px)}
+.dock{background:var(--surface);border:1px solid var(--line-2);border-radius:3px;backdrop-filter:none;-webkit-backdrop-filter:none;box-shadow:var(--shadow-dock);padding:11px 13px;gap:7px}
+.dock .vb,.dock .vb.strong{border-radius:2px;box-shadow:none}
+.dock .vb.strong,.dock .vb.strong:hover,.dock .vb.picked.strong{background:var(--fg);color:var(--surface);border-color:var(--fg);box-shadow:none}
+.dock .vb.strong:hover{filter:brightness(.86)}
+html[data-theme="dark"] .dock .vb.strong,html[data-theme="dark"] .dock .vb.strong:hover,html[data-theme="dark"] .dock .vb.picked.strong{color:var(--bg)}
+.dock .vb.picked{transform:none;box-shadow:0 0 0 1px var(--accent)}
+.done-panel{padding:48px 26px;background:var(--surface);text-align:left;border-color:var(--line-2)}
+.done-panel::before{content:'BATCH ARCHIVED  /  已归档';font:10px/1.4 ui-monospace,Consolas,monospace;letter-spacing:.14em;opacity:1;margin-bottom:20px}
+.done-panel.err::before{content:'READING INTERRUPTED  /  读取中断';font-size:10px}
+.done-panel .big{font-size:25px;color:var(--fg)}.done-panel .sub{font-size:13px;max-width:70ch}
+.done-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:24px}
+.done-actions button,.done-actions a{padding:8px 14px;background:var(--fg);color:var(--surface);border:1px solid var(--fg);border-radius:2px;font:12px var(--sans);cursor:pointer;text-decoration:none}
+.done-actions a{background:transparent;color:var(--fg);border-color:var(--line-2)}
+.done-actions button:hover,.done-actions a:hover{border-color:var(--accent);color:var(--accent-strong);background:var(--surface-2)}
+.toast{border-radius:3px;box-shadow:var(--shadow-dock)}
+@media(max-width:860px){
+  header{height:auto;min-height:55px;padding:8px 12px 0;flex-wrap:wrap;gap:5px;width:100%}
+  header h1{font-size:15px;margin-right:auto}header h1 b{display:none}
+  header .spop-wrap{order:2;width:100%;margin:0;display:flex;justify-content:flex-end;gap:5px}
+  nav{order:3;width:100%;height:36px;justify-content:space-between}nav button{flex:1;padding:4px 8px}
+  main{padding:19px 12px 45px;width:100%;min-width:0;overflow-x:clip}
+  .rv-title{font-size:21px}.rv-top{padding-bottom:14px}.rv-head{display:block}
+  .rv-prog{display:grid;grid-template-columns:auto auto minmax(64px,1fr);width:100%;margin:14px 0 0;gap:8px}
+  .rv-prog .bar{width:100%;min-width:0;align-self:center}
+  .rv-prog .tgrp{grid-column:1/-1;display:flex;justify-content:space-between;max-width:100%}
+  .rv-prog .tgrp .tool{flex:1;padding:5px 7px}
+  #rv-exp{grid-column:1/-1;max-width:100%;width:100%;min-width:0}
+  .ab-text{max-width:none}.done-panel{padding:30px 20px}#tab-review>.card{width:100%;min-width:0}
+}

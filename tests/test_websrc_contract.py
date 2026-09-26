@@ -91,7 +91,7 @@ def test_lab_path_traversal_is_blocked():
 
 
 def test_shared_assets_are_served():
-    for asset in ("tokens.css", "base.css", "lg.js"):
+    for asset in ("tokens.css", "base.css", "editorial.css", "lg.js", "editorial.js"):
         r = client.get(f"/lab/_shared/{asset}")
         assert r.status_code == 200, asset
         assert len(r.text) > 200, f"{asset} 内容过短，可能被截断"
@@ -129,9 +129,10 @@ def test_each_page_declares_its_own_module():
 def test_every_page_links_shared_assets():
     for page in PAGE_SLUG:
         src = _src(page)
-        for asset in ("tokens.css", "base.css"):
+        for asset in ("tokens.css", "base.css", "editorial.css"):
             assert f"/lab/_shared/{asset}" in src, f"{page} 未引用 {asset}"
         assert "/lab/_shared/lg.js" in src, f"{page} 未引用 lg.js"
+        assert "/lab/_shared/editorial.js" in src, f"{page} 未引用 editorial.js"
 
 
 def test_no_inline_style_blocks_left():
@@ -233,6 +234,7 @@ def test_shared_js_is_syntactically_valid():
     if not node:
         pytest.skip("环境无 node，跳过前端语法检查")
     _syntax_ok((WEBSRC / "_shared" / "lg.js").read_text(encoding="utf-8"), node, "_shared/lg.js")
+    _syntax_ok((WEBSRC / "_shared" / "editorial.js").read_text(encoding="utf-8"), node, "_shared/editorial.js")
     _syntax_ok((WEBSRC / "_shared" / "selfcheck.html").read_text(encoding="utf-8")
                .split("<script>", 2)[-1].rsplit("</script>", 1)[0], node, "_shared/selfcheck.html")
 

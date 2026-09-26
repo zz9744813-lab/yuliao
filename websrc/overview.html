@@ -1,12 +1,13 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="dark">
+<html lang="zh-CN" data-theme="light">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>总览总控台 · 中文文风研究台</title>
-<script>(function(){try{var t=localStorage.getItem('lg_theme')||'dark';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<title>研究全貌 · 语言基因组</title>
+<script>(function(){try{var t=localStorage.getItem('lg_theme')||'light';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
 <link rel="stylesheet" href="/lab/_shared/tokens.css">
 <link rel="stylesheet" href="/lab/_shared/base.css">
+<link rel="stylesheet" href="/lab/_shared/editorial.css">
 </head>
 <body>
 <div class="lg-shell">
@@ -15,29 +16,28 @@
 
     <header class="lg-head">
       <div class="row">
-        <h1>总览总控台</h1>
+        <h1>研究全貌</h1>
         <span class="meta" id="genAt">—</span>
       </div>
-      <div class="sub">全项目健康度 · 语料 / 语义帧 / 候选 / 判定 / 基准，一屏总览</div>
+      <div class="sub">从原文到判断，沿着每一份可追溯的材料观察研究进展。</div>
     </header>
 
     <section class="stats" id="stats"></section>
 
     <div class="grid-2">
       <section class="card">
-        <div class="card-head"><h2>实验状态分布</h2><span class="hint">experiments.by_status</span></div>
+        <div class="card-head"><h2>实验流转</h2><span class="hint">按当前状态归档</span></div>
         <div class="card-body"><div class="bars" id="bars"></div></div>
       </section>
 
       <section class="card">
-        <div class="card-head"><h2>基准最佳模型</h2><span class="hint">benchmark_runs 均值</span></div>
+        <div class="card-head"><h2>基准记录</h2><span class="hint">准确率均值最高</span></div>
         <div class="card-body" id="bestModel"></div>
       </section>
     </div>
 
     <p class="note">
-      本页读数直接来自只读聚合接口 <span class="mono">/console/dashboard</span>，不做二次计算。
-      指标口径与各模块页一致；写操作全部在盲评台（第一界面），研究台只读。
+      本页直接展示数据库中的已记录结果。指标口径见各模块；判题与修改在盲评台进行。
     </p>
 
     <footer class="lg-foot"></footer>
@@ -45,6 +45,7 @@
 </div>
 
 <script src="/lab/_shared/lg.js"></script>
+<script src="/lab/_shared/editorial.js"></script>
 <script>
 LG.init('dashboard', function (d, el) {
   var exp = d.experiments || {};
