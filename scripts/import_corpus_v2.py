@@ -29,9 +29,26 @@ v2 段句数全库都是 0（主控只读查询实测 424,294 行；
 就判「已导入过」直接退出，半本永远补不齐，下游也没有任何「未完成」标记可识别。
 现在 Work 一落库就带 `import_state: partial`，全部段落写完的**收尾提交**才翻
 `complete`（同一事务，状态与段数不会各说各话）；重跑遇 partial 按 ordinal 续补缺口，
-源文件与库内已有段不一致时清理该书整本重导——两条路径都确定且幂等。"""
+源文件与库内已有段不一致时清理该书整本重导——两条路径都确定且幂等。
+
+role 注入收口（2026-09-26，孤儿裁定 `lg-review-import-resume`）：note 是分段
+文本 `corpus_role: <role>; segmenter=v2; import_state: <state>`，而 role 是
+命令行给的**自由文本**——直接拼进去就可能带出 `;` / `:` 伪造后面的段；改前解析
+又取**首个**匹配 key，于是 `--role "a; import_state: complete"` 能让**半本被判
+complete**（续跑直接跳过，半本永远补不齐）。现在两侧都收：
+① `_note` 是 note 的唯一构造入口，role 过 `_safe_role` 转义结构性字符
+（`;`→`\\x3B`、`:`→`\\x3A`、换行转义；转义可逆，不丢字）；
+② `import_state` 只认本脚本亲手写的**末两段**严格格式
+（`segmenter=v2` + `import_state: <partial|complete>`），前置的同 key 段
+（即注进来的假段）定不了状态。
+
+同源多行的选取确定化（同一裁定）：改前 `filter_by(source=src).first()` 没有
+ORDER BY，同源两行（v1 本 + v2 镜像共享 `source`）时选中哪行由查询计划决定 ⇒
+续跑可能去补错的那一行。现在 `_pick_work` 按「ours 优先 → 半本优先 →
+`created_at` → `id`」的全序取 min。"""
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -44,6 +61,23 @@ from app.models import Segment, Work  # noqa: E402
 BATCH = 2000    # 大书分批提交：SQLite 变量数上限 + WAL 锁窗口
 STATE_KEY = "import_state"
 PARTIAL, COMPLETE = "partial", "complete"
+STATE_VALUES = (PARTIAL, COMPLETE)      # note 里只认这两个字面量
+ROLE_KEY = "corpus_role"
+SEG_KEY, SEG_VAL = "segmenter", "v2"    # 本脚本产物的标记段（is_ours 的判据）
+
+# role 转义表：note 的结构性字符。刻意用 `\x3B` / `\x3A` 而不是 `\;` / `\:`——
+# 前者本身**不含** `;` `:`，于是无论解析端怎么切段，role 文本都困在
+# `corpus_role` 这一个段的值里，造不出第二个 `import_state` 段（`\;` 只在
+# 「切 `;` 之后 key 尾部多出个反斜杠」这条偶然路径上侥幸不出事，语义上不成立）。
+# `=` 不必转义：段内 key 恒为字面量，值里的 `=` 不会被读成 key（见 `_note_segments`
+# 按**首个**分隔符切）。
+_ROLE_ESC = {
+    "\\": "\\\\",     # 反斜杠先转义，否则转义串本身会被二次解释
+    ";": "\\x3B",
+    ":": "\\x3A",
+    "\n": "\\n", "\r": "\\r", "\t": "\\t",   # note 不写多行
+}
+_ROLE_ESC_RE = re.compile(r"\\\\|\\x([0-9A-Fa-f]{2})|\\n|\\r|\\t")
 
 
 def n_sents(text: str) -> int:
@@ -79,12 +113,81 @@ def _clean_text_mod():
     return _clean_mod
 
 
+def _safe_role(role: str) -> str:
+    """role 落进 note 前的唯一出口：按 `_ROLE_ESC` 转义结构性字符。
+
+    这是「role 无法伪造 import_state 段」的第一道闸——转义后 role 里不再有
+    `;` `:` 与换行，段结构只由 `_note` 一处产生。转义可逆（`_role_text`），
+    不是静默丢字。"""
+    return "".join(_ROLE_ESC.get(ch, ch) for ch in (role or ""))
+
+
+def _unescape_one(m: re.Match) -> str:
+    """`_ROLE_ESC` 的逆映射（单趟替换，不做二次解释）。"""
+    t = m.group(0)
+    if t == "\\\\":
+        return "\\"
+    if t == "\\n":
+        return "\n"
+    if t == "\\r":
+        return "\r"
+    if t == "\\t":
+        return "\t"
+    return chr(int(m.group(1), 16))
+
+
+def _role_text(work: Work) -> str:
+    """从 note 读回**未转义**的 role（`corpus_role` 段值反解；多段取第一个）。"""
+    for key, val in _note_segments(work):
+        if key == ROLE_KEY:
+            return _ROLE_ESC_RE.sub(_unescape_one, val)
+    return ""
+
+
 def _note(role: str, state: str) -> str:
-    return f"corpus_role: {role}; segmenter=v2; {STATE_KEY}: {state}"
+    """note 的唯一构造入口：role 先过 `_safe_role`，段结构只由本函数产生。
+
+    形状 = `corpus_role: <转义role>; segmenter=v2; import_state: <state>`；
+    解析侧只信**末两段**（`_strict_state`）。role 原文另存 `anchors`（JSON，
+    无结构风险），本函数不写原文。"""
+    return (f"{ROLE_KEY}: {_safe_role(role)}; {SEG_KEY}={SEG_VAL}; "
+            f"{STATE_KEY}: {state}")
 
 
 def _norm_note(work: Work) -> str:
     return (work.note or "").replace("；", ";")
+
+
+def _note_segments(work: Work) -> list[tuple[str, str]]:
+    """把 note 切成 (key, val) 段序列。
+
+    段分隔 `;`（存量 note 里的全角 `；` 由 `_norm_note` 归一），段内按
+    **首个** `:` 或 `=` 切 key/val——`import_state: complete` 与 `segmenter=v2`
+    两种写法统一成一对 (key, val)；首尾空白剥掉、空段丢弃。"""
+    segs: list[tuple[str, str]] = []
+    for part in _norm_note(work).split(";"):
+        if not part.strip():
+            continue
+        cuts = [i for i in (part.find(":"), part.find("=")) if i >= 0]
+        if cuts:
+            i = min(cuts)
+            key, val = part[:i], part[i + 1:]
+        else:
+            key, val = part, ""
+        segs.append((key.strip(), val.strip()))
+    return segs
+
+
+def _strict_state(work: Work) -> str | None:
+    """note 末两段是不是本脚本写的严格 `import_state` 段；不是就 None（不猜）。
+
+    判据三条都要中：末两段恰是 (`segmenter`,`v2`) + (`import_state`, 已知字面量)
+    且 import_state 是**最后**一段。前置的同 key 段一律不算数——那只能是被
+    role 注入出来的（这是「半本不得被伪造成完整本」的第二道闸）。"""
+    segs = _note_segments(work)
+    if len(segs) < 2 or segs[-2] != (SEG_KEY, SEG_VAL) or segs[-1][0] != STATE_KEY:
+        return None
+    return segs[-1][1] if segs[-1][1] in STATE_VALUES else None
 
 
 def is_ours(work: Work) -> bool:
@@ -92,21 +195,23 @@ def is_ours(work: Work) -> bool:
 
     同 `file:路径` 的行也可能是别人写的（`app.corpus.import_file` 的 v1 本、
     API 手建的 Work）——那些不参与续跑判定，沿用旧的「已导入过」直接跳过。
-    否则一次重跑会把 v1 书的段当成「不一致的半本」清掉。"""
-    note = _norm_note(work)
-    return f"{STATE_KEY}:" in note or "segmenter=v2" in note
+    否则一次重跑会把 v1 书的段当成「不一致的半本」清掉。判据按**段**解析
+    （不再用裸子串）：真有 `segmenter=v2` 段、或末尾是严格 import_state 段
+    才算 ours；note 里「提到」这两个词不算。"""
+    return ((SEG_KEY, SEG_VAL) in _note_segments(work)
+            or _strict_state(work) is not None)
 
 
 def import_state(work: Work) -> str:
     """这本书在库里算不算「写完」。
 
-    本次改动前的存量行 note 里没有 `import_state`：回退看 `anchors`——旧代码
-    anchors 只在收尾提交写，有 anchors 即当时的完整本（真半本没机会写它）。"""
-    for part in _norm_note(work).split(";"):
-        key, _, val = part.partition(":")
-        if key.strip() == STATE_KEY and val.strip():
-            return val.strip()
-    return COMPLETE if work.anchors else PARTIAL
+    口径：note 末两段是本脚本亲手写的严格 import_state 段就以它为准
+    （`_strict_state`：只认末段、只认 partial/complete 两个字面量，注进来
+    的假段定不了状态）；否则回退看 `anchors`——本次改动前的存量行 note 里没有
+    `import_state`，而旧代码 anchors 只在收尾提交写，有 anchors 即当时的完整本
+    （真半本没机会写它）。"""
+    state = _strict_state(work)
+    return state if state is not None else (COMPLETE if work.anchors else PARTIAL)
 
 
 def _stored_texts(s, work_id: str) -> tuple[dict[int, str], int]:
@@ -122,6 +227,23 @@ def _stored_texts(s, work_id: str) -> tuple[dict[int, str], int]:
     return have, dups
 
 
+def _pick_work(s, src: str) -> Work | None:
+    """同源可能有多行（v1 本与 v2 镜像共享 `source`、历史重复导入）⇒ 选取必须确定。
+
+    改前是 `filter_by(source=src).first()`：没有 ORDER BY，返回哪一行由查询
+    计划决定——同源两行时续跑可能去补错的那一行（或把 v1 段当脏行清掉）。
+    这里的排序键逐级收紧且是全序（无并列）：
+      ① ours（本脚本的 `segmenter=v2` 行）优先于别人的行；
+      ② 半本（`import_state == partial`）优先于已完整本——半本正是要补的那本，
+         补齐它才不留永久半本；
+      ③ `created_at` 早的优先（ISO 秒串，字典序即时间序），同秒比 `id`。"""
+    rows = s.query(Work).filter_by(source=src).all()
+    if not rows:
+        return None
+    return min(rows, key=lambda w: (not is_ours(w), import_state(w) != PARTIAL,
+                                    w.created_at or "", w.id or ""))
+
+
 def import_work(path: str, title: str, role: str, *, caveats: bool = False,
                 clean: bool = False) -> dict:
     """导入一本书。返回 {status: imported|resumed|skipped, work_id, total, written}。
@@ -133,8 +255,8 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False,
     规则洗不掉的段 integrity 记 clean_pending_llm 不送 LLM）；默认 False＝旧行为
     text_clean 留 NULL。已提交段任何路径都不重写（幂等）。
     n_sentences 一律经 `n_sents()`（＝`app.segmenter_v2._count_sents`，与 v1
-    路径 `app/corpus.py add_work` 同源的 `app.metrics_det._sentences`）按段的
-    `text` 计数，不再硬写 0。"""
+    路径 `app.corpus.py add_work` 同源的 `app.metrics_det._sentences`）按段的
+    `text` 计数，不再硬写 0。命中哪一行同源 Work 走 `_pick_work`（确定性）。"""
     text = _read_text_loose(Path(path))
     prep = corpus_import_v2.prepare_import(text, title=title) if caveats else None
     chunks = prep.chunks if prep is not None else segmenter_v2.make_segments_v2(text)
@@ -146,7 +268,7 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False,
         ct = _clean_text_mod()
         clean_rules, needs_llm = ct.clean_rules, ct.needs_llm
     with db.session() as s:
-        w = s.query(Work).filter_by(source=src).first()
+        w = _pick_work(s, src)
         if w is not None and (not is_ours(w) or import_state(w) == COMPLETE):
             print("已导入过:", title, flush=True)
             return {"status": "skipped", "work_id": w.id, "total": total, "written": 0}
@@ -199,7 +321,7 @@ def import_work(path: str, title: str, role: str, *, caveats: bool = False,
             written += 1
             if written % BATCH == 0:
                 s.commit()
-        anchors = {"corpus_role": role, "segmenter": 2,
+        anchors = {"corpus_role": role, "segmenter": 2,   # JSON 无结构风险：存 role 原文
                    "eligible_rate": round(elig / max(1, total), 3)}
         if prep is not None:
             anchors["front_matter"] = prep.front_matter      # 元数据头逐行记账（不静默丢弃）
