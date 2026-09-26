@@ -50,9 +50,17 @@
     warning 并**自愈接管**（unlink 后 O_EXCL 重建/放行，与损坏锁超宽
     限同口径）——硬杀残留不再需要人工删锁；
   - pid 查询失败/权限不足/平台无法核验/pid 仍存在（含被系统复用给无
-    关进程）→ 一律按「有人持有」硬拦，拒绝信息给出锁路径，人工核实
-    后清除。纪律：宁可拦，不可猜——**只有 pid 确定不存在才自愈**，
-    绝不放宽成“看着像残留就删”。
+    关进程）→ 一律按「有人持有」硬拦，拒绝信息给出锁路径 **+ 可复制的
+    `tasklist` 核查/清锁命令**（`_ops_dispose_hint`，2026-09-26 OPEN-6
+    入册），人工核实后清除。纪律：宁可拦，不可猜——**只有 pid 确定不存
+    在才自愈**，绝不放宽成“看着像残留就删”。
+- 残留（2026-09-26 OPEN-6 入册，明写不掩盖）：硬杀 + 新鲜 mtime ⇒ 整套件
+  fail-fast exit 2，持续到 mtime 超 15s 宽限（约 15s，自愈，**非永久**）；
+  **pid 被系统复用给无关进程 ⇒ 永久砖化**（`_pid_looks_live` 只按「存在」
+  判，不核验进程身份；取舍理由见 `_dead_pid_and_stale` docstring 的
+  「pid 复用风险」段）。两条路径的唯一出口都是**人工处置**，故拒绝信息必
+  须自带可执行命令而不只是锁路径——见 `_ops_dispose_hint` 与固定路径的运
+  维 runbook `docs/R6守卫覆盖缺口入册第二批_20260926.md`。
 - 损坏锁处置口径（2026-09-23 收口选定）：锁文件存在但内容不可解析
   （空文件/半截 JSON，典型于 O_EXCL 建文件成功与 json.dump 写完之间进
   程被杀）——宽限期 CORRUPT_LOCK_GRACE_SECONDS（15s）内**按「存在」
@@ -92,6 +100,10 @@ CORRUPT_LOCK_GRACE_SECONDS = 15.0
 
 # pytest 侧持锁的 purpose 标识（conftest 整轮持锁；live 侧拒绝信息可见）
 PYTEST_LOCK_PURPOSE = "pytest"
+
+# 运维处置 runbook 的**固定文档路径**（2026-09-26 OPEN-6 入册）。拒绝信息里
+# 的运维段直接指向它——「锁被拒了怎么办」不能只存在于某个 issue/PR 里。
+OPS_RUNBOOK_DOC = "docs/R6守卫覆盖缺口入册第二批_20260926.md"
 
 
 def lock_path() -> Path:
@@ -209,6 +221,61 @@ def _warn_dead_pid_stale(p: Path, held: dict) -> None:
         f"可自愈接管（原内容：{held}）：{p}", stacklevel=2)
 
 
+def _ops_dispose_hint(held: dict | None, p: Path) -> str:
+    """拒绝信息里的**可复制**运维处置段（2026-09-26 OPEN-6 入册）。
+
+    本函数**只产文案**，不读进程表、不动锁文件——互斥/取锁/释放语义零改动
+    （OPEN-6 的收口判据只要求拒绝信息里出现可复制的 `tasklist` 提示）。
+
+    为什么必须有它（两种「拒了但活不下去」的形态，都只能人工处置）：
+    - 形态一（有限砖化）：硬杀 + mtime 尚在
+      CORRUPT_LOCK_GRACE_SECONDS 内 → 整套件 fail-fast exit 2 约 15s，
+      宽限一过自动自愈。行为符合设计，**不需要**人工干预，但运维在 15s
+      内只会看到一条红色退出信息。
+    - 形态二（**永久**砖化）：锁内 pid 已被系统复用给无关进程 ⇒
+      `_pid_looks_live` 永远返回「存在」⇒ 永不自动自愈。既有文案只给锁路
+      径，运维既不知道要看 pid、也不知道用什么命令确认，只能靠猜。
+    故此处把「①怎么确认锁内 pid ② `tasklist` 怎么查该 pid ③确认无实跑后
+    怎么清锁」三步直接写进拒绝信息，pid 与锁路径均已按本例实参代入——运维
+    复制即可执行，不需要自己拼模板。
+
+    纪律不改：文案只给**核查与清锁**步骤，「删前必须确认那不是实跑」写进
+    ②③，宁可拦不可猜；本函数绝不替人删锁（真删除仍只在
+    `_corrupt_and_stale`/`_dead_pid_and_stale` 双条件自愈路径里发生）。
+
+    损坏锁（无 pid 可核）走另一条 ②——按 pid 过滤的命令在无 pid 时不可复
+    制，给的是「列出候选进程人工确认」；两条分支都带字面量 `tasklist`。
+    """
+    pid = (held or {}).get("pid")
+    if isinstance(pid, int):
+        step12 = (
+            f"\n ① 锁内 pid 就是本条消息里 held 的 pid 字段：{pid}。"
+            f"\n ② 确认该 pid 此刻有没有被占用（Windows 首选，可直接复制）："
+            f'tasklist /FI "PID eq {pid}" /NH'
+            f"\n    （POSIX 备选：ps -p {pid} -o pid,cmd）"
+            f"——无输出＝pid 确定不存在＝崩溃残留，"
+            f"等 {CORRUPT_LOCK_GRACE_SECONDS:g}s 自愈宽限过后守卫会自愈接管、"
+            f"一般无需手清；有输出但确认不是实跑（如 pid 被复用的无关进程，"
+            f"此时**永不**自动自愈）→ 走 ③。"
+        )
+    else:
+        step12 = (
+            f"\n ① 锁内容不可解析（corrupt_lock），**无 pid 可核**——不满足"
+            f"「死 pid」判据，只能人工判定；先用 ② 确认本机确无实跑在跑。"
+            f"\n ② 列出候选进程人工确认（Windows，可直接复制）："
+            f'tasklist /FI "IMAGENAME eq python.exe" /NH'
+            f"\n    （POSIX 备选：ps -ef | grep python）"
+            f"——确认无实跑进程后走 ③。"
+        )
+    step3 = (
+        f"\n ③ 确认无人持锁后人工清除该锁文件再重跑（跨平台，可直接复制）："
+        f'\n    "{sys.executable}" -c "import os;os.remove(r\'{p}\')"'
+        f"\n    删前务必确认 ② 的结果里没有实跑进程——宁可拦，不可猜；"
+        f"只删这一把锁文件，勿用任何递归/批量删除命令。"
+    )
+    return f"\n 运维处置（runbook：{OPS_RUNBOOK_DOC}）：{step12}{step3}"
+
+
 def _acquire_lock(p: Path, info: dict) -> None:
     """在 p 处 O_EXCL 原子取锁；「损坏且超宽限」或「死 pid 且超宽限」的
     残留锁自愈接管一次。
@@ -233,7 +300,8 @@ def _acquire_lock(p: Path, info: dict) -> None:
                 continue
             raise SystemExit(
                 f"[live 互斥守卫] 已有 live 实跑/pytest 持锁（{held}）——拒绝重叠"
-                f"（R6：live 不与 live/pytest 并发）；锁：{p}")
+                f"（R6：live 不与 live/pytest 并发）；锁：{p}"
+                + _ops_dispose_hint(held, p))
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(info, f, ensure_ascii=False)
         return
@@ -371,7 +439,11 @@ def refuse_if_live_running(context: str, *, watch: Path | None = None) -> None:
     记 warning 并按「不存在」放行（自愈接管由随后的取锁完成）。
     死 pid 锁（2026-09-25 收口）：内容合法 + pid 确定不存在 + 超宽限 → 同
     样判为崩溃残留放行（硬杀残留不再 brick 套件）；pid 查询失败/权限不
-    足/pid 仍存在 → 一律按「存在」拦。"""
+    足/pid 仍存在 → 一律按「存在」拦。
+
+    拒绝出口（2026-09-26 OPEN-6 入册）除锁路径外还带 `_ops_dispose_hint`
+    的可复制 `tasklist` 核查/清锁命令——pid 被复用给无关进程时本条永不
+    自动自愈，运维必须有一条不含猜测的出路（**仅文案，判定逻辑未变**）。"""
     p = prod_lock_path() if watch is None else watch
     held = _info_at(p)
     if held is None:
@@ -385,4 +457,5 @@ def refuse_if_live_running(context: str, *, watch: Path | None = None) -> None:
     raise SystemExit(
         f"[live/pytest 互斥守卫] live 实跑进行中（{held}）——拒绝 {context}"
         f"（R6：全绿结论不许被并发 live 污染）。等 live 结束；若 live "
-        f"已崩溃遗留死锁，人工核实后清除：{p}")
+        f"已崩溃遗留死锁，人工核实后清除：{p}"
+        + _ops_dispose_hint(held, p))
