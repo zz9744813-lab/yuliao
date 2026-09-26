@@ -404,7 +404,28 @@ def _render_whitelist_sections(res: dict) -> list[str]:
     return L
 
 
-def render_markdown(res: dict) -> str:
+PLACEHOLDER_EXIT = "未实跑（模板占位，非本次实跑证据）"
+EXTERNAL_EXIT = "未取得（外部验收命令）"
+
+
+def _exit_cell(run_rc: int | None) -> str:
+    """§0 的 exit 单元格：**只由实跑返回码派生**，无 rc 则显式渲染为占位说明。
+
+    不许在这里写死任何退出码：仓库外独立复核
+    `F:/Hermes/team/reviews/REVIEW_audit_residuals_round2_20260925.md` §3 注记 2
+    判出「旧版 §0 的两行 exit 0 是 `render_markdown` 的硬编码字面量，无论实跑成败
+    都会印出来 ⇒ §0 的 exit 0 不构成执行证据」。故本函数只做两件事：把传进来的
+    实跑 rc 原样渲染，或在拿不到 rc 时明写「未实跑（模板占位，非本次实跑证据）」。
+    """
+    return PLACEHOLDER_EXIT if run_rc is None else str(run_rc)
+
+
+def render_markdown(res: dict, run_rc: int | None = None) -> str:
+    """渲染报告。`run_rc` = 本次实跑返回码（由 `main()` 传进来）；None = 未实跑。
+
+    判据数字（§1/§2/§3/§5）全部由 `res`（真跑只读复算）派生；§0 的 exit 状态
+    由 `run_rc` 派生或渲染为占位说明——**两处都不许写死**。
+    """
     m = res["measured"]
     mn = res["min_per_work"]
     cal = res["calibers"]
@@ -420,15 +441,25 @@ def render_markdown(res: dict) -> str:
     add(f"- 达标判据（复核者指定）：≥{res['need_works']} 作品在口径 A 下各自 "
         f"≥{mn:,} 段。")
     add("")
-    add("## 0. 实跑命令")
+    add("## 0. 实跑命令（exit 由实跑返回码派生，无写死值）")
     add("")
-    add("```")
-    add("F:/Hermes/hermes-agent/venv/Scripts/python.exe scripts/k5_supply_recount.py")
-    add("→ exit 0（stdout 与本文件同口径逐作品输出，可复算）")
-    add("F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest "
-        "tests/test_k5_supply_recount.py -q")
-    add("→ exit 0（临时夹具库，不依赖真库）")
-    add("```")
+    add("exit 列是**实跑返回码的原文**，经 `render_markdown(res, run_rc=…)` 传参"
+        "渲染；未传 `run_rc` 时渲染为「未实跑（模板占位，非本次实跑证据）」——"
+        "生成器不自证任何未跑过的退出码。")
+    add("")
+    add("| 命令 | exit | 证据来源 |")
+    add("|---|---:|---|")
+    add(f"| `F:/Hermes/hermes-agent/venv/Scripts/python.exe "
+        f"scripts/k5_supply_recount.py` | {_exit_cell(run_rc)} | "
+        f"本次重生成本文档的那一次调用（`run_at` = {res['run_at']}）："
+        f"stdout 与本文件 §1/§2/§3 同口径逐作品输出，可复算 |")
+    add(f"| `F:/Hermes/hermes-agent/venv/Scripts/python.exe -m pytest "
+        f"tests/test_k5_supply_recount.py -q` | {EXTERNAL_EXIT} | "
+        f"外部验收命令（另一个进程）：本生成器**无法自证**它的退出码，"
+        f"须由验收会话实跑后回填原文；本脚本不预置任何 exit 值 |")
+    add("")
+    add("> 取不到库的失败路径（`--db` 不存在 / 找不到库）在渲染之前就 `return 2`，"
+        "故带 exit 行的文档只在复算真正跑通后落盘。")
     add("")
     add("## 1. src_ok 覆盖口径（键存在性五分类，全库）")
     add("")
@@ -610,8 +641,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.print_only:
         out = Path(args.out_doc)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(render_markdown(res), encoding="utf-8")
-        print(f"[k5_supply_recount] 已写 {out.as_posix()}")
+        # §0 的 exit 状态由本次实跑返回码派生（不是写死的字面量）：走到这一步
+        # 说明复算已跑通、写文档这一步尚未失败，故 rc=0；若上面任何一步失败，
+        # 已在渲染前 return 非 0，不会留下带 exit 行的文档。
+        run_rc = 0
+        out.write_text(render_markdown(res, run_rc=run_rc), encoding="utf-8")
+        print(f"[k5_supply_recount] 已写 {out.as_posix()}"
+              f"（§0 exit 状态取本次实跑 rc={run_rc}，非硬编码）")
     return 0
 
 

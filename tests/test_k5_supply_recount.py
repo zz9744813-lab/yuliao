@@ -403,3 +403,76 @@ def test_render_markdown_has_whitelist_revision_section(tmp_path):
     assert "identity_purposes" in md                # 新判据列名在文档
     assert "成员资格翻转" in md and "新纳入" in md   # §2.6 覆汉治理证据
 
+
+# ── ⑤d：§0 的 exit 状态必须由实跑返回码派生（生成器自印假证据收口）─────
+# 仓库外独立复核 §3 注记 2：旧 `render_markdown` 把两行 `→ exit 0` 硬编码进 §0，
+# 无论实跑成败都会印出来 ⇒ §0 的 exit 0 不构成执行证据。修法：exit 由
+# `run_rc` 传参渲染（拿不到就渲染「未实跑（模板占位，非本次实跑证据）」），
+# 外部 pytest 命令恒为「未取得」，本脚本不预置任何退出码。
+
+def _section0(md: str) -> str:
+    """§0 小节正文（从 `## 0.` 到下一个 `## ` 止）。"""
+    lines = md.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("## 0."))
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("## ")), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def _exit_cells(sec0: str) -> list[str]:
+    """§0 表格里两行的 exit 单元格（按行序）。"""
+    return [ln.split("|")[2].strip() for ln in sec0.splitlines()
+            if ln.startswith("| `F:/Hermes/hermes-agent/venv/Scripts/python.exe")]
+
+
+def test_markdown_exit_status_is_derived_from_run_rc(tmp_path):
+    """核心回归：**文档 §0 的 exit 状态与传入 rc 逐格一致**。"""
+    res = _result(tmp_path, min_per_work=10_000)
+    for rc in (0, 1, 2, 7, 255):
+        cells = _exit_cells(_section0(k5sr.render_markdown(res, run_rc=rc)))
+        assert cells == [str(rc), k5sr.EXTERNAL_EXIT], \
+            f"传入 rc={rc} 时 §0 的 exit 单元格应逐字等于它（自跑行）+ 未取得（外部行）"
+
+
+def test_markdown_without_run_rc_is_marked_placeholder_not_evidence(tmp_path):
+    """拿不到实跑 rc ⇒ 显式占位，**不得**出现任何写死的退出码。"""
+    res = _result(tmp_path, min_per_work=10_000)
+    md = k5sr.render_markdown(res)
+    sec0 = _section0(md)
+    assert _exit_cells(sec0) == [k5sr.PLACEHOLDER_EXIT, k5sr.EXTERNAL_EXIT]
+    assert k5sr.PLACEHOLDER_EXIT == "未实跑（模板占位，非本次实跑证据）"
+    assert "exit 0" not in sec0, "未实跑时 §0 不许出现任何 exit 数值"
+    assert "模板占位" in sec0 and "非本次实跑证据" in sec0
+
+
+def test_generator_source_has_no_hardcoded_exit_zero_claim():
+    """源码级反硬编码：生成器里不许再出现写死的 `→ exit 0` 字面量。"""
+    src = (ROOT / "scripts" / "k5_supply_recount.py").read_text(encoding="utf-8")
+    body = src.split("def render_markdown", 1)[-1]
+    assert "→ exit" not in src and "→ exit" not in body, \
+        "生成器源码里不许再硬编码 `→ exit N` 字面量（§0 的 exit 必须传参派生）"
+    assert "exit 0（" not in src, "旧版硬编码的 `exit 0（…）` 字面量必须消失"
+
+
+def test_cli_written_doc_exit_status_matches_return_code(tmp_path):
+    """CLI 落盘的文档：§0 的 exit 单元格 == main() 的返回码。"""
+    db = make_db(tmp_path)
+    outdoc = tmp_path / "out" / "recount.md"
+    rc = k5sr.main(["--db", str(db), "--min-per-work", "2",
+                    "--out-doc", str(outdoc)])
+    assert rc == 0
+    cells = _exit_cells(_section0(outdoc.read_text(encoding="utf-8")))
+    assert cells == [str(rc), k5sr.EXTERNAL_EXIT], \
+        "落盘文档 §0 的 exit 状态与实跑返回码不一致"
+    # 真实读数证据仍须在（不放宽既有门）：判据数字与逐作品表原样落盘
+    text = outdoc.read_text(encoding="utf-8")
+    assert "口径 A" in text and "src_ok" in text and "未校验" in text
+
+
+def test_cli_failed_run_writes_no_doc_with_exit_row(tmp_path):
+    """取不到库的失败路径在渲染前就返回非 0 ⇒ 不许落盘带 exit 行的文档。"""
+    outdoc = tmp_path / "out" / "never.md"
+    rc = k5sr.main(["--db", str(tmp_path / "nope.db"), "--out-doc", str(outdoc)])
+    assert rc != 0
+    assert not outdoc.exists(), "实跑失败的这一轮不许写出声称 exit 的文档"
+
