@@ -30,6 +30,11 @@
    实验 e 已复现真实重叠）——app/live_guard.py 取锁入口
    `_lock_scope_divergence` 硬拦；test_open3_* 钉拒绝口径与放行对照
    （显式设 LG_LOCK_DIR＝声明隔离意图 ⇒ 放行）。
+9. **OPEN-4（2026-09-26 第二批入册，测试卫生）**：干净源检出里裸跑
+   （未设 LG_LOCK_DIR）会在检出目录创建 data/ 整轮锁位——tests/conftest.py
+   现在响亮 warning + 收尾清除本轮自创的空目录；test_open4_* 用**仿造根
+   子进程**（复制 app/ + tests/conftest.py 到临时目录跑真 pytest）钉该
+   行为，不触碰本仓真实 ROOT/data。
 
 纪律：只起子进程验证协议，不碰 DB、不跑 --live 开放路径。
 """
@@ -37,6 +42,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -516,3 +522,45 @@ def test_child_probe_noop_for_nested_pytest_runs():
     assert info["purpose"] == LG.PYTEST_LOCK_PURPOSE, \
         "测试阶段 pytest 侧未持有整轮锁——只查不持复发"
     assert info["pid"] == os.getpid(), "整轮锁持有者须是本 pytest 进程"
+
+
+# ── 9. OPEN-4：裸跑套件不在源检出里留下 data/ 副作用（响亮 warning + 自清）──
+
+def test_open4_bare_pytest_warns_and_leaves_no_data_dir(tmp_path):
+    """裸跑（未设 LG_LOCK_DIR）的整轮锁位=ROOT/data，_acquire_lock 的
+    mkdir 会在干净检出目录里**创建** data/（2026-09-26 主控实测：rc=5 一
+    轮后检出里多出 data/）——对不在源检出跑套件的 reviewer/agent 是意外
+    副作用。用**仿造根**复现（app/ + tests/conftest.py 复制进临时目录，
+    config.ROOT 随复制位置漂移），全程不碰本仓真实 ROOT/data：
+    1) 响亮 warning：输出含 OPEN-4 与 LG_LOCK_DIR 字面量（收口判据 a，
+       warning 文本由此回归断言到）；
+    2) 收尾自清：本轮创建的 data/ 在 sessionfinish 后不存在（收口判据 b
+       的机理——真 worktree 里同理由 git status --porcelain 不再出现
+       data/，见 docs/R6守卫覆盖缺口入册第二批_OPEN4-5_20260926.md 实跑读数）；
+    3) warning 不改变结果：该轮 1 passed、rc=0。"""
+    fake = tmp_path / "fake_root"
+    (fake / "app").mkdir(parents=True)
+    (fake / "tests").mkdir(parents=True)
+    for rel in ("app/__init__.py", "app/config.py", "app/live_guard.py",
+                "tests/conftest.py"):
+        shutil.copyfile(ROOT / rel, fake / rel)
+    (fake / "tests" / "test_probe.py").write_text(
+        "def test_child_probe_marker():\n    assert True\n",
+        encoding="utf-8")
+    env = os.environ.copy()
+    env.pop("LG_LOCK_DIR", None)                  # 伪造「裸跑」口径
+    env.pop("LG_DATA_DIR", None)
+    env["PYTHONPATH"] = str(fake) + os.pathsep + env.get("PYTHONPATH", "")
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_probe.py",
+         "-o", "addopts=", "-q", "-p", "no:cacheprovider"],
+        cwd=str(fake), env=env,
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=TIMEOUT_S)
+    out = r.stdout + r.stderr
+    assert "OPEN-4" in out and "LG_LOCK_DIR" in out, \
+        f"裸跑必须打响亮 OPEN-4 warning（判据 a）：{out[-800:]}"
+    assert "1 passed" in out and r.returncode == 0, \
+        f"warning 不得改变本轮结果：rc={r.returncode} {out[-800:]}"
+    assert not (fake / "data").exists(), \
+        "本轮在检出目录创建的 data/ 必须收尾清除（判据 b）"
