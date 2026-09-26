@@ -678,8 +678,16 @@ def test_missing_db_reports_unreadable_not_guess(tmp_path, monkeypatch):
     之外——本文件任何用例都不得打开真库。"""
     monkeypatch.setattr(GE, "DB_FALLBACK_ABS",
                         str(tmp_path / "outside" / "absent.db"))
-    assert _main(tmp_path / "nope.db", "--dry-run") == k5w.EXIT_ERROR
-    assert _main(tmp_path / "nope.db", "--verify-audits") == k5w.EXIT_ERROR
+    # 2026-09-26 主控修：本用例必须让**全部**候选都不存在才算「不可读」。
+    # 原写法只换了 DB_FALLBACK_ABS，`--repo-root` 仍取默认 ROOT ⇒ 在**主仓 cwd**
+    # 下第二候选 `<repo>/data/language_genome.db`（真库 439MB）存在 ⇒ 命中真库、
+    # rc=2（NO-PROMOTE）而非 rc=1，既假红又真的打开了生产库（与本用例 docstring
+    # 「本文件任何用例都不得打开真库」自相矛盾）。worktree 里无 data/ ⇒ 恰好掩盖。
+    empty_root = tmp_path / "emptyrepo"
+    empty_root.mkdir()
+    for argv in (["--dry-run"], ["--verify-audits"]):
+        assert _main(tmp_path / "nope.db", *argv,
+                     "--repo-root", str(empty_root)) == k5w.EXIT_ERROR
 
 
 def test_explicit_db_wins_over_repo_candidates(tmp_path):
