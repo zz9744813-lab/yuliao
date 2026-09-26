@@ -100,13 +100,47 @@ def nonbenchmark_compliant_source(source_type) -> bool:
         NONBENCHMARK_SOURCE_TYPE_PREFIX)
 
 
-def _src_ok(seg) -> bool:
-    """源检查闸（口径与旧实现逐字一致）：integrity.src_ok 必须是 True。"""
+def integrity_dict(seg_or_value) -> dict:
+    """integrity 原文 → dict 的唯一安全解析层（纯函数，绝不抛异常）。
+
+    带 .integrity 属性的对象取其属性；已是 dict 直接用；解析失败、空值、
+    **合法 JSON 但非字典**（[1,2]/"ok"/42/null）一律 → {}。
+    旧写法 `json.loads(raw).get(...)` 对非字典 JSON 抛 AttributeError——
+    读取侧崩溃点的根因，本函数即其收口。"""
+    raw = seg_or_value.integrity if hasattr(seg_or_value, "integrity") else seg_or_value
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
     try:
-        integ = json.loads(seg.integrity or "{}")
+        parsed = json.loads(raw)
     except Exception:                                      # noqa: BLE001
-        integ = {}
-    return integ.get("src_ok") is True
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def integrity_flag_state(seg_or_value, key: str) -> bool | None:
+    """integrity[key] 的严格三态：JSON true→True，JSON false→False，
+    其余（缺键/"false"/1/0/null/非字典/解析失败）→ None = **未校验**。"""
+    v = integrity_dict(seg_or_value).get(key)
+    return v if v is True or v is False else None
+
+
+def src_ok_state(seg_or_value) -> bool | None:
+    """src_ok 三态口径（与写入侧 source_check.parse_src_ok 同语义，读取镜像）。"""
+    return integrity_flag_state(seg_or_value, "src_ok")
+
+
+def src_ok_strict(seg_or_value) -> bool:
+    """源检查闸唯一读取入口（**严格布尔**，fail-closed）：integrity.src_ok
+    必须是 JSON 布尔 true 才过闸；未校验（缺键/类型不严/非字典/解析失败）
+    一律不过，且绝不抛异常。"""
+    return src_ok_state(seg_or_value) is True
+
+
+def _src_ok(seg) -> bool:
+    """兼容旧调用名：口径完全等价于 src_ok_strict(seg)。"""
+    return src_ok_strict(seg)
 
 
 def _registry_by_work(s) -> dict:

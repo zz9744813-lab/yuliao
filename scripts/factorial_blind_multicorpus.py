@@ -25,6 +25,7 @@ from app import config, db
 from app.context_ablation import neighbors
 from app.models import Candidate, Frame, Segment
 from app.reconstruct import RECON_PROMPT_VERSION as PV_B0
+from k2_extract_backfill import integrity_flag_state  # noqa: E402  严格布尔解析层同源
 
 BLIND_DIR = Path(__file__).resolve().parent.parent / "data" / "blind"
 
@@ -40,12 +41,10 @@ PV_C, PV_D = "recon_ctx_v1", "recon_ctxonly_v1"
 
 
 def _eligible(seg: Segment) -> bool:
-    if not seg.integrity:
-        return False
-    try:
-        return bool(json.loads(seg.integrity).get("eligible"))
-    except (TypeError, ValueError):
-        return False
+    """naturalness-eligible 闸：**严格布尔**（JSON true 才过），非字典/类型不严/
+    解析失败=未校验→不过闸，绝不抛异常。写入侧 app/segment_integrity.py 恒落
+    严格 bool（bool(eligible)），收紧 bool(...) 松判口径对真库无行为差。"""
+    return integrity_flag_state(seg, "eligible") is True
 
 
 def _groups_by_model(s, eid: str, frame_ids: set) -> dict:

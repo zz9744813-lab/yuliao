@@ -34,6 +34,7 @@ from app.models import BenchmarkItem, BenchmarkSet, ControlledCorruption, Segmen
 from app.ids import new_id  # noqa: E402
 from scripts.source_check import rule_defects  # noqa: E402
 from app.typo_map import RULES as _TYPO_RULES  # noqa: E402  单一事实源（T-CORPUS-V2）
+from k2_extract_backfill import src_ok_strict  # noqa: E402  src_ok 读取侧唯一入口（同源消费）
 
 # 频次自洽确认过的系统性错字（规则本体收敛到 app/typo_map.py；works=允许修复的作品）
 TYPO_TABLE = [
@@ -160,10 +161,8 @@ def report() -> dict:
 
 
 def _json_ok(raw) -> bool:
-    try:
-        return json.loads(raw or "{}").get("src_ok") is True
-    except Exception:
-        return False
+    # 口径同源：k2_extract_backfill.src_ok_strict（严格布尔，非字典/解析失败=未校验→False）
+    return src_ok_strict(raw)
 
 
 def build_ab(n_seg: int, seed: int = 20260919, dry_run: bool = True) -> dict:
