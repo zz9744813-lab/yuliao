@@ -58,6 +58,16 @@
 收窄是唯一允许的方向：结果恒 ⊆ 该 scope 自己的选取集，绝不用它扩宽到
 不合规来源（给不合规/无关 work_id = 空集，不报错也不放行）。
 
+## 大库与事务纪律（运行手册）
+
+真实库 10,395,708 段 ⇒ 段选取一律走 `iter_targets()` 的 keyset 分页
+（内存 O(一批)，不整批入内存；`targets()` 只是兼容壳，真跑请用前者）。
+`--limit N` 取满 N 段后**显式 close() 生成器**，`iter_targets` 内部的
+`db.session()` 立即归还，**不把读事务挂到 GC**。
+`nonbench` 分页与 `scan()` 全库扫描都是**每批自开自闭 session**，
+批与批之间不持有读事务（长读事务残余处置，2026-09-26；细节见
+`iter_targets` docstring 的「长事务纪律」）。
+
 用法：
     python scripts/source_check.py --scan
     python scripts/source_check.py --run --scope used --conc 8
@@ -71,6 +81,7 @@ from __future__ import annotations
 import os
 
 import argparse
+import contextlib
 import itertools
 import json
 import re
@@ -301,14 +312,15 @@ def _needs_check_row(sid: str, text: str, integ: str | None):
     yield sid, text
 
 
-def iter_targets(scope: str, *, work_ids: list[str] | None = None):
+def iter_targets(scope: str, *, work_ids: list[str] | None = None,
+                 batch: int = 20000):
     """**流式**产出 (seg_id, text)，内存 O(一批)；选取语义与 targets() 逐字一致。
 
     为什么必须流式：K3 批量入册后真实库已到 **10,395,708 段**，其中
     role!=benchmark 且 text_clean 非空的有 **10,323,132 段**。旧写法把这
     10,323,132 段一次性 `.all()` 进 `ids` 集合、再灌进 `rows` 列表，
     粗估 ≈3.6GB ⇒ 实测直接 `MemoryError`（scan() 同病）。
-    这里改为按 `Segment.id` 升序 **keyset 分页**（每批 20000 段），
+    这里改为按 `Segment.id` 升序 **keyset 分页**（每批 `batch` 段），
     只做集合选取，批序不影响结果集；`--limit` 也因此第一次真正做到
     「不把全库读进内存」。
 
@@ -317,29 +329,54 @@ def iter_targets(scope: str, *, work_ids: list[str] | None = None):
 
     work_ids：把范围**收窄**到指定作品——与 scope 选取集做纯交集（⊆），
     收窄是唯一允许的方向。None/[] = 不收窄。
+
+    batch：keyset 分页页大小（默认 20000 段）。只影响开几批 SQL，
+    **不影响选取结果**（id 严格升序推进 ⇒ 不漏不重）——测试正是靠把它
+    钉成 3 来证明这一点。
+
+    ## 长事务纪律（运行手册，2026-09-26 残余处置）
+    分页在 SQLite 上是**快照读**。两个 scope 的 session 生命周期不同，
+    跑长窗口前按此判断：
+    - `nonbench`：**每批自开自闭 session**（`with db.session()` 在循环体内），
+      批与批之间不持有读事务 ⇒ 千万级段池整轮检查期间**不跨批持有**长读事务，
+      夜间批处理不会被写侧（import/标注入库）长时间挡在 WAL 之外。
+      代价：每批重新下发合规来源集合（`work_sources` 全表投影，随 work 数
+      线性，实测 40 部作品 = 40 行，可忽略）。
+    - `used` / `all-frames` / `bench`：这三档的**选取集本身有界**
+      （候选段 / L 帧 / 基准段，实测 benchmark 仅 833 段），为保住
+      「先取 id 集、再按 500 分块拉整行」的旧口径（`id IN (...)` 一次绑定会撞
+      SQLite 变量数上限，实测 394k 变量 OperationalError: too many SQL
+      variables），这些段的 session 仍**跨越整个惰性产出期**。
+      有界 ⇒ 单事务读的行数有限；**若日后把这两档扩到千万级，必须先改成
+      每批自开自闭 session**，否则流式检查期间会一直挂着长读事务。
     """
-    batch = 20000
-    with db.session() as s:
-        if scope == "nonbench":
-            # 与 k2_extract_backfill.segment_universe(source_scope='nonbenchmark')
-            # 逐字一致（双闸同判据，绝不另写一套）：
-            # ① 段 role 显式「不等于 benchmark」（NULL 亦算非基准——SQL 明写
-            #    or_(IS NULL, !=)，避免 `!=` 在 SQL 里把 NULL 吞掉的口径漂移）；
-            # ② 所属作品在 work_sources 登记为合规人类语料（白名单
-            #    nonbenchmark_compliant_source，单源复用 k2b，不另写）；
-            # ③ 排除集（fixture/synthetic/commentary）——单源复用 K2 侧同源常量
-            #    app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES（k2b 经 KQ 同源
-            #    消费），与 K2 侧逐字一致；
-            # ④ text_clean 非空（与抽取侧 `(text_clean or '').strip()` 同闸）。
+    if scope == "nonbench":
+        # 与 k2_extract_backfill.segment_universe(source_scope='nonbenchmark')
+        # 逐字一致（双闸同判据，绝不另写一套）：
+        # ① 段 role 显式「不等于 benchmark」（NULL 亦算非基准——SQL 明写
+        #    or_(IS NULL, !=)，避免 `!=` 在 SQL 里把 NULL 吞掉的口径漂移）；
+        # ② 所属作品在 work_sources 登记为合规人类语料（白名单
+        #    nonbenchmark_compliant_source，单源复用 k2b，不另写）；
+        # ③ 排除集（fixture/synthetic/commentary）——单源复用 K2 侧同源常量
+        #    app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES（k2b 经 KQ 同源
+        #    消费），与 K2 侧逐字一致；
+        # ④ text_clean 非空（与抽取侧 `(text_clean or '').strip()` 同闸）。
+        #
+        # 合规来源集合要先物化成 Python 集合才能拼 `IN (...)`，所以第一段
+        # 用一个短 session 读它，读完即随 `with` 关闭；分页循环另起短 session，
+        # 每批自开自闭（见上面「长事务纪律」）。
+        with db.session() as s:
             reg = s.query(WorkSource.work_id, WorkSource.source_type).all()
             compliant = {wid for wid, st in reg
                          if k2b.nonbenchmark_compliant_source(st)
                          and (st or "") not in NONBENCH_EXCLUDED_SOURCE_TYPES}
-            narrow = set(work_ids) if work_ids else None
-            if not compliant or (narrow is not None and not narrow):
-                return
-            last = None
-            while True:
+        narrow = set(work_ids) if work_ids else None
+        if not compliant or (narrow is not None and not narrow):
+            return
+        last = None
+        while True:
+            # 每批一个短事务：批与批之间不持有读事务（长读事务残余处置）
+            with db.session() as s:
                 q = s.query(Segment.id, Segment.text_clean, Segment.text,
                             Segment.integrity).filter(
                     Segment.work_id.in_(compliant),
@@ -348,19 +385,26 @@ def iter_targets(scope: str, *, work_ids: list[str] | None = None):
                     # 只收窄：与 scope 选取集做交集（子集），扩宽路径在此不存在
                     q = q.filter(Segment.work_id.in_(narrow))
                 if last is not None:
+                    # keyset 推进：严格大于上批末行 id ⇒ 不漏（跳过的只在
+                    # `text_clean` 空与 needs_check 两道闸里，id 不会被重发）
+                    # 不重（`>` 而非 `>=`）。改成 `>=` 会把批末行重发一遍，
+                    # tests/test_source_check_streaming.py 的「不漏不重」用例会红。
                     q = q.filter(Segment.id > last)
                 rows = q.order_by(Segment.id).limit(batch).all()
-                if not rows:
-                    return
-                for sid, text_clean, text, integ in rows:
-                    last = sid
-                    if not (text_clean or "").strip():
-                        continue
-                    yield from _needs_check_row(sid, text_clean or text, integ)
-        # used / all-frames / bench：选取集本身有界（候选段 / L 帧 / 基准段，
-        # 实测 benchmark 仅 833 段），保持原口径——先取 id 集，再按 500 分块
-        # 拉整行（`id IN (...)` 一次绑定会撞 SQLite 变量数上限，实测 394k 变量
-        # OperationalError: too many SQL variables），只是改成惰性产出。
+            if not rows:
+                return
+            for sid, text_clean, text, integ in rows:
+                last = sid
+                if not (text_clean or "").strip():
+                    continue
+                yield from _needs_check_row(sid, text_clean or text, integ)
+        return                      # nonbench 走 keyset 分页，不落到下面三档
+    # used / all-frames / bench：选取集本身有界（候选段 / L 帧 / 基准段，
+    # 实测 benchmark 仅 833 段），保持原口径——先取 id 集，再按 500 分块
+    # 拉整行（`id IN (...)` 一次绑定会撞 SQLite 变量数上限，实测 394k 变量
+    # OperationalError: too many SQL variables），只是改成惰性产出。
+    with db.session() as s:
+
         if scope == "used":
             ids = {r[0] for r in s.query(Candidate.segment_id).distinct()}
             ids |= {r[0] for r in s.query(ControlledCorruption.segment_id).distinct()}
@@ -447,9 +491,15 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
             todo.append((sid, text))
     else:
         # 流式内核：千万级段池绝不整批进内存（旧写法在真实库上 MemoryError）。
-        gen = iter(iter_targets(scope, work_ids=work_ids))
+        gen = iter_targets(scope, work_ids=work_ids)
         if limit:
-            todo = list(itertools.islice(gen, limit))
+            # 取满 limit 就**显式 close()**：islice 只做了「停止取数」，生成器
+            # 仍是活的，它内部 `with db.session()` 的读事务要挂到 GC 才释放
+            # （CPython 里 next() 不再引用后虽可回收，但那是不可预期的时机，
+            #  期间长读事务一直占着）。close() 抛 GeneratorExit 进到 with 栈里
+            # ⇒ session 立即归还。
+            with contextlib.closing(gen) as g:
+                todo = list(itertools.islice(g, limit))
         else:
             first = next(gen, None)
             todo = [] if first is None else itertools.chain((first,), gen)
@@ -553,35 +603,39 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
 def scan() -> None:
     # 真实库 10,395,708 段：旧写法 `s.query(Segment).all()` 一次性物化
     # （实测 MemoryError）。改为按 Segment.id 升序 keyset 分页，内存 O(一批)。
+    # 计数口径**一行未动**（tot/checked/ok/bad/unverified 与分页前逐值一致，
+    # tests/test_source_check_streaming.py 拿改造前的一次性扫描当尺子对拍）。
+    # 长事务残余处置：每批自开自闭 session ⇒ 全库扫描期间不跨批持有读事务
+    # （与 iter_targets 的 nonbench 分支同一纪律，见其 docstring「长事务纪律」）。
     tot = checked = ok = bad = unverified = 0
     batch = 20000
     last = None
-    with db.session() as s:
-        while True:
+    while True:
+        with db.session() as s:
             q = s.query(Segment.id, Segment.integrity)
             if last is not None:
                 q = q.filter(Segment.id > last)
             rows = q.order_by(Segment.id).limit(batch).all()
-            if not rows:
-                break
-            for _sid, integ in rows:
-                last = _sid
-                tot += 1
-                try:
-                    d = json.loads(integ or "{}")
-                except Exception:
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                v = parse_src_ok(d.get("src_ok"))
-                if v is True:
-                    checked += 1
-                    ok += 1
-                elif v is False:
-                    checked += 1
-                    bad += 1
-                elif "src_ok" in d or d.get("src_ok_unverified"):
-                    unverified += 1    # 类型不严的存量值/显式未校验态：不算完好也不算判坏
+        if not rows:
+            break
+        for _sid, integ in rows:
+            last = _sid
+            tot += 1
+            try:
+                d = json.loads(integ or "{}")
+            except Exception:
+                continue
+            if not isinstance(d, dict):
+                continue
+            v = parse_src_ok(d.get("src_ok"))
+            if v is True:
+                checked += 1
+                ok += 1
+            elif v is False:
+                checked += 1
+                bad += 1
+            elif "src_ok" in d or d.get("src_ok_unverified"):
+                unverified += 1    # 类型不严的存量值/显式未校验态：不算完好也不算判坏
     msg = (f"全库 {tot} 段；已检查 {checked}（完好 {ok}，判坏 {bad}），"
            f"未校验 {unverified}，未检查 {tot - checked - unverified}")
     if unverified:
