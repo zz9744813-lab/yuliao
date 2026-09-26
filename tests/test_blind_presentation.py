@@ -15,10 +15,15 @@
      有呈现行 ⇒ 409 拒收；从无呈现行的历史题投非 A/B 仍走「存原始值」binding=none；
   7. 呈现**落盘**：清内存后重新装载（模拟重启）旧 pid 仍可提交；文件损坏则备份 .corrupt 并告警；
   8. 落盘文件走 config.DATA_DIR（测试期即 conftest 的临时目录），不碰仓库真实状态（A04），
-     `_reset()` 连文件一起删，测试之间不靠"整体覆盖写"间接隔离（会审两席）。
+     `_reset()` 连文件一起删，测试之间不靠"整体覆盖写"间接隔离（会审两席）；
+  9. **重装载原子性**（会审 glm 席 [一般] 残留，2026-09-26）：换 DATA_DIR 触发的整块换一套
+     必须在同一临界区内做完——并发读路径**永不可见**"已清空、未装载"，否则有效 pid 被误判过期 409；
+ 10. 读盘/写盘口径一致：保存路径读盘失败也先备份 .corrupt 再覆盖写，不许顺手抹掉损坏现场。
 """
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -36,10 +41,21 @@ SEG_TEXT = "他推门进来，屋里没人。"
 
 
 def _reset():
-    """清内存**并**删落盘呈现文件：让每个测试的呈现态从零开始。"""
+    """清内存**并**删落盘呈现文件、**并**清懒加载哨兵：让每个测试的呈现态从零开始。
+
+    为什么 `_BLIND_LOADED_FOR` 必须一起清（会审 glm 席 [建议]，2026-09-26 显式化）：
+    哨兵记的是"内存里已经装载了**哪个路径**"，而这条文件的落盘动作只按它做比较。
+    某用例中途改过 `DATA_DIR`（`test_data_dir_is_resolved_at_call_time` 就是这么干）
+    后失败退出，那个临时目录连同呈现文件已经没了，哨兵却还指着它；后续用例的懒加载
+    于是取决于"这条用例的路径是否恰好等于上一条留下的哨兵"——不相等就整块换一套、
+    相等就跳过装载而内存表其实是空的（有效 pid 被判过期 ⇒ 409）。
+    现在靠"各用例路径一致"侥幸不触发，那是隐式依赖：清内存 = 清哨兵，二者同生同灭，
+    每条用例的装载行为才可独立推理。
+    """
     api_mod._SERVE_CURSOR.clear()
     api_mod._BLIND_MAP.clear()
     api_mod._BLIND_LAST.clear()
+    api_mod._BLIND_LOADED_FOR = None
     try:
         api_mod._present_file().unlink()
     except FileNotFoundError:
@@ -359,3 +375,218 @@ def test_data_dir_is_resolved_at_call_time(monkeypatch, tmp_path):
     assert (tmp_path / "blind_presentations.json").exists(), "落盘必须落在新 DATA_DIR"
     assert (tmp_path / "serve_cursor.json").exists(), "游标同理"
     assert _judge(item, _human_side_of(item)).status_code == 200
+
+
+def _pad_presentations(blob: str, n: int = 400) -> str:
+    """把落盘文件撑大（同 pid 仍在），顺带把"清空 → 读盘装载"这段自然窗口拉宽：
+    并发回归不许靠调度运气命中，否则改回旧实现也可能侥幸判绿。"""
+    data = json.loads(blob)
+    pres = data.setdefault("presentations", {})
+    for i in range(n):
+        pres[f"filler{i}"] = {"review_id": f"RV-filler{i}", "human_first": True,
+                              "created_at": "2026-01-01T00:00:00Z", "pad": "x" * 128}
+    return json.dumps(data, ensure_ascii=False)
+
+
+def test_concurrent_reload_never_marks_valid_presentation_expired(tmp_path):
+    """会审 glm 席 [一般] 残留：重装载必须在**同一临界区**内完成（清空 + 装载 + 置哨兵）。
+
+    旧形态是"持锁清空 → **释放锁** → `_blind_load()` → 再持锁置哨兵"。中间锁是放开的、
+    哨兵也没置位，另一个线程的读路径正好落进"已清空、未装载"就拿回 None ——
+    上层 `verdict` 随即把一份**还有效**的呈现判成过期（409）。单 worker/本文件既有用例
+    都看不见这条，多线程部署下是真缺陷。
+
+    构造要点：两个 DATA_DIR 的落盘内容**都含同一个 pid**，所以它任何时刻都算有效；
+    一个线程反复换 DATA_DIR 触发整块换一套，多个线程反复 `_blind_get(pid)`。
+    修复后读路径要么看到旧一整套、要么看到新一整套，永远看不到空表。
+    """
+    _reset()
+    stop = threading.Event()
+    orig_dir = config.DATA_DIR
+    missing: list[str] = []
+    errors: list[str] = []
+    dir_a, dir_b = tmp_path / "da", tmp_path / "db"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    try:
+        config.DATA_DIR = dir_a
+        _seed("EXP-CC", "bpcc")
+        item = _present("EXP-CC", "bpcc")   # 批次标签必须与 _seed 的一致，否则队列是空的
+        pid = item["presentation_id"]
+        assert api_mod._blind_get(pid) is not None
+        blob = _pad_presentations((dir_a / "blind_presentations.json").read_text(encoding="utf-8"))
+        (dir_a / "blind_presentations.json").write_text(blob, encoding="utf-8")
+        (dir_b / "blind_presentations.json").write_text(blob, encoding="utf-8")
+        api_mod._BLIND_MAP.clear()
+        api_mod._BLIND_LOADED_FOR = None          # 强制第一次读就走重装载
+
+        def churn():
+            i = 0
+            while not stop.is_set():
+                config.DATA_DIR = dir_a if i % 2 else dir_b
+                i += 1
+
+        def reader():
+            while not stop.is_set():
+                try:
+                    if api_mod._blind_get(pid) is None:
+                        missing.append(pid)
+                        return
+                except Exception as e:            # 读路径也不许崩成异常（等价于 500）
+                    errors.append(repr(e))
+                    return
+
+        threads = ([threading.Thread(target=reader, daemon=True) for _ in range(8)]
+                   + [threading.Thread(target=churn, daemon=True) for _ in range(2)])
+        for t in threads:
+            t.start()
+        deadline = time.time() + 3.0
+        while time.time() < deadline and not missing and not errors:
+            time.sleep(0.02)
+        stop.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"并发读路径抛异常：{errors[:3]}"
+        assert not missing, (
+            "有效 pid 在换目录重装载的窗口里被读成不存在 = 会被上层判成过期（409）；"
+            "装载必须与清空、置哨兵处在同一临界区内")
+        # 契约不动：压力过后同一份呈现仍可提交（不是"其实后来才失效"）
+        config.DATA_DIR = dir_a
+        r = _judge(item, _human_side_of(item))
+        assert r.status_code == 200, \
+            f"并发重装载后有效呈现必须仍可提交，实得 {r.status_code}（409 即误判过期）"
+    finally:
+        stop.set()
+        config.DATA_DIR = orig_dir
+        _reset()
+
+
+def test_reload_never_exposes_a_lock_free_cleared_window(monkeypatch, tmp_path):
+    """把"同一临界区"这条不变量**单独**钉死（`_blind_ensure_loaded` 这一层，不靠读路径兜）。
+
+    为什么还要这条：修复是两道独立防线——(1) `_blind_ensure_loaded` 内部清空+装载+置哨兵
+    在同一临界区，(2) `_blind_get` 整段持锁。只退化 (1) 时，端到端那条
+    `test_concurrent_reload_never_marks_valid_presentation_expired` 会被 (2) 兜住而侥幸放绿，
+    钉不住这一层。所以本条**绕过 `_blind_get`**，只调 `_blind_ensure_loaded`。
+
+    做法（确定性，不靠调度运气）：把"清空已完成、装载还没开始"这段人为撑开——退化形态正是
+    在这段里调了会自己取锁的装载函数。此时若锁是**空的**，就说明存在"已清空 + 无锁"的空窗，
+    读路径能落进来把有效 pid 判成不存在（409）；修复后装载内联在持锁段里，这段空窗不存在。
+    """
+    _reset()
+    dir_a, dir_b = tmp_path / "gap_a", tmp_path / "gap_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    orig_dir = config.DATA_DIR
+    target = dir_b / "blind_presentations.json"
+    target.write_text(json.dumps(
+        {"presentations": {"held-pid": {"review_id": "RV-h", "human_first": True}},
+         "last": {"RV-h": "held-pid"}}, ensure_ascii=False), encoding="utf-8")
+
+    in_gap = threading.Event()
+    resume = threading.Event()
+    real_load = api_mod._blind_load
+
+    def pausing_load():
+        # 退化形态在"锁已释放、装载未开始"处走到这里；修复形态不走本函数（在锁内直接装载）。
+        in_gap.set()
+        resume.wait(10)
+        real_load()
+
+    monkeypatch.setattr(api_mod, "_blind_load", pausing_load)
+    t = None
+    try:
+        config.DATA_DIR = dir_b
+        api_mod._BLIND_MAP["stale-pid"] = {"review_id": "RV-s", "human_first": False}
+        api_mod._BLIND_LOADED_FOR = str(dir_a / "blind_presentations.json")  # 强制重装载
+        t = threading.Thread(target=api_mod._blind_ensure_loaded, daemon=True)
+        t.start()
+        in_gap.wait(1.0)          # 修复形态：这段空窗不存在，等满 1.0s 也不置位
+        lock_free_in_gap = False
+        if in_gap.is_set():
+            got = api_mod._BLIND_LOCK.acquire(timeout=1.0)
+            if got:
+                lock_free_in_gap = True
+                api_mod._BLIND_LOCK.release()
+        assert not lock_free_in_gap, (
+            "重装载把「已清空」与「装载」拆到了两个临界区：清空之后、装载之前锁是空的，"
+            "读路径能落进这个空窗把有效 pid 判成不存在（409）。"
+            "装载必须与清空、置哨兵在同一临界区内一次做完。")
+        resume.set()
+        t.join(timeout=10)
+        assert not t.is_alive(), "装载线程没退出"
+        # 两种形态最终都该装载成功（本条只钉"有没有空窗"，不钉别的）
+        assert api_mod._BLIND_LOADED_FOR == str(target)
+        assert "held-pid" in api_mod._BLIND_MAP, "重装载后新目录的呈现必须在位"
+        assert "stale-pid" not in api_mod._BLIND_MAP, "旧目录的残留必须被整块换掉"
+    finally:
+        resume.set()
+        if t is not None:
+            t.join(timeout=10)
+        monkeypatch.undo()
+        config.DATA_DIR = orig_dir
+        _reset()
+
+
+def test_save_backs_up_corrupt_file_before_overwriting(caplog):
+    """口径统一（会审 glm 席 [一般] 残留）：保存路径遇到损坏文件，先备份 `.corrupt` 再覆盖写。
+
+    旧写法只告警一句"本次直接覆盖写"，把损坏现场一并抹掉——与 `_blind_load`
+    （备份 + 告警）两种口径。`test_save_merges_other_workers_presentations`
+    只覆盖正常合并路径，这里补损坏分支。
+    绕开 `_blind_put`（它的懒加载会先把现场处理掉），直接持锁调用保存路径。
+    """
+    _reset()
+    f = api_mod._present_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    corrupt = "{ 这不是 JSON"
+    f.write_text(corrupt, encoding="utf-8")
+    api_mod._BLIND_MAP["mine"] = {"review_id": "RV-c", "human_first": True}
+    api_mod._BLIND_LAST["RV-c"] = "mine"
+    with caplog.at_level("WARNING"):
+        with api_mod._BLIND_LOCK:
+            api_mod._blind_save_locked()
+    backup = f.with_suffix(f.suffix + ".corrupt")
+    assert backup.exists(), "损坏现场必须先备份：直接覆盖写 = 丢失审计现场"
+    assert backup.read_text(encoding="utf-8") == corrupt, "备份里要原样留着损坏内容"
+    assert f.exists(), "覆盖写照常发生（本进程呈现不许丢）"
+    data = json.loads(f.read_text(encoding="utf-8"))
+    assert "mine" in data["presentations"]
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("损坏" in m and str(f) in m for m in msgs), \
+        f"损坏分支必须告警且含文件路径，实得 {msgs}"
+
+
+def test_save_backs_up_unreadable_present_file_before_overwriting(monkeypatch, tmp_path, caplog):
+    """另一半口径：读盘**失败**（非 FileNotFoundError）同样先备份再覆盖写。
+
+    用"路径是个目录"造出稳定的 IsADirectoryError，不靠文件系统权限的运气。
+    """
+    _reset()
+    bad = tmp_path / "blind_presentations.json"
+    bad.mkdir()
+    monkeypatch.setattr(api_mod, "_present_file", lambda: bad)
+    api_mod._BLIND_MAP["mine"] = {"review_id": "RV-u", "human_first": True}
+    with caplog.at_level("WARNING"):
+        with api_mod._BLIND_LOCK:
+            api_mod._blind_save_locked()
+    assert bad.with_suffix(bad.suffix + ".corrupt").exists(), \
+        "读盘失败的现场也要保住（备份）而不是直接被覆盖"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("损坏" in m and str(bad) in m for m in msgs), \
+        f"必须告警且含文件路径（会审两席口径：只给批次键定位不到数据目录），实得 {msgs}"
+
+
+def test_reset_clears_lazy_load_sentinel():
+    """`_reset()` 必须连 `_BLIND_LOADED_FOR` 一起清（会审 glm 席 [建议]：隐式依赖显式化）。
+
+    哨兵漏清 ⇒ 下一条用例是否装载取决于"路径是否恰好等于上一条留下的哨兵"，
+    有效 pid 可能被空表判成过期 409，而这条用例本身没做过任何清表动作。
+    """
+    _reset()
+    assert api_mod._BLIND_LOADED_FOR is None
+    api_mod._BLIND_LOADED_FOR = str(api_mod._present_file())   # 模拟用例中途改过 DATA_DIR
+    _reset()
+    assert api_mod._BLIND_LOADED_FOR is None, \
+        "_reset() 漏清哨兵 ⇒ 后续用例的懒加载行为不可推理"
