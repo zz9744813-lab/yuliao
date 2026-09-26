@@ -10,6 +10,7 @@
   GET  /works /segments /corpus/stats                         [评审档]
   POST /experiments                                            [管理档=admin]（建实验=扩产）
   POST /experiments/{id}/run                                   [管理档=admin]（启 run=烧钱/扩产）
+  GET  /experiments/limits       高开销实验入口的调用量/并发上限配置与当前值   [评审档]
   GET  /experiments /experiments/{id} /experiments/{id}/stages /experiments/{id}/report(.json)
                                                                [评审档]
   GET  /experiments/{id}/review          队列（含优先级理由）    [评审档]
@@ -29,7 +30,9 @@ import os
 import random
 import re
 import threading
+import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -291,14 +294,17 @@ class ExperimentIn(BaseModel):
 
 @app.post("/experiments")
 def create_exp(body: ExperimentIn):
-    with db.session() as s:
-        overrides = {k: v for k, v in body.model_dump().items() if v is not None}
-        try:
-            exp = experiments.create_experiment(s, overrides)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        return {"id": exp.id, "config": {k: v for k, v in exp.config.items()
-                                         if k != "segment_ids"}}
+    # R3（审计 P1 剩半 2026-09-26）：高开销入口闸——闸在任何 DB 写入之前，
+    # 被拒不产生副作用（见 _exp_entry_quota 注释）。
+    with _exp_entry_quota("POST /experiments"):
+        with db.session() as s:
+            overrides = {k: v for k, v in body.model_dump().items() if v is not None}
+            try:
+                exp = experiments.create_experiment(s, overrides)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            return {"id": exp.id, "config": {k: v for k, v in exp.config.items()
+                                             if k != "segment_ids"}}
 
 
 class RunIn(BaseModel):
@@ -383,6 +389,154 @@ def _watch_budget_release(t) -> None:
                      name="run-budget-watchdog").start()
 
 
+# ── R3（审计 P1 剩半 2026-09-26）：高开销实验入口的「调用量 + 并发」上限 ──
+# R1 预算闸管的是「同时在跑的实验数」；审计原文写的另一半还没关：**入口本身
+# 没有调用量与并发上限**——持令牌者可以循环创建实验、等一个跑完立刻再发下
+# 一个（每次都不撞预算闸），创建/领取请求本身无界；高频齐发时入口处理段
+# （DB 会话 + 领取 + 起线程）也没有并发闸。本闸把这两个量关上，作用于两个
+# 高开销入口：POST /experiments 与 POST /experiments/{exp_id}/run。
+#
+# 两个上限，口径各自独立、互不顶替：
+#   · 并发上限 LG_EXPERIMENT_MAX_CONCURRENCY（默认 8）：入口处理器**同时在处
+#     理中**的请求数。注意与 app/limits.MAX_CONCURRENCY=16 的区别——那是实验
+#     stage 线程池的 worker 上界（执行侧内部），本数是 HTTP 入口的外部请求
+#     并行度。默认 8 的取值依据：必须盖过既有预算闸的并发测试
+#     tests/test_remote_caps_budget.py::test_budget_not_bypassed_under_concurrency
+#     （静态实读：6 线程齐发打 run），设在其上，入口闸不顶掉预算竞争测试。
+#   · 调用量上限 LG_EXPERIMENT_RATE_PER_MIN（默认 60）：两个入口**共用一个**
+#     每分钟计数（定长窗：按整分钟桶翻转清零）。挡的是"高频反复触发"的滥用
+#     形态；默认 60 的依据：全测试套对这两个端点的 HTTP 调用合计约 35 次
+#     （静态实读 grep 计数），且单 uvicorn 进程的正常人工操作远达不到 1/s。
+#
+# 纪律（对齐 _budget_max 的既有口径）：
+#   · env > 默认，恒 ≥1 钳底——0/负数/垃圾值都落回下限，**不承认"关掉闸"**
+#     这种配置（默认必须是有限值）；
+#   · 超限显式 429，**不静默排队、不降级放行**；拒因带 endpoint、当前值、
+#     上限值与环境变量名，可核对；
+#   · 检查与占用在同一把进程锁内完成（无先查后设 TOCTOU）；被拒的请求不占用
+#     任何资源、发生在一切副作用之前（不建 DB 行、不占预算位、不领取执行权）；
+#   · 超限事件进日志（logger.warning，含端点/ref/种类/当前值/上限），并按 GET
+#     /experiments/limits 可读出上限配置与当前在途值。
+# 作用域=本进程：与预算闸同一进程模型（serve_remote.sh 单 uvicorn 进程、
+# 无 --workers）；进程重启计数归零，与预算闸同口径。
+
+_ENTRY_QUOTA_DEFAULT_CONC = 8      # LG_EXPERIMENT_MAX_CONCURRENCY 的默认上限
+_ENTRY_QUOTA_DEFAULT_RATE = 60     # LG_EXPERIMENT_RATE_PER_MIN 的默认上限
+_ENTRY_QUOTA_FLOOR = 1             # 钳底下限：闸不许被配置成 0=关闸/放行一切
+
+_ENTRY_QUOTA_LOCK = threading.Lock()
+_entry_quota_inflight = 0                     # 正在入口处理中的请求数
+_entry_quota_window = {"minute": -1, "count": 0}   # 共用分钟桶（定长窗）
+
+
+def _quota_env_int(name: str, default: int) -> int:
+    """env > 默认 的整型解析；恒 ≥ _ENTRY_QUOTA_FLOOR。
+    空/未设 → 默认；非整数/0/负数 → 钳到底（不许无限、不许关闸）。"""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(_ENTRY_QUOTA_FLOOR, int(raw))
+    except ValueError:
+        return default
+
+
+def _entry_quota_max_concurrency() -> int:
+    return _quota_env_int("LG_EXPERIMENT_MAX_CONCURRENCY",
+                         _ENTRY_QUOTA_DEFAULT_CONC)
+
+
+def _entry_quota_rate_per_min() -> int:
+    return _quota_env_int("LG_EXPERIMENT_RATE_PER_MIN",
+                          _ENTRY_QUOTA_DEFAULT_RATE)
+
+
+def _entry_quota_state() -> dict:
+    """上限配置 + 当前值的快照（GET /experiments/limits 与回归测试共用）。
+    读窗按当前分钟口径现算，与 _quota_try_acquire 的翻转规则一致。"""
+    minute = int(time.time() // 60)
+    with _ENTRY_QUOTA_LOCK:
+        live = (_entry_quota_window["minute"] == minute
+                and _entry_quota_window["count"] or 0)
+        return {
+            "LG_EXPERIMENT_MAX_CONCURRENCY": _entry_quota_max_concurrency(),
+            "LG_EXPERIMENT_RATE_PER_MIN": _entry_quota_rate_per_min(),
+            "LG_MAX_RUNNING_EXPERIMENTS": _budget_max(),
+            "defaults": {"LG_EXPERIMENT_MAX_CONCURRENCY": _ENTRY_QUOTA_DEFAULT_CONC,
+                         "LG_EXPERIMENT_RATE_PER_MIN": _ENTRY_QUOTA_DEFAULT_RATE},
+            "inflight": _entry_quota_inflight,
+            "window_minute": minute,
+            "window_calls_this_minute": live,
+        }
+
+
+def _quota_try_acquire(endpoint: str, ref: str | None) -> str | None:
+    """占一个入口额度；超限返回拒因文本（此刻未占用任何东西）。
+    并发先查、调用量后查，两个检查与两个占用在同一持锁段内完成。"""
+    global _entry_quota_inflight
+    minute = int(time.time() // 60)
+    with _ENTRY_QUOTA_LOCK:
+        if _entry_quota_window["minute"] != minute:
+            _entry_quota_window["minute"] = minute
+            _entry_quota_window["count"] = 0
+        cap_c = _entry_quota_max_concurrency()
+        if _entry_quota_inflight >= cap_c:
+            logger.warning("exp-entry-quota reject endpoint=%s ref=%s "
+                           "kind=concurrency current=%s cap=%s",
+                           endpoint, ref, _entry_quota_inflight, cap_c)
+            return (f"实验入口并发超限：{endpoint} 正在处理中 current={_entry_quota_inflight}"
+                    f" ≥ 上限 cap={cap_c}（LG_EXPERIMENT_MAX_CONCURRENCY，"
+                    f"默认 {_ENTRY_QUOTA_DEFAULT_CONC}）。新请求即时拒绝，不排队等待。")
+        cap_r = _entry_quota_rate_per_min()
+        if _entry_quota_window["count"] >= cap_r:
+            logger.warning("exp-entry-quota reject endpoint=%s ref=%s "
+                           "kind=rate current=%s cap=%s",
+                           endpoint, ref, _entry_quota_window["count"], cap_r)
+            return (f"实验入口调用量超限：本分钟累计 current={_entry_quota_window['count']}"
+                    f" ≥ 上限 cap={cap_r} 次/分钟（LG_EXPERIMENT_RATE_PER_MIN，"
+                    f"默认 {_ENTRY_QUOTA_DEFAULT_RATE}；endpoint={endpoint}）。"
+                    f"请等本分钟窗口翻转后再试。")
+        _entry_quota_inflight += 1
+        _entry_quota_window["count"] += 1
+        return None
+
+
+def _quota_release() -> None:
+    global _entry_quota_inflight
+    with _ENTRY_QUOTA_LOCK:
+        _entry_quota_inflight = max(0, _entry_quota_inflight - 1)
+
+
+def _reset_entry_quota_for_tests() -> None:
+    """测试隔离钩子（同 _reset_budget_for_tests 纪律：只许测试调用）。"""
+    global _entry_quota_inflight
+    with _ENTRY_QUOTA_LOCK:
+        _entry_quota_inflight = 0
+        _entry_quota_window["minute"] = -1
+        _entry_quota_window["count"] = 0
+
+
+@contextmanager
+def _exp_entry_quota(endpoint: str, ref: str | None = None):
+    """高开销入口的额度闸（context manager）：进入即查+占，异常/正常都归还。
+    超限 → 429（HTTPException 在进入 try 之前抛出，零副作用、不动归还计数）。"""
+    reject = _quota_try_acquire(endpoint, ref)
+    if reject:
+        raise HTTPException(429, reject)
+    try:
+        yield
+    finally:
+        _quota_release()
+
+
+@app.get("/experiments/limits")
+def exp_limits():
+    """高开销实验入口的上限配置与当前值（C5 可观测）：只读，评审档即可。
+    路由必须注册在 GET /experiments/{exp_id} **之前**（FastAPI 按定义序匹配，
+    否则 "limits" 会被当成实验 id 拿 404）。"""
+    return _entry_quota_state()
+
+
 @app.post("/experiments/{exp_id}/run")
 def run_exp(exp_id: str, body: RunIn | None = None):
     # 2026-09-18 接实验引擎（任务 12）：后台线程跑阶段状态机
@@ -397,46 +551,50 @@ def run_exp(exp_id: str, body: RunIn | None = None):
             # 冻结必须在领取**之前**拒（五轮：先领再拒会把行卡在
             # running+token——engine.run 的冻结检查晚于 API 领取）
             raise HTTPException(400, "experiment 已冻结（Phase 1 定标实验），禁止重跑；复现在新实验进行")
-    # R1 全局预算闸：先占位再领取——占位失败 429（不碰领取，零副作用）；
-    # 领取失败/异常立即归还占位（见上方注释的归还路径）。
-    if not _budget_acquire():
-        raise HTTPException(
-            429, f"全局运行预算已满：运行中实验数已达上限 {_budget_max()}"
-                 f"（LG_MAX_RUNNING_EXPERIMENTS，默认 1）。请等当前实验跑完"
-                 f"再试；确需并行请显式调高该环境变量")
-    # A07 四轮：**领取即闸**——在请求内做原子领取（旧「先查后启」是竞争
-    # 窗口；旧快路径还把 running+NULL-owner 的存量行直接挡回，自动对账
-    # 永远走不到）。领到 → 带凭据启动后台线程，响应如实 started；没领到
-    # → 409 already_running（不发「已启动」的假响应；五轮：claim 失败先
-    # 重核存在性——两步之间被删的实验应报 404 而不是 409）。
-    token = new_id("RUN")
-    try:
-        claimed = engine.claim_run(exp_id, token)
-    except Exception:
-        _budget_release()
-        raise
-    if not claimed:
-        _budget_release()
-        with db.session() as s:
-            if not s.get(Experiment, exp_id):
-                raise HTTPException(404, "experiment 不存在")
-        raise HTTPException(409, "already_running：执行权被持有（存量卡死排查用 "
-                                 "run_experiment.py --list-stuck / --release）")
-    try:
-        t = engine.run_experiment_background(exp_id, stages, token=token)
-    except Exception as exc:
-        # claim_run 已经提交；线程未启动时引擎的 finally 不会收尾。
-        # 清掉本次 owner 并归还预算，避免一次启动失败永久锁死后续实验。
+    # R3 入口额度闸（调用量+并发）：在 404/冻结检查**之后**、预算占用**之前**
+    # ——非法请求不吃额度（与 R1 同口径），被额度拒的请求零副作用
+    #（不占预算位、不领取、不起线程）。
+    with _exp_entry_quota("POST /experiments/{exp_id}/run", ref=exp_id):
+        # R1 全局预算闸：先占位再领取——占位失败 429（不碰领取，零副作用）；
+        # 领取失败/异常立即归还占位（见上方注释的归还路径）。
+        if not _budget_acquire():
+            raise HTTPException(
+                429, f"全局运行预算已满：运行中实验数已达上限 {_budget_max()}"
+                     f"（LG_MAX_RUNNING_EXPERIMENTS，默认 1）。请等当前实验跑完"
+                     f"再试；确需并行请显式调高该环境变量")
+        # A07 四轮：**领取即闸**——在请求内做原子领取（旧「先查后启」是竞争
+        # 窗口；旧快路径还把 running+NULL-owner 的存量行直接挡回，自动对账
+        # 永远走不到）。领到 → 带凭据启动后台线程，响应如实 started；没领到
+        # → 409 already_running（不发「已启动」的假响应；五轮：claim 失败先
+        # 重核存在性——两步之间被删的实验应报 404 而不是 409）。
+        token = new_id("RUN")
         try:
-            if not engine.abort_unstarted_run(exp_id, token, exc):
-                logger.error("后台线程启动失败后，实验 %s 的执行权已变化", exp_id)
+            claimed = engine.claim_run(exp_id, token)
         except Exception:
-            logger.exception("后台线程启动失败，撤销实验 %s 领取时再次出错", exp_id)
-        finally:
             _budget_release()
-        raise
-    _watch_budget_release(t)   # 后台 run 结束（或替身不可 join）时归还预算位
-    return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
+            raise
+        if not claimed:
+            _budget_release()
+            with db.session() as s:
+                if not s.get(Experiment, exp_id):
+                    raise HTTPException(404, "experiment 不存在")
+            raise HTTPException(409, "already_running：执行权被持有（存量卡死排查用 "
+                                     "run_experiment.py --list-stuck / --release）")
+        try:
+            t = engine.run_experiment_background(exp_id, stages, token=token)
+        except Exception as exc:
+            # claim_run 已经提交；线程未启动时引擎的 finally 不会收尾。
+            # 清掉本次 owner 并归还预算，避免一次启动失败永久锁死后续实验。
+            try:
+                if not engine.abort_unstarted_run(exp_id, token, exc):
+                    logger.error("后台线程启动失败后，实验 %s 的执行权已变化", exp_id)
+            except Exception:
+                logger.exception("后台线程启动失败，撤销实验 %s 领取时再次出错", exp_id)
+            finally:
+                _budget_release()
+            raise
+        _watch_budget_release(t)   # 后台 run 结束（或替身不可 join）时归还预算位
+        return {"status": "started", "id": exp_id, "stages": engine.ENGINE_STAGES}
 
 
 @app.get("/experiments/{exp_id}/stages")
