@@ -71,6 +71,7 @@ from __future__ import annotations
 import os
 
 import argparse
+import itertools
 import json
 import re
 import sys
@@ -280,22 +281,46 @@ def parse_work_ids(raw) -> list[str]:
     return out
 
 
-def targets(scope: str, *, work_ids: list[str] | None = None) -> list[str]:
-    """scope：used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；
-    bench=基准段；nonbench=K2 非基准试点供给池（合规人类语料 + role!=benchmark
-    + 来源不命中 K2 侧同源排除集 fixture/synthetic/commentary + text_clean 非空，
-    来源判据与白名单/排除集单源复用 k2_extract_backfill → app.knowledge_query）。
+def _needs_check_row(sid: str, text: str, integ: str | None):
+    """（内部）按 integrity 判定该段是否还要送检；要则产出 (sid, text)。
+
+    与改造前 targets() 尾部逐字同口径：needs_check 为假计 skip；
+    已带 src_ok 的存量值计 unverified（类型不严 → 按未校验处理，必须重查）。
+    """
+    try:
+        have = json.loads(integ or "{}")
+    except Exception:
+        have = {}
+    if not isinstance(have, dict):
+        have = {}
+    if not needs_check(have):
+        _stat["skip"] += 1
+        return
+    if "src_ok" in have:
+        _stat["unverified"] += 1   # 存量值类型不严：按未校验计，且必须重查
+    yield sid, text
+
+
+def iter_targets(scope: str, *, work_ids: list[str] | None = None):
+    """**流式**产出 (seg_id, text)，内存 O(一批)；选取语义与 targets() 逐字一致。
+
+    为什么必须流式：K3 批量入册后真实库已到 **10,395,708 段**，其中
+    role!=benchmark 且 text_clean 非空的有 **10,323,132 段**。旧写法把这
+    10,323,132 段一次性 `.all()` 进 `ids` 集合、再灌进 `rows` 列表，
+    粗估 ≈3.6GB ⇒ 实测直接 `MemoryError`（scan() 同病）。
+    这里改为按 `Segment.id` 升序 **keyset 分页**（每批 20000 段），
+    只做集合选取，批序不影响结果集；`--limit` 也因此第一次真正做到
+    「不把全库读进内存」。
+
+    scope：used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；
+    bench=基准段；nonbench=K2 非基准试点供给池。
 
     work_ids：把范围**收窄**到指定作品——与 scope 选取集做纯交集（⊆），
-    收窄是唯一允许的方向。None/[] = 不收窄，结果与改动前逐字一致。"""
+    收窄是唯一允许的方向。None/[] = 不收窄。
+    """
+    batch = 20000
     with db.session() as s:
-        if scope == "used":
-            ids = {r[0] for r in s.query(Candidate.segment_id).distinct()}
-            ids |= {r[0] for r in s.query(ControlledCorruption.segment_id).distinct()}
-        elif scope == "all-frames":
-            ids = {r[0] for r in s.query(Frame.segment_id).filter(
-                Frame.granularity == "L").distinct()}
-        elif scope == "nonbench":
+        if scope == "nonbench":
             # 与 k2_extract_backfill.segment_universe(source_scope='nonbenchmark')
             # 逐字一致（双闸同判据，绝不另写一套）：
             # ① 段 role 显式「不等于 benchmark」（NULL 亦算非基准——SQL 明写
@@ -306,45 +331,69 @@ def targets(scope: str, *, work_ids: list[str] | None = None) -> list[str]:
             #    app.knowledge_query.DEFAULT_EXCLUDED_SOURCE_TYPES（k2b 经 KQ 同源
             #    消费），与 K2 侧逐字一致；
             # ④ text_clean 非空（与抽取侧 `(text_clean or '').strip()` 同闸）。
-            reg = {ws.work_id: ws for ws in s.query(WorkSource).all()}
-            compliant = {wid for wid, ws in reg.items()
-                         if k2b.nonbenchmark_compliant_source(ws.source_type)
-                         and (ws.source_type or "") not in NONBENCH_EXCLUDED_SOURCE_TYPES}
-            cand = s.query(Segment.id, Segment.text_clean).filter(
-                Segment.work_id.in_(compliant),
-                or_(Segment.role.is_(None), Segment.role != "benchmark")).all()
-            ids = {r[0] for r in cand if (r[1] or "").strip()}
+            reg = s.query(WorkSource.work_id, WorkSource.source_type).all()
+            compliant = {wid for wid, st in reg
+                         if k2b.nonbenchmark_compliant_source(st)
+                         and (st or "") not in NONBENCH_EXCLUDED_SOURCE_TYPES}
+            narrow = set(work_ids) if work_ids else None
+            if not compliant or (narrow is not None and not narrow):
+                return
+            last = None
+            while True:
+                q = s.query(Segment.id, Segment.text_clean, Segment.text,
+                            Segment.integrity).filter(
+                    Segment.work_id.in_(compliant),
+                    or_(Segment.role.is_(None), Segment.role != "benchmark"))
+                if narrow is not None:
+                    # 只收窄：与 scope 选取集做交集（子集），扩宽路径在此不存在
+                    q = q.filter(Segment.work_id.in_(narrow))
+                if last is not None:
+                    q = q.filter(Segment.id > last)
+                rows = q.order_by(Segment.id).limit(batch).all()
+                if not rows:
+                    return
+                for sid, text_clean, text, integ in rows:
+                    last = sid
+                    if not (text_clean or "").strip():
+                        continue
+                    yield from _needs_check_row(sid, text_clean or text, integ)
+        # used / all-frames / bench：选取集本身有界（候选段 / L 帧 / 基准段，
+        # 实测 benchmark 仅 833 段），保持原口径——先取 id 集，再按 500 分块
+        # 拉整行（`id IN (...)` 一次绑定会撞 SQLite 变量数上限，实测 394k 变量
+        # OperationalError: too many SQL variables），只是改成惰性产出。
+        if scope == "used":
+            ids = {r[0] for r in s.query(Candidate.segment_id).distinct()}
+            ids |= {r[0] for r in s.query(ControlledCorruption.segment_id).distinct()}
+        elif scope == "all-frames":
+            ids = {r[0] for r in s.query(Frame.segment_id).filter(
+                Frame.granularity == "L").distinct()}
         else:
-            from app.models import Segment as S
-            ids = {r[0] for r in s.query(S.id).filter(S.role == "benchmark")}
-        # `ids` 可能很大（nonbench 在全量合规池上可达数十万段）——
-        # `id IN (...)` 一次绑定会撞 SQLite 变量数上限（实测 394k 变量
-        # OperationalError: too many SQL variables），按块分次取，语义不变
-        # （只做集合选取，块序不影响 out）。小集合 = 单块 = 与改动前一模一样。
-        rows = []
+            ids = {r[0] for r in s.query(Segment.id).filter(
+                Segment.role == "benchmark")}
         for i in range(0, len(ids), 500):
             part = sorted(ids)[i:i + 500]
             q = s.query(Segment).filter(Segment.id.in_(part))
             if work_ids:
-                # 只收窄：与 scope 选取集做交集（子集），扩宽路径在此不存在
                 q = q.filter(Segment.work_id.in_(set(work_ids)))
-            rows.extend((x.id, x.text_clean or x.text, x.integrity)
-                        for x in q.all())
-    out = []
-    for sid, text, integ in rows:
-        try:
-            have = json.loads(integ or "{}")
-        except Exception:
-            have = {}
-        if not isinstance(have, dict):
-            have = {}
-        if not needs_check(have):
-            _stat["skip"] += 1
-            continue
-        if "src_ok" in have:
-            _stat["unverified"] += 1   # 存量值类型不严：按未校验计，且必须重查
-        out.append((sid, text))
-    return out
+            for x in q.all():
+                yield from _needs_check_row(x.id, x.text_clean or x.text,
+                                            x.integrity)
+
+
+def targets(scope: str, *, work_ids: list[str] | None = None) -> list[str]:
+    """scope：used=审查/劣化用到的段；all-frames=所有抽过 L 帧的段；
+    bench=基准段；nonbench=K2 非基准试点供给池（合规人类语料 + role!=benchmark
+    + 来源不命中 K2 侧同源排除集 fixture/synthetic/commentary + text_clean 非空，
+    来源判据与白名单/排除集单源复用 k2_extract_backfill → app.knowledge_query）。
+
+    work_ids：把范围**收窄**到指定作品——与 scope 选取集做纯交集（⊆），
+    收窄是唯一允许的方向。None/[] = 不收窄，结果与改动前逐字一致。
+
+    **兼容壳**：既有调用方与 tests/test_source_check_nonbench_scope.py 依赖
+    列表语义（`== []`、`{x[0] for x in ...}`），故这里仍返回 list。
+    真内核是 iter_targets()——千万级段池必须走它，在真实库上 list() 会 OOM。
+    """
+    return list(iter_targets(scope, work_ids=work_ids))
 
 
 def run(scope: str = "used", conc: int = 8, limit: int = 0,
@@ -397,15 +446,23 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
                 _stat["unverified"] += 1   # 存量值类型不严：按未校验计，且必须重查
             todo.append((sid, text))
     else:
-        todo = targets(scope, work_ids=work_ids)
-    if limit:
-        todo = todo[:limit]
+        # 流式内核：千万级段池绝不整批进内存（旧写法在真实库上 MemoryError）。
+        gen = iter(iter_targets(scope, work_ids=work_ids))
+        if limit:
+            todo = list(itertools.islice(gen, limit))
+        else:
+            first = next(gen, None)
+            todo = [] if first is None else itertools.chain((first,), gen)
     label = f"scope={scope}"
     if work_ids:
         label += f"，work_id 收窄 {len(set(work_ids))} 本"
-    print(f"待检查 {len(todo)} 段（{label}，已检查跳过 {_stat['skip']}）")
-    if not todo:
-        return {**dict(_stat), "aborted": False}
+    if isinstance(todo, list):
+        print(f"待检查 {len(todo)} 段（{label}，已检查跳过 {_stat['skip']}）")
+        if not todo:
+            return {**dict(_stat), "aborted": False}
+    else:
+        # 流式时不给假数字：总数只在完成行按实际取了几段报出
+        print(f"待检查：流式扫描（{label}；总数在完成行给出）")
 
     def one(item):
         if abort.is_set():
@@ -471,9 +528,18 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
 
     t0 = time.time()
     workers = pool_workers(conc, [MODEL], serial_check=is_serial_model)   # 运行时兜底：绕过 CLI 直调 run() 也开不出越界池
+    fed = len(todo) if isinstance(todo, list) else 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        list(ex.map(one, todo))
-    done = (f"完成：ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
+        # 分批喂：`ex.map` 会先把整批建成 futures 列表，全量提交等于把整池驻留内存。
+        it = iter(todo)
+        while True:
+            chunk = list(itertools.islice(it, 2000))
+            if not chunk:
+                break
+            if not isinstance(todo, list):
+                fed += len(chunk)
+            list(ex.map(one, chunk))
+    done = (f"完成：进货 {fed} 段；ok={_stat['ok']} 判坏={_stat['bad']} failed={_stat['failed']} "
             f"unverified={_stat['unverified']}（{(time.time() - t0) / 60:.1f} 分钟）")
     if _stat["unverified"]:
         done += f"；{_stat['unverified']} 段模型返回类型不严/存量脏值，按未校验处理，需重跑"
@@ -485,26 +551,37 @@ def run(scope: str = "used", conc: int = 8, limit: int = 0,
 
 
 def scan() -> None:
+    # 真实库 10,395,708 段：旧写法 `s.query(Segment).all()` 一次性物化
+    # （实测 MemoryError）。改为按 Segment.id 升序 keyset 分页，内存 O(一批)。
+    tot = checked = ok = bad = unverified = 0
+    batch = 20000
+    last = None
     with db.session() as s:
-        rows = [(x.id, x.integrity) for x in s.query(Segment).all()]
-    tot = len(rows)
-    checked = ok = bad = unverified = 0
-    for _sid, integ in rows:
-        try:
-            d = json.loads(integ or "{}")
-        except Exception:
-            continue
-        if not isinstance(d, dict):
-            continue
-        v = parse_src_ok(d.get("src_ok"))
-        if v is True:
-            checked += 1
-            ok += 1
-        elif v is False:
-            checked += 1
-            bad += 1
-        elif "src_ok" in d or d.get("src_ok_unverified"):
-            unverified += 1        # 类型不严的存量值/显式未校验态：不算完好也不算判坏
+        while True:
+            q = s.query(Segment.id, Segment.integrity)
+            if last is not None:
+                q = q.filter(Segment.id > last)
+            rows = q.order_by(Segment.id).limit(batch).all()
+            if not rows:
+                break
+            for _sid, integ in rows:
+                last = _sid
+                tot += 1
+                try:
+                    d = json.loads(integ or "{}")
+                except Exception:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                v = parse_src_ok(d.get("src_ok"))
+                if v is True:
+                    checked += 1
+                    ok += 1
+                elif v is False:
+                    checked += 1
+                    bad += 1
+                elif "src_ok" in d or d.get("src_ok_unverified"):
+                    unverified += 1    # 类型不严的存量值/显式未校验态：不算完好也不算判坏
     msg = (f"全库 {tot} 段；已检查 {checked}（完好 {ok}，判坏 {bad}），"
            f"未校验 {unverified}，未检查 {tot - checked - unverified}")
     if unverified:
