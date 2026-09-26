@@ -37,9 +37,31 @@ os.environ["REVIEW_NO_AUTH"] = "1"
 #   PluginValidationError exit 3——守卫辅助函数不得用该前缀。
 import pytest
 
-from app.live_guard import refuse_if_live_running, whole_run_lock
+from app.live_guard import prod_lock_path, refuse_if_live_running, whole_run_lock
 
 _run_guard = None
+
+# OPEN-4（2026-09-26 入册，测试卫生）：干净源检出（ROOT/data 尚不存在）里
+# 裸跑 pytest，整轮锁位=ROOT/data，_acquire_lock 的 mkdir(parents=True) 会
+# 在检出目录里**创建** data/——对「不在源检出里跑套件」的 reviewer/agent 是
+# 意外副作用。收口双保险：
+# 1) 「LG_LOCK_DIR 未设且锁目录原本不存在」时 pytest_configure 发响亮
+#    warning（文本含 OPEN-4 / LG_LOCK_DIR 字面量，由 tests/test_live_guard_
+#    mutex.py::test_open4_bare_pytest_warns_and_leaves_no_data_dir 在仿造
+#    根里断言钉死）；跑套件建议先设 LG_LOCK_DIR=<临时目录>（见 docs/
+#    R6守卫覆盖缺口入册第二批_OPEN4-5_20260926.md）。
+# 2) 本轮创建的目录在 sessionfinish rmdir——只删空目录、只删本轮自己创建
+#    的（非空/并发产物/他人目录一律保留）；LG_LOCK_DIR 显式覆盖时锁位在
+#    检出之外，整条逻辑不适用。
+_open4_cleanup_dir: Path | None = None
+
+
+def _open4_notice_text(d: Path) -> str:
+    return (
+        "[R6 测试卫生 OPEN-4] 未设 LG_LOCK_DIR：本轮 pytest 以源检出目录 "
+        f"{d} 为整轮锁位（将创建 {d / 'live_run.lock'}）——干净 worktree 里"
+        "这是意外副作用。建议跑套件前设 LG_LOCK_DIR=<临时目录> 把锁隔离到"
+        "检出之外；本轮若由本会话创建该目录，收尾时会自动移除空目录。")
 
 
 def _release_run_guard() -> None:
@@ -49,6 +71,18 @@ def _release_run_guard() -> None:
         guard.__exit__(None, None, None)
 
 
+def _open4_remove_created_dir() -> None:
+    """只 rmdir 本轮自创的空锁目录：非空（他人产物/并发会话）或已消失
+    → 原样保留，绝不递归删。"""
+    global _open4_cleanup_dir
+    d, _open4_cleanup_dir = _open4_cleanup_dir, None
+    if d is not None:
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+
+
 def pytest_configure(config) -> None:
     """整轮取锁：本会话开始时（收集前）检锁并持有生产锁位。
 
@@ -56,7 +90,15 @@ def pytest_configure(config) -> None:
     SystemExit——裸 SystemExit 从 pytest_configure 冒泡时的退出码/输出行为
     不受 pytest 保证（实测一轮子进程 pytest 竟 exit 0 静默放行，方向 B 失归；
     pytest.exit 即使未被特判也会以 INTERNALERROR 非零收场，绝不静默）。"""
-    global _run_guard
+    global _run_guard, _open4_cleanup_dir
+    lock_dir = prod_lock_path().parent
+    if not (os.environ.get("LG_LOCK_DIR") or "").strip() \
+            and not lock_dir.exists():
+        # 判据必须在取锁（内部 mkdir）之前采集；取锁被拒时目录并未创建，
+        # 收尾 rmdir 落空即 no-op。
+        _open4_cleanup_dir = lock_dir
+        config.issue_config_time_warning(
+            UserWarning(_open4_notice_text(lock_dir)), stacklevel=2)
     try:
         refuse_if_live_running("全量 pytest")
         _run_guard = whole_run_lock("全量 pytest")
@@ -69,6 +111,7 @@ def pytest_configure(config) -> None:
 def pytest_sessionfinish(session, exitstatus) -> None:
     """整轮结束释放（内部只删自己的锁；未持锁时为 no-op）。"""
     _release_run_guard()
+    _open4_remove_created_dir()
 
 
 @pytest.hookimpl(hookwrapper=True)

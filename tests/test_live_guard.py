@@ -35,12 +35,26 @@ sys.path.insert(0, str(ROOT))
 
 from app import live_guard as LG                       # noqa: E402
 
+# OPEN-5（2026-09-26 入册）：模块导入期采集外部 LG_LOCK_DIR 覆盖（autouse
+# 夹具会逐用例 delenv 再恢复，会话级取值只能在这里采）。本文件的既有断言
+# 钉的是**非覆盖**口径（conftest 整轮锁在 ROOT/data 生产位）；覆盖口径
+# （一个旋钮两侧同跟随）由 test_live_guard_mutex.py::
+# test_lock_path_single_source_exported_by_config 钉死，两不放松。
+_ORIG_LOCK_DIR_OVERRIDE = (os.environ.get("LG_LOCK_DIR") or "").strip()
+
 
 @pytest.fixture(autouse=True)
 def _isolated_lock_dir(tmp_path, monkeypatch):
     """锁路径隔离（9e02916 会审一般项）：全部用例盯 tmp_path，绝不写/删
-    真实生产锁位。"""
+    真实生产锁位。
+
+    OPEN-5 修正：config.live_lock_path() 里 LG_LOCK_DIR 环境变量的覆盖**优先
+    于** monkeypatch 改 config.DATA_DIR——只覆 DATA_DIR 时，只要外部设了
+    LG_LOCK_DIR，lock_path() 仍指覆盖目录，conftest 在该目录整轮持有的
+    purpose="pytest" 锁会让前置断言炸掉全文件（主控实测 11 errors）。故必须
+    先在夹具内显式清除该旋钮，隔离才真正生效。"""
     from app import config
+    monkeypatch.delenv("LG_LOCK_DIR", raising=False)
     monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
     assert LG.live_run_active() is None, "前置：隔离目录不应有锁"
 
@@ -94,6 +108,13 @@ def test_refuse_default_watches_prod_path_not_test_dir():
     进程的 conftest 已在生产位整轮持 purpose="pytest" 的锁——默认口径
     必须看到它并拦（恰证观察目标在生产位、与测试 DATA_DIR 互不相干）。
     生产位本身绝不创建/删除（conftest 守卫持有并自释放），只钉不变式。"""
+    if _ORIG_LOCK_DIR_OVERRIDE:
+        pytest.skip(
+            "OPEN-5：本轮 pytest 在外部 LG_LOCK_DIR 覆盖下启动，conftest 的"
+            "整轮锁随同一旋钮落在覆盖目录而非 ROOT/data 生产位——本用例钉的"
+            "「非覆盖口径下默认盯生产位」前置不成立（断言原样保留、不放松）；"
+            "覆盖口径的两侧同跟随不变式由 test_live_guard_mutex.py::"
+            "test_lock_path_single_source_exported_by_config 钉死")
     from app import config
     assert LG.prod_lock_path() == \
         Path(config.ROOT) / "data" / "live_run.lock"
