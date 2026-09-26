@@ -20,11 +20,14 @@
     rail.className = 'lg-nav-rail';
     nav.insertBefore(rail, nav.querySelector('.lg-nav-list'));
     nav.querySelectorAll('.lg-nav-list,.lg-nav-sep').forEach(function (node) { rail.appendChild(node); });
+    var navLists = rail.querySelectorAll('.lg-nav-list');
     ['01 / 观察与材料', '02 / 判断与校准', '03 / 系统与交接'].forEach(function (label, i) {
+      var target = navLists[i];
+      if (!target) return;
       var section = document.createElement('div');
       section.className = 'lg-nav-section';
       section.textContent = label;
-      rail.querySelectorAll('.lg-nav-list')[i].prepend(section);
+      target.prepend(section);
     });
     nav.querySelectorAll('.lg-nav-item').forEach(function (link, i) {
       var index = document.createElement('span');
@@ -137,7 +140,8 @@
     var index = LG.MODULES.findIndex(function (m) { return m.slug === slug; });
     var kicker = document.createElement('div');
     kicker.className = 'lg-kicker';
-    kicker.textContent = 'RESEARCH ARCHIVE  /  ' + two(index + 1);
+    // 目录里没有该 slug（findIndex == -1）时不渲染伪序号「00」，改用显式可见的「--」哨兵
+    kicker.textContent = 'RESEARCH ARCHIVE  /  ' + (index >= 0 ? two(index + 1) : '--');
     header.prepend(kicker);
     var actions = document.createElement('div');
     actions.className = 'lg-head-actions';
@@ -158,11 +162,15 @@
         byId('lg-sync').textContent = '读取失败 · 上次数据保留';
         LG.showBanner('读取失败：' + (err && err.message ? err.message : err), true);
         var banner = byId('banner');
-        var retry = document.createElement('button');
-        retry.type = 'button';
-        retry.textContent = '重新读取';
-        retry.addEventListener('click', refresh);
-        banner.appendChild(retry);
+        // 去重：同一个 banner 上最多一个「重新读取」按钮，多次失败不得堆叠
+        if (banner && !banner.querySelector('.lg-banner-retry')) {
+          var retry = document.createElement('button');
+          retry.type = 'button';
+          retry.className = 'lg-banner-retry';
+          retry.textContent = '重新读取';
+          retry.addEventListener('click', refresh);
+          banner.appendChild(retry);
+        }
       }).finally(function () { busy = false; byId('lg-refresh-btn').disabled = false; });
     }
     byId('lg-refresh-btn').addEventListener('click', refresh);
