@@ -15,6 +15,14 @@
    边界输入不炸；
 4. 退出码：跳过=0、导入=0、修复半本=0（+ 告警含 work id 与补齐段数）、参数不齐=2
    ——CLI 退码用子进程真跑临时库验证。
+5. role 注入收口（孤儿裁定 `lg-review-import-resume`）：`--role "a; import_state:
+   complete"` 落库前结构性字符即被转义（note 只剩三段），解析侧只认末两段严格
+   格式——半本重跑**仍续跑**（改前：被判 complete 直接跳过）；存量已被注入污染的
+   note 也按末段续跑；转义可逆（`_role_text` 读回原文，与 anchors 一致）。
+6. 同源多行的选取确定化：同源两行（v1 本 + v2 半本共享 `file:` 源）必须续跑
+   **ours** 那行、v1 一段不动；`_pick_work` 的排序键逐级可验（ours 优先 →
+   半本优先 → created_at → id 全序）。改前是 `filter_by(source).first()`，
+   无 ORDER BY 时选中哪行由查询计划决定。
 
 自包含：conftest 的临时 sqlite + tmp_path 造书，零网络、零真实库（`data/` 不碰）。
 """
@@ -74,6 +82,11 @@ def _work(path: str) -> Work:
         return s.query(Work).filter_by(source=f"file:{path}").one()
 
 
+def _work_by_id(work_id: str) -> Work:
+    with db.session() as s:
+        return s.query(Work).filter(Work.id == work_id).one()
+
+
 def _rows(work_id: str) -> list[tuple[int, str, str]]:
     """该书按 ordinal 排序的 (ordinal, text, 主键)——顺序与内容都要和一次性导入对齐。"""
     with db.session() as s:
@@ -88,12 +101,17 @@ def _n_rows(work_id: str) -> int:
 
 
 def _seed_work(path: str, *, title: str, note: str | None, anchors: str | None,
-               texts: list[str], seg_version: int = 2) -> str:
-    """直接建库内行（造「改动前的存量半本 / 完整本 / 别人写的同源书」）。"""
+               texts: list[str], seg_version: int = 2,
+               created_at: str | None = None) -> str:
+    """直接建库内行（造「改动前的存量半本 / 完整本 / 别人写的同源书」）。
+
+    `created_at` 显式给出时用来钉 `_pick_work` 的排序键（造并列 / 造早晚），
+    不给就走模型默认的当前秒。"""
     db.init_db()
+    extra = {"created_at": created_at} if created_at else {}
     with db.session() as s:
         w = Work(id=new_id("WK"), title=title, source=f"file:{path}",
-                 note=note, anchors=anchors)
+                 note=note, anchors=anchors, **extra)
         s.add(w)
         s.flush()
         for i, ch in enumerate(texts):
@@ -101,6 +119,11 @@ def _seed_work(path: str, *, title: str, note: str | None, anchors: str | None,
                           n_chars=len(ch), seg_version=seg_version, integrity="{}"))
         s.commit()
         return w.id
+
+
+def _ours_note(state: str) -> str:
+    """本脚本会写出的 note 形状（夹具造 ours 行用，别在测试里手抄一遍格式）。"""
+    return IC._note("训练语料", state)
 
 
 def _crash_after(limit: int | None):
@@ -354,3 +377,154 @@ def test_cli_exit_codes_on_temp_db(tmp_path):
     assert "已导入过" in second.stdout
     assert (tmp_path / "cli.db").exists()
     assert _real_db_state() == before, "临时库之外的真库不得被创建或改写"
+
+
+# ── 5. role 注入收口：结构转义 + 严格段解析 ───────────────────
+
+EVIL_ROLE = "a; import_state: complete"
+
+
+def test_role_cannot_forge_import_state(tmp_path, capsys, monkeypatch):
+    """`--role "a; import_state: complete"` 不得让**半本**被判 complete（改前：跳过）。
+
+    改前 `_note` 直接 f-string 拼 role、`import_state` 按 `;` 切分取**首个**匹配
+    key ⇒ 这种角色在 note 里造出一个真的 `import_state: complete` 段，半本重跑
+    直接打印「已导入过」退 0，半本永远补不齐。"""
+    monkeypatch.setattr(IC, "BATCH", 2)
+    flaky, st = _crash_after(4)
+    monkeypatch.setattr(IC.si, "analyze", flaky)
+    path = _book(tmp_path, paras=8)
+    with pytest.raises(RuntimeError, match="模拟中断"):
+        IC.main([path, _title("inj"), EVIL_ROLE])
+
+    w = _work(path)
+    assert [o for o, _, _ in _rows(w.id)] == [0, 1, 2, 3], "前 4 段已提交，留半本"
+    assert w.note.count(";") == 2, "role 里的 `;` 必须被转义：note 只剩两个结构分隔符"
+    assert "import_state: complete" not in w.note, "note 里不得留裸的假 import_state 段"
+    assert IC._strict_state(w) == IC.PARTIAL
+    assert IC.import_state(w) == IC.PARTIAL, "半本就是半本"
+
+    st["limit"] = None                                   # 中断原因消失：同一路径重跑
+    capsys.readouterr()
+    assert IC.main([path, _title("inj"), EVIL_ROLE]) == 0
+    out = capsys.readouterr().out
+    assert "已导入过" not in out, "半本不得被 role 里的假 import_state 段判成完整本"
+    assert "[告警]" in out and f"work={w.id}" in out and "补齐 4 段" in out
+    got = _rows(w.id)
+    assert [o for o, _, _ in got] == list(range(8))
+    assert [t for _, t, _ in got] == _chunks(path), "补齐后等于一次性完整导入"
+    assert IC.import_state(_work(path)) == IC.COMPLETE
+
+
+def test_legacy_injected_note_still_resumes(tmp_path, capsys):
+    """存量**已被注入污染**的 note ⇒ 末段权威，半本继续续跑（改前取首个匹配＝跳过）。
+
+    这条独立于转义，钉的是解析侧口径：note 已经写坏了（改前版本落下的脏行）
+    也不能被注在中间的同 key 段带成 complete。"""
+    path = _book(tmp_path, paras=6)
+    chunks = _chunks(path)
+    poisoned = (f"{IC.ROLE_KEY}: a; {IC.STATE_KEY}: {IC.COMPLETE}; "
+                f"{IC.SEG_KEY}={IC.SEG_VAL}; {IC.STATE_KEY}: {IC.PARTIAL}")
+    wid = _seed_work(path, title="poisoned", note=poisoned, anchors=None,
+                     texts=chunks[:2])
+    w = _work(path)
+    assert IC._strict_state(w) == IC.PARTIAL, "只认末两段的严格格式"
+    assert IC.import_state(w) == IC.PARTIAL
+
+    capsys.readouterr()
+    assert IC.main([path, "poisoned", "旧行"]) == 0
+    out = capsys.readouterr().out
+    assert "已导入过" not in out, "注在中间的 complete 段不得生效"
+    assert "[告警]" in out and f"work={wid}" in out and "补齐 4 段" in out
+    assert [t for _, t, _ in _rows(wid)] == chunks
+    assert IC.import_state(_work(path)) == IC.COMPLETE
+
+
+def test_role_escape_is_reversible_and_note_has_three_segments(tmp_path, capsys):
+    """转义不许丢字：note 读回来的 role 与 anchors 存的都等于原文；段数仍是三段。"""
+    path = _book(tmp_path, paras=2)
+    role = "副本当范本：都市; 含分号; 带\n换行\\反斜杠"
+    assert IC.main([path, _title("esc"), role]) == 0
+    w = _work(path)
+    segs = IC._note_segments(w)
+    assert [k for k, _ in segs] == [IC.ROLE_KEY, IC.SEG_KEY, IC.STATE_KEY], \
+        "结构段只有脚本自己写的三段"
+    assert segs[-2:] == [(IC.SEG_KEY, IC.SEG_VAL), (IC.STATE_KEY, IC.COMPLETE)]
+    assert IC._role_text(w) == role, "_role_text ∘ _safe_role 必须是恒等（不静默丢字）"
+    assert json.loads(w.anchors)["corpus_role"] == role, "anchors 走 JSON，存原文"
+
+
+# ── 6. 同源多行：选取确定化 ──────────────────────────────────
+
+def test_same_source_picks_ours_row(tmp_path, capsys):
+    """同源两行（先插的 v1 本 + 后插的 v2 半本）⇒ 续跑必须落在 **ours** 那行。
+
+    改前 `filter_by(source=src).first()` 没有 ORDER BY：SQLite 按扫描顺序返回，
+    先插的 v1 行被选中 ⇒ 打印「已导入过」跳过，v2 半本永远补不齐。`created_at`
+    显式钉成「v1 更早」：这样即便别的排序键（如 ours 优先）被摘掉，v1 也一定
+    胜出——本用例因此钉的是**ours 优先**这一级，而不是碰巧的插入顺序。"""
+    path = _book(tmp_path, paras=6)
+    chunks = _chunks(path)
+    v1_id = _seed_work(path, title="v1-first", note=None, anchors=None,
+                       texts=chunks, seg_version=1,      # 先插：改前 .first() 选它
+                       created_at="2020-01-01T00:00:00Z")
+    v2_id = _seed_work(path, title="v2-half", note=_ours_note(IC.PARTIAL),
+                       anchors=None, texts=chunks[:2],
+                       created_at="2021-01-01T00:00:00Z")
+    assert not IC.is_ours(_work_by_id(v1_id)) and IC.is_ours(_work_by_id(v2_id))
+
+    capsys.readouterr()
+    assert IC.main([path, "same-src", "训练语料"]) == 0
+    out = capsys.readouterr().out
+    assert "[告警]" in out and f"work={v2_id}" in out and "补齐 4 段" in out, \
+        "必须续跑 ours 的半本，而不是同源的 v1 本"
+    assert [t for _, t, _ in _rows(v2_id)] == chunks
+    assert IC.import_state(_work_by_id(v2_id)) == IC.COMPLETE
+    with db.session() as s:                              # v1 段一根汗毛都不许动
+        segs = (s.query(Segment).filter(Segment.work_id == v1_id)
+                .order_by(Segment.ordinal).all())
+    assert [g.seg_version for g in segs] == [1] * 6
+    assert [g.text for g in segs] == chunks
+
+    capsys.readouterr()
+    assert IC.main([path, "same-src", "训练语料"]) == 0
+    assert "已导入过" in capsys.readouterr().out, "补齐后再重跑幂等跳过"
+    assert _n_rows(v2_id) == 6 and _n_rows(v1_id) == 6
+
+
+def test_pick_work_order_keys_are_total(tmp_path):
+    """排序键逐级可验：ours 优先 → 半本优先 → created_at → id（同刻比 id）。"""
+    path = _book(tmp_path, paras=4)
+    chunks = _chunks(path)
+    foreign = _seed_work(path, title="f", note=None, anchors=None,
+                         texts=chunks, seg_version=1, created_at="2020-01-01T00:00:00Z")
+    ours_done = _seed_work(path, title="d", note=_ours_note(IC.COMPLETE),
+                           anchors=json.dumps({"segmenter": 2}), texts=chunks,
+                           created_at="2020-01-01T00:00:01Z")
+    ours_half = _seed_work(path, title="h", note=_ours_note(IC.PARTIAL),
+                           anchors=None, texts=chunks[:1],
+                           created_at="2020-01-01T00:00:09Z")
+    with db.session() as s:
+        got = IC._pick_work(s, f"file:{path}")
+        assert got is not None and got.id == ours_half, "半本优先于完整本与别人的行"
+        assert IC._pick_work(s, "file:根本不存在的路径") is None
+
+    # 键③：前两级并列（都是别人的行）时按 created_at，早的赢——哪怕是后插的
+    p2 = _book(tmp_path, paras=3)
+    late = _seed_work(p2, title="late", note=None, anchors=None, texts=_chunks(p2),
+                      seg_version=1, created_at="2021-01-01T00:00:09Z")
+    early = _seed_work(p2, title="early", note=None, anchors=None, texts=_chunks(p2),
+                       seg_version=1, created_at="2021-01-01T00:00:01Z")
+    with db.session() as s:
+        assert IC._pick_work(s, f"file:{p2}").id == early
+
+    # 键④：连 created_at 都相同（同秒造的）时按 id 收口，且与插入顺序无关
+    p3 = _book(tmp_path, paras=3)
+    ids = [_seed_work(p3, title=f"t{i}", note=None, anchors=None, texts=_chunks(p3),
+                      seg_version=1, created_at="2022-01-01T00:00:00Z")
+           for i in range(3)]
+    with db.session() as s:
+        picked = IC._pick_work(s, f"file:{p3}").id
+        assert picked == min(ids)
+        assert picked == IC._pick_work(s, f"file:{p3}").id, "同一输入必须同一输出"
+    assert foreign != ours_done   # 三行互不相同（夹具本身没写歪）
