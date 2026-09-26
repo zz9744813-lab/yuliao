@@ -56,6 +56,7 @@ from app import db  # noqa: E402
 from app.models import (BenchmarkItem, BenchmarkSet, ControlledCorruption, Segment,  # noqa: E402
                         exclude_corpus_v2_segments)
 from app.ids import new_id  # noqa: E402
+from k2_extract_backfill import src_ok_strict  # noqa: E402  src_ok 读取侧唯一入口（同源消费）
 
 
 def _eligible_pairs(s) -> list[tuple[ControlledCorruption, Segment]]:
@@ -71,11 +72,7 @@ def _eligible_pairs(s) -> list[tuple[ControlledCorruption, Segment]]:
         seg = bm.get(cc.segment_id)
         if seg is None:                       # 只收基准段
             continue
-        try:
-            integ = json.loads(seg.integrity or "{}")
-        except Exception:
-            integ = {}
-        if integ.get("src_ok") is not True:   # 源文本必须干净
+        if not src_ok_strict(seg):            # 源文本必须干净（严格布尔，未校验=不过闸）
             continue
         dr = cc.drift or {}
         if isinstance(dr, str):
@@ -395,11 +392,7 @@ def build_human_vs_ai(name: str, version: int = 1, seed: int = 20260918,
                 continue
             if cand.prompt_version not in BLIND_REVIEW_PROMPT_VERSIONS:
                 continue
-            try:
-                integ = json.loads(seg.integrity or "{}")
-            except Exception:
-                integ = {}
-            if integ.get("src_ok") is not True:
+            if not src_ok_strict(seg):        # 严格布尔，未校验=不过闸
                 continue
             rows.append((cand, seg))
         if dry_run:

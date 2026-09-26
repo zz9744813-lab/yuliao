@@ -57,6 +57,7 @@ from app.models import (BenchmarkItem, Candidate, ControlledCorruption,  # noqa:
                         ExpressionStrategy, Frame, JudgeRun, ReviewItem, Segment, Work,
                         is_corpus_v2_work)
 from make_random_batch import looks_watermarked  # noqa: E402
+from k2_extract_backfill import src_ok_state  # noqa: E402  src_ok 三态唯一入口（同源消费）
 
 OUT_DIR = ROOT / "data" / "exports"
 
@@ -239,16 +240,14 @@ def _excluded_reason(s, seg: Segment | None, starts: dict, *,
     if for_train:
         if work is not None and (work.title or "").startswith("fixture"):
             return "fixture"
-        try:
-            integ = json.loads(seg.integrity or "{}")
-        except Exception:
-            integ = {}
         # 军师 P1-6：训练口径要求 src_ok **必须 True**——"没查过=不可用"（铁律）。
         # 旧口径只排 False，32 条未校勘段就这么混进了 SFT。
         # 会审意见：False（查过且判坏）与 None（从未查过）是**互斥口径**，分开报。
-        if integ.get("src_ok") is False:
+        # 解析层同源（k2_extract_backfill.src_ok_state）：非字典 JSON/类型不严=未校验（None），不抛异常。
+        state = src_ok_state(seg)
+        if state is False:
             return "bad_src"
-        if integ.get("src_ok") is not True:   # 缺键与 null 同属"从未校验"
+        if state is not True:   # 缺键与 null 同属"从未校验"
             return "src_unverified"
     # 内容级隔离（P1-5）：无论 role，正文命中基准冻结文本即剔除（跨切分孪生/同文）
     if _hits_bench_text(seg.text_clean or seg.text if seg else None):

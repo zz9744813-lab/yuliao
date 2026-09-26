@@ -34,6 +34,7 @@ from app import db  # noqa: E402
 from app.ai_flavor import analyze  # noqa: E402
 from app.models import Segment, Work, exclude_corpus_v2_segments  # noqa: E402
 from make_random_batch import extras_start, looks_watermarked  # noqa: E402
+from k2_extract_backfill import src_ok_strict  # noqa: E402  src_ok 读取侧唯一入口（同源消费）
 
 N_DEFAULT = 18
 
@@ -47,11 +48,7 @@ def _eligible_segments(s) -> list:
     for seg in s.query(Segment).filter(
             Segment.role.is_(None) | (Segment.role == "train"),
             exclude_corpus_v2_segments()).all():
-        try:
-            integ = json.loads(seg.integrity or "{}")
-        except Exception:
-            integ = {}
-        if integ.get("src_ok") is not True:
+        if not src_ok_strict(seg):            # 严格布尔，未校验=不过闸
             continue
         text = seg.text_clean or seg.text or ""
         if len(text.strip()) < 60 or looks_watermarked(seg.text or ""):
