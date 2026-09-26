@@ -33,8 +33,14 @@
 - 残留窄窗 1（pytest 启动前）：pytest 进程启动到 pytest_configure 持锁之
   间存在窄窗。互斥本身不破——谁先到谁拿锁、后到方被拒；但若 live 先拿
   锁，pytest 本次启动作废（configure 期 SystemExit），需重排。
-- 残留窄窗 2：自定义 LG_DATA_DIR 的 live 进程锁在别处，不在 pytest 侧
-  观察窗内（pytest 盯生产锁位）。
+- 残留窄窗 2（2026-09-26 OPEN-3 收口，审查实验 e 已复现真实重叠）：自
+  定义 LG_DATA_DIR 的 live 进程——若不同时显式设 LG_LOCK_DIR，其锁位与
+  pytest 侧观察的生产锁位**分叉**，取锁入口 `_lock_scope_divergence`
+  硬拦拒绝并给可执行处置指引（设 LG_LOCK_DIR 同口径 / 不设
+  LG_DATA_DIR）；仅当显式设了 LG_LOCK_DIR（＝声明独立沙箱、两侧同跟随
+  同一旋钮）才放行，此时不在 pytest 观察窗内属明示声明，不再是隐性分
+  叉。pytest 进程本身豁免该判据（conftest 覆写 LG_DATA_DIR 是设计行为，
+  该口径由路径不变式回归钉死）。
 - 释放边界：atexit 覆盖正常/异常退出与键盘中断；**进程被硬杀**
   （SIGKILL/断电/任务管理器结束/taskkill /F）锁无法自释放，留下含
   pid 的完整死锁。处置（2026-09-25 事故收口，死 pid 自愈，见
@@ -61,7 +67,11 @@
 - 锁内容 = {"purpose","pid","started_at"}——诊断可读；purpose 区分
   各 live 入口名与 "pytest"；
 - 释放保守：回读锁内容比对 pid+purpose，只删自己的锁——运行中锁被人
-  工清除、他人接管时，前者的退出不得删掉后者的锁（9e02916 会审一般项）；
+  工清除、他人接管时，前者的退出不得删掉后者的锁（9e02916 会审一般项；
+  pid 分支是**跨进程同 purpose** 场景的唯一防线——既有两条保守释放用例
+  前任/继任同进程且 purpose 不同，承重验证走不到 pid 分支，2026-09-26
+  OPEN-1 由 tests/test_live_guard_mutex.py test_open1_crossproc_* 跨进
+  程钉死）；
 - 锁创建用 O_EXCL 原子语义——两个进入者同时起跑也只有一个能拿到。
 """
 from __future__ import annotations
@@ -70,6 +80,7 @@ import datetime
 import errno
 import json
 import os
+import sys
 import time
 import warnings
 from contextlib import contextmanager
@@ -248,19 +259,67 @@ def live_run_active() -> dict | None:
     return _info_at(lock_path())
 
 
+def _lock_scope_divergence() -> str | None:
+    """OPEN-3 硬拦判据（2026-09-26 入册；独立审查实验 e 已复现真实重叠）：
+    检出「LG_DATA_DIR 显式设置而 LG_LOCK_DIR 未设」造成的锁位口径分叉。
+
+    分叉机制：live 侧锁位=本进程 DATA_DIR（跟随 LG_DATA_DIR 漂移），
+    pytest 侧观察/持锁位=生产锁位 ROOT/data（**不**随 LG_DATA_DIR 漂移，
+    P1 钉法）——只拨前者这一个旋钮时两侧看的不是同一个文件，O_EXCL
+    互斥对彼此失明，live 与全量 pytest 可真实并发（R6 违规）。
+
+    处置：live 取锁入口（live_lock.__enter__）硬拦，给可执行指引（二
+    选一）：设 LG_LOCK_DIR=<生产 data 目录>与生产锁位同口径恢复互斥；
+    或不设 LG_DATA_DIR（数据与锁都回 ROOT/data）。确需整库独立沙箱
+    （明知不与 pytest 并发）时显式设 LG_LOCK_DIR 到自己的目录＝声明隔
+    离意图，两侧同跟随同一旋钮，不再分叉、放行。
+
+    pytest 进程（"pytest"/"_pytest" 已加载）跳过：conftest 把
+    LG_DATA_DIR 覆写成临时目录是**设计行为**（pytest 侧固定盯生产锁
+    位），该口径的分叉已由 test_live_guard/test_live_guard_mutex 的
+    路径不变式钉死，若在这里拦会把整个测试套件 lockout——危险场景只
+    发生在真实 live 进程，驱动脚本从不 import pytest。
+    """
+    if "pytest" in sys.modules or "_pytest" in sys.modules:
+        return None
+    data_dir = (os.environ.get("LG_DATA_DIR") or "").strip()
+    if not data_dir:
+        return None                                   # 未设：锁位=ROOT/data，两侧同位
+    if (os.environ.get("LG_LOCK_DIR") or "").strip():
+        return None                                   # 显式声明锁目录：两侧同随同一旋钮
+    from app import config
+    prod_dir = os.path.join(str(config.ROOT), "data")
+    if os.path.normcase(os.path.abspath(data_dir)) \
+            == os.path.normcase(os.path.abspath(prod_dir)):
+        return None                                   # LG_DATA_DIR 正指生产数据目录：不分叉
+    return (
+        f"[live 互斥守卫] 锁位口径分叉：LG_DATA_DIR={data_dir} 显式设置而 "
+        f"LG_LOCK_DIR 未设——live 锁会落在 {Path(data_dir) / config.LOCK_FILE_NAME}，"
+        f"而 pytest 侧观察/持有的是生产锁位 {Path(prod_dir) / config.LOCK_FILE_NAME}，"
+        f"两把不是同一个文件，R6 互斥对分叉失明（审查实验 e 已复现真实重叠）。"
+        f"处置（二选一）：设 LG_LOCK_DIR={prod_dir} 与生产锁位同口径；"
+        f"或不设 LG_DATA_DIR（数据与锁都回 ROOT/data）。确需整库隔离独立"
+        f"跑（明知不与 pytest 并发）时，显式设 LG_LOCK_DIR 到你的目录即声"
+        f"明隔离意图、放行。")
+
+
 class live_lock:
     """live 入口的互斥上下文：进入即持锁（O_EXCL 原子创建），退出即释放。
 
     用法：`with live_lock("k2_extract_backfill"): ...真跑...`
     锁被他人持有（live 实跑或 pytest 整轮持锁）→ 进入时即 SystemExit
     （拒绝重叠，不排队——排队会造成预算/超时语义不可控，宁可拒绝让调
-    用方重排）。"""
+    用方重排）。口径分叉（LG_DATA_DIR 显式设置而 LG_LOCK_DIR 未设，
+    _lock_scope_divergence）同样进入即拒——2026-09-26 OPEN-3 硬拦。"""
 
     def __init__(self, purpose: str):
         self.purpose = purpose
         self._path: Path | None = None
 
     def __enter__(self):
+        diverged = _lock_scope_divergence()
+        if diverged:
+            raise SystemExit(diverged)
         p = lock_path()
         info = {"purpose": self.purpose, "pid": os.getpid(),
                 "started_at": datetime.datetime.now().isoformat(timespec="seconds")}

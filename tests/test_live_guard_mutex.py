@@ -12,6 +12,24 @@
 4. **方向 C**：pytest 整轮结束（pytest_sessionfinish 释放）后锁位无
    残留，live 可正常获取；
 5. **竞态**：两个 live 进程同一时刻起跑，O_EXCL 原子性保证恰好一个赢。
+6. **OPEN-1（2026-09-26 入册，承重墙补网）**：**跨进程同 purpose** 的
+   保守释放——test_release_only_deletes_own_lock / test_live_blocks_
+   while_pytest_lock_held 两条在册用例的前任/继任都在**同一进程**里且
+   purpose 不同，_release_lock 的 **pid 回读分支**在沙箱里删掉后 25 个
+   在册用例仍全绿（审查判定：承重墙无在册回归）。本文件
+   test_open1_crossproc_* 用两个真实子进程（同 purpose）钉死该分支。
+7. **OPEN-2（2026-09-26 入册）**：方向 A 的 pytest 侧在册实现是父进程
+   内的**进程内替身**（test_direction_a_* 用 whole_run_lock(watch=)）
+   ——本文件 test_open2_* 改由**子进程真跑 `python -m pytest`** 持整轮
+   锁（conftest 真实 pytest_configure 取锁），并在探针用例的
+   pytest_runtest_call hookwrapper **post-yield** 阻塞（测试已跑完、
+   session 未结束 ⇒ 锁必须仍在握）；真实 live 子进程抢锁必须被拒、锁
+   内容逐字节未变、且锁内 pid == pytest 子进程 pid。
+8. **OPEN-3（2026-09-26 入册，硬拦落地）**：LG_DATA_DIR 显式设置而
+   LG_LOCK_DIR 未设 ⇒ live 锁位与 pytest 观察的生产锁位**分叉**（审查
+   实验 e 已复现真实重叠）——app/live_guard.py 取锁入口
+   `_lock_scope_divergence` 硬拦；test_open3_* 钉拒绝口径与放行对照
+   （显式设 LG_LOCK_DIR＝声明隔离意图 ⇒ 放行）。
 
 纪律：只起子进程验证协议，不碰 DB、不跑 --live 开放路径。
 """
@@ -71,10 +89,53 @@ LIVE_RACE = (
     "    time.sleep(0.3)\n"
 )
 
+# live 角色（交棒版，OPEN-1）：PY1 与 PY2 用**同一 purpose**，中间父进程
+# unlink 锁文件模拟人工清锁/崩溃残留自愈——前任（PY1）迟到退出会不会删
+# 掉继任者（PY2）的锁，只剩 _release_lock 的 pid 回读分支可拦（purpose
+# 两者相同，purpose 比对恒真）。
+LIVE_RELAY = (
+    "import os, time\n"
+    "from app import live_guard as lg\n"
+    "ready, release = os.environ['LG_RELAY_READY'], os.environ['LG_RELAY_RELEASE']\n"
+    "with lg.live_lock('t-relay'):\n"
+    "    with open(ready, 'w') as f:\n"
+    "        f.write(str(os.getpid()))\n"
+    "    end = time.time() + 60\n"
+    "    while not os.path.exists(release) and time.time() < end:\n"
+    "        time.sleep(0.05)\n"
+    "print('CHILD_RELAY_EXITED', flush=True)\n"
+)
+
+# live 角色（分叉场景，OPEN-3）：LG_DATA_DIR 显式改而 LG_LOCK_DIR 未设
+# （子进程内再 pop 一次，防 .env setdefault 注入）⇒ 锁位与生产锁位分叉，
+# 取锁入口必须硬拦（_lock_scope_divergence）。
+LIVE_DIVERGED = (
+    "import os\n"
+    "from app import live_guard as lg\n"
+    "import app.config  # noqa: F401 —— 先完成 .env 加载，再清注入\n"
+    "os.environ.pop('LG_LOCK_DIR', None)\n"
+    "with lg.live_lock('t-diverged'):\n"
+    "    print('CHILD_LIVE_STARTED_DIVERGED', flush=True)\n"
+)
+
 
 def _child_env(lock_dir: Path, **extra: object) -> dict:
     env = os.environ.copy()
     env["LG_LOCK_DIR"] = str(lock_dir)      # 锁目录单点覆盖：两侧同时跟随
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+    env.update({k: str(v) for k, v in extra.items()})
+    return env
+
+
+def _child_env_diverged(data_dir: Path, **extra: object) -> dict:
+    """OPEN-3 分叉环境：LG_DATA_DIR 显式设置、LG_LOCK_DIR **不设**——live
+    锁位随 DATA_DIR 漂走、pytest 侧仍盯生产锁位（=分叉）。DB 一并指到临
+    时目录（正常路径本就不该触库，双保险）。"""
+    env = os.environ.copy()
+    env.pop("LG_LOCK_DIR", None)
+    env["LG_DATA_DIR"] = str(data_dir)
+    env["LG_DATABASE_URL"] = f"sqlite:///{(data_dir / 'probe.db').as_posix()}"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     env.update({k: str(v) for k, v in extra.items()})
@@ -110,6 +171,209 @@ def _wait_until(cond, what: str, timeout: float = 30.0) -> None:
             return
         time.sleep(0.05)
     pytest.fail(f"等待超时：{what}")
+
+
+# ── 6. OPEN-1：跨进程同 purpose——_release_lock 的 pid 回读分支（承重墙）──
+
+def test_open1_crossproc_same_purpose_release_keeps_successor_lock(tmp_path):
+    """两个**真实子进程**用同一 purpose 交棒：PY1 持锁 → 父进程 unlink
+    锁文件（模拟人工清锁/崩溃残留自愈）→ PY2 O_EXCL 接管 → 放行 PY1 迟
+    到退出。前任退出时回读到的锁 purpose 与自己相同——拦住它误删继任者
+    锁的**只剩 pid 分支**（在册两条「保守释放」用例前任/继任同进程且
+    purpose 不同，删掉 pid 校验也全绿，即审查判定的无在册承重墙）。
+    另钉继任者正常退出后无残留。"""
+    lock_file = tmp_path / CFG.LOCK_FILE_NAME
+    r1_ready, r1_release = tmp_path / "relay1.ready", tmp_path / "relay1.release"
+    r2_ready, r2_release = tmp_path / "relay2.ready", tmp_path / "relay2.release"
+
+    def _spawn(ready: Path, release: Path) -> subprocess.Popen:
+        return subprocess.Popen(
+            [sys.executable, "-c", LIVE_RELAY], cwd=str(ROOT),
+            env=_child_env(tmp_path, LG_RELAY_READY=ready,
+                           LG_RELAY_RELEASE=release),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace")
+
+    py1 = py2 = None
+    try:
+        py1 = _spawn(r1_ready, r1_release)
+        _wait_until(lambda: r1_ready.exists(), "PY1 持锁就绪")
+        pid1 = int(r1_ready.read_text(encoding="utf-8"))
+        assert json.loads(lock_file.read_text(encoding="utf-8"))["pid"] == pid1
+        lock_file.unlink()                        # 模拟人工清锁/残留自愈
+        py2 = _spawn(r2_ready, r2_release)        # 只在清锁后才起跑（否则被 O_EXCL 拒）
+        _wait_until(lambda: r2_ready.exists(), "PY2 同 purpose 接管持锁")
+        pid2 = int(r2_ready.read_text(encoding="utf-8"))
+        assert pid1 != pid2
+        held = json.loads(lock_file.read_text(encoding="utf-8"))
+        assert held["purpose"] == "t-relay" and held["pid"] == pid2
+        r1_release.touch()                        # 放行前任 PY1 迟到退出
+        out1, err1 = py1.communicate(timeout=TIMEOUT_S)
+        assert "CHILD_RELAY_EXITED" in out1, f"PY1 退出异常：{err1}"
+        if not lock_file.exists():
+            # 失败时把「谁删的」判据一次性全贴出（2026-09-26 主控亲修：首版只
+            # 报「锁没了」，分不清 pid 分支失能 / 继任者提前释放 / 外部清锁）。
+            raise AssertionError(
+                "前任（PY1）退出删掉了继任者（PY2）的同 purpose 锁——"
+                "_release_lock pid 回读分支失能（人工清锁后继任者互斥归零）；"
+                f" 诊断：pid1={pid1} pid2={pid2} PY2存活={py2.poll() is None}"
+                f" PY1输出={out1.strip()!r} PY1错误={err1.strip()[-300:]!r}")
+        after = json.loads(lock_file.read_text(encoding="utf-8"))
+        assert after["pid"] == pid2 and after["purpose"] == "t-relay", \
+            "前任退出不得动继任者的锁（只删自己的）"
+        r2_release.touch()                        # 放行继任者正常收尾
+        out2, err2 = py2.communicate(timeout=TIMEOUT_S)
+        assert "CHILD_RELAY_EXITED" in out2, f"PY2 退出异常：{err2}"
+        assert not lock_file.exists(), "继任者（真正持有者）正常退出须释放锁"
+    finally:
+        for pr in (py1, py2):
+            if pr is not None and pr.poll() is None:
+                pr.kill()
+
+
+# ── 7. OPEN-2：真 pytest 子进程整轮持锁（非进程内替身）+ 真实 live 抢锁 ──
+
+# OPEN-2 持锁窗制造器**不在本模块**：pytest 只注册 conftest.py / 插件的钩子，
+# 测试模块里的 `pytest_*` 函数永不执行（2026-09-26 主控实测：子进程 pytest 跑完
+# 即退、锁已释放，主用例读锁文件 FileNotFoundError）。持锁窗由
+# `tests/conftest.py::pytest_runtest_makereport` 承担（仅 LG_CHILD_HOLD 设了的
+# 子进程生效；`when == "call"` ⇒ 测试已结束、teardown/sessionfinish 未发生）。
+
+
+def test_open2_pytest_probe_marker():
+    """OPEN-2 探针（子进程 pytest 里真跑）：测试阶段内整轮锁确由**本
+    pytest 进程**持有（conftest pytest_configure 取的）；写 passed 标记
+    后返回——真正的持锁窗口在上面的 hookwrapper post-yield 里（测试已
+    结束、session 未结束）。父轮（无 LG_CHILD_PASSED）为纯 no-op。"""
+    lock_dir = os.environ.get("LG_LOCK_DIR")
+    passed = os.environ.get("LG_CHILD_PASSED")
+    if not lock_dir or not passed:
+        return
+    p = Path(lock_dir) / CFG.LOCK_FILE_NAME
+    info = json.loads(p.read_text(encoding="utf-8"))
+    assert info["purpose"] == LG.PYTEST_LOCK_PURPOSE, \
+        "子 pytest 测试阶段未持有整轮锁"
+    assert info["pid"] == os.getpid(), "整轮锁持有者须是本 pytest 进程"
+    # passed 标记里写**真实解释器 pid**：venv 的 python.exe 是 shim，Popen.pid 是
+    # shim 的 pid，shim 再起真解释器 ⇒ 二者不等（2026-09-26 主控实测：
+    # Popen.pid=39748 / 子进程 os.getpid()=7228）。父用例只能拿这里的实测 pid
+    # 比对锁内 pid，不能拿 holder.pid 比对。
+    Path(passed).write_text(str(os.getpid()), encoding="utf-8")
+
+
+def test_open2_real_pytest_process_holds_lock_live_refused(tmp_path):
+    """OPEN-2 主用例（端到端）：子进程**真跑 `python -m pytest`**——其
+    tests/conftest.py 在 pytest_configure 真实取整轮锁（在册方向 A 的
+    pytest 侧是父进程内替身，钉不到这条真路径）。探针跑完、conftest 的
+    makereport 包装器阻塞（测试已结束、session 未结束）→ 另起**真实 live 子
+    进程**抢锁：必须 exit≠0、输出含互斥守卫字样、锁内容逐字节未变且
+    pid == pytest 子进程 pid（持锁主体是那个真 pytest 进程本身）。放行
+    → 子 pytest 正常收尾（1 passed）、锁无残留。"""
+    lock_file = tmp_path / CFG.LOCK_FILE_NAME
+    passed = tmp_path / "open2_probe.passed"
+    hold = tmp_path / "open2.hold"
+    holder = subprocess.Popen(
+        [sys.executable, "-m", "pytest", str(Path(__file__)),
+         # 清 pyproject addopts="-q"，防叠成 -qq 吞掉总结行（同 _run_pytest_child）
+         "-o", "addopts=",
+         "-q", "-k", "open2_pytest_probe", "-p", "no:cacheprovider"],
+        cwd=str(ROOT),
+        env=_child_env(tmp_path, LG_CHILD_HOLD=hold, LG_CHILD_PASSED=passed),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, encoding="utf-8", errors="replace")
+    try:
+        try:
+            _wait_until(lambda: passed.exists(), "子 pytest 探针用例跑完（锁应仍在握）")
+        except BaseException:
+            # 超时/失败时**必须**把子进程收尸并把它自己的输出贴进诊断：2026-09-26
+            # 主控亲修——首版此路径静默吞掉子 pytest 的 stdout/stderr，失败时只
+            # 有一句「等待超时」，无法判是子 pytest 被拒跑、收集失败、还是探针
+            # 断言红（真红因全在被吞的输出里）。
+            hold.touch()
+            try:
+                so, se = holder.communicate(timeout=TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                holder.kill()
+                so, se = holder.communicate(timeout=TIMEOUT_S)
+            raise AssertionError(
+                f"子 pytest 未在期限内产出 passed 标记（rc={holder.returncode}）；"
+                f"子进程输出：{(so + se)[-1500:]}")
+        # 子进程真实解释器 pid（探针写进 passed 标记；见
+        # test_open2_pytest_probe_marker）——不能拿 holder.pid：venv python.exe
+        # 是 shim，Popen.pid ≠ 真解释器 pid。
+        child_pid = int(passed.read_text(encoding="utf-8"))
+        snapshot = lock_file.read_bytes()
+        info = json.loads(snapshot.decode("utf-8"))
+        assert info["purpose"] == LG.PYTEST_LOCK_PURPOSE
+        assert info["pid"] == child_pid, \
+            f"锁持有者 pid={info['pid']} ≠ 真 pytest 子进程 pid={child_pid}"
+        r = _run_live_child(tmp_path, LIVE_TRY)
+        out = r.stdout + r.stderr
+        assert r.returncode != 0, \
+            "真 pytest 进程整轮持锁期间 live 竟启动——conftest 真取锁路径失守" \
+            "（进程内替身钉不住的那种失守）"
+        assert "互斥守卫" in out, f"拒绝须给明确原因：{out[-500:]}"
+        assert LG.PYTEST_LOCK_PURPOSE in out, f"原因须指明 pytest 持锁：{out[-500:]}"
+        assert "CHILD_LIVE_STARTED" not in r.stdout, "live 不得在拒锁后发起真跑"
+        assert lock_file.read_bytes() == snapshot, \
+            "live 被拒期间整轮锁内容必须逐字节未变"
+    finally:
+        hold.touch()                              # 放行：让子 pytest 走 sessionfinish
+        try:
+            so, se = holder.communicate(timeout=TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            so, se = holder.communicate(timeout=TIMEOUT_S)
+        if holder.poll() is None:
+            # 断言失败时上面的 communicate 根本不会执行 ⇒ 无条件兜底杀：否则
+            # 持锁的子 pytest 活到 120s 兜底超时，既拖长整轮门，又让下一轮
+            # 撞「live/pytest 互斥」假红。2026-09-26 主控亲修。
+            holder.kill()
+            holder.communicate(timeout=TIMEOUT_S)
+    assert holder.returncode == 0, \
+        f"放行后子 pytest 应正常收尾：{(so + se)[-800:]}"
+    assert "1 passed" in so, f"探针须真正执行过：{so[-500:]}{se[-500:]}"
+    assert not lock_file.exists(), \
+        "子 pytest sessionfinish 后整轮锁残留——live 将被误拒"
+
+
+# ── 8. OPEN-3：LG_DATA_DIR 改而 LG_LOCK_DIR 未设 ⇒ 锁位分叉，取锁入口硬拦 ──
+
+def test_open3_live_refused_when_lock_scope_diverges(tmp_path):
+    """机械判据（审查实验 e 复现的真实重叠入口）：LG_DATA_DIR 显式设置
+    （live 锁位漂到临时数据目录）而 LG_LOCK_DIR 未设（pytest 侧仍盯生产
+    锁位）⇒ 两侧看的不是同一个文件、互斥失明——live 取锁入口必须硬拦：
+    exit≠0、输出含「分叉」原因与可执行指引（LG_LOCK_DIR 处置），且不
+    在漂移位留下锁、未发起真跑。"""
+    data_dir = tmp_path / "alt_data"
+    r = subprocess.run(
+        [sys.executable, "-c", LIVE_DIVERGED], cwd=str(ROOT),
+        env=_child_env_diverged(data_dir),
+        capture_output=True, text=True, encoding="utf-8",
+        errors="replace", timeout=TIMEOUT_S)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, \
+        f"口径分叉必须硬拦，live 竟正常起跑：{out[-500:]}"
+    assert "互斥守卫" in out and "分叉" in out, \
+        f"拒绝须点明锁位口径分叉：{out[-500:]}"
+    assert "LG_LOCK_DIR" in out, f"拒绝须给可执行处置指引：{out[-500:]}"
+    assert "CHILD_LIVE_STARTED_DIVERGED" not in r.stdout
+    assert not (data_dir / CFG.LOCK_FILE_NAME).exists(), \
+        "硬拦发生在取锁之前，不得留下锁残留"
+
+
+def test_open3_declared_lock_dir_with_data_dir_override_passes(tmp_path):
+    """对照（硬拦不许过拦）：LG_DATA_DIR 改指他处**同时**显式设
+    LG_LOCK_DIR——两侧同跟随这一旋钮、不再分叉（＝声明独立沙箱、明知
+    不与 pytest 并发的既有用法）→ live 正常取锁-释放。"""
+    data_dir = tmp_path / "alt_data2"
+    lock_dir = tmp_path / "declared_locks"
+    r = _run_live_child(lock_dir, LIVE_TRY, LG_DATA_DIR=data_dir)
+    assert r.returncode == 0, \
+        f"显式声明锁目录的隔离用法不得被分叉硬拦误伤：{r.stdout}{r.stderr}"
+    assert "CHILD_LIVE_STARTED" in r.stdout
+    assert not (lock_dir / CFG.LOCK_FILE_NAME).exists()
+    assert not (data_dir / CFG.LOCK_FILE_NAME).exists()
 
 
 # ── 1. 锁路径单点导出（P1 错位钉死）──────────────────────────────

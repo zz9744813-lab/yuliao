@@ -10,6 +10,7 @@ atexit.register(gc.freeze)
 
 import os
 import tempfile
+import time
 from pathlib import Path
 
 _TMP = Path(tempfile.mkdtemp(prefix="lg_test_"))
@@ -68,3 +69,26 @@ def pytest_configure(config) -> None:
 def pytest_sessionfinish(session, exitstatus) -> None:
     """整轮结束释放（内部只删自己的锁；未持锁时为 no-op）。"""
     _release_run_guard()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """OPEN-2 跨进程持锁窗（仅子进程设了 LG_CHILD_HOLD 时生效；其余会话纯
+    no-op）：`call` 阶段报告产出后阻塞到放行文件出现——测试已跑完、teardown
+    与 sessionfinish（上面释放整轮锁之处）都还没发生 ⇒ 父进程在该窗口内观测
+    /抢锁时，整轮锁必仍在本真 pytest 子进程手里。
+
+    **为何在 conftest 而不在测试模块（2026-09-26 主控亲修）**：pytest 只在
+    conftest.py 与已注册插件里收集钩子，**测试模块里定义的 pytest_* 函数不
+    会被注册**（pytest 9.1.1 实测：写在 tests/test_live_guard_mutex.py 里的
+    hookwrapper 从不执行，子进程 pytest 跑完即退、锁已释放，主用例读锁文件
+    直接 FileNotFoundError）。且不能靠 `pytest_runtest_call` 的 post-yield
+    当窗口——持锁窗必须在「测试阶段报告已出、session 未收尾」处，本钩子的
+    `when == "call"` 正是这一点。"""
+    outcome = yield
+    hold = os.environ.get("LG_CHILD_HOLD")
+    if not hold or call.when != "call":
+        return
+    end = time.time() + 120                      # 兜底防呆：父进程失约也不永远挂
+    while not os.path.exists(hold) and time.time() < end:
+        time.sleep(0.05)
