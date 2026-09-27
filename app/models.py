@@ -515,7 +515,20 @@ class StrategyCondition(Base):
 
 class StrategyStats(Base):
     """策略统计（§4.2）：按数据快照生成的**可重建投影**——不是第二份真值；
-    独立证据按来源区间/根作品聚合（镜像/重切段/重复抽取不计独立复现）。"""
+    独立证据按来源区间/根作品聚合（镜像/重切段/重复抽取不计独立复现）。
+
+    两套口径并存（证据分档审计 2026-09-26，写入方唯一：
+    scripts/strategy_stats_rebuild.py，新字段只旁路追加、既有字段语义不变）：
+    · 观察证据口径（**含**基准段实例）：attempts/valid/rejected/missing、
+      unique_source_intervals、root_works、known_authors、genres、
+      extras.by_root_work；
+    · K3 可用口径：extras.usable_evidence（唯一区间级）、
+      extras.k3_eligible_instances（实例级）、extras.k3_eligible_root_works
+      （根作品级）——全部从 knowledge_query._evidence_for 准入判据链的
+      返回值直接派生，与 K3 同判据（verified，且剔除基准段/无登记/
+      禁用来源类型/禁用用途/不合格文本版本/镜像重复），不本地复刻；
+    · extras.benchmark_stripped = 两口径间的桥（被 K3 以基准段剔除的实例数）。
+    「有证据 N 条」是观察口径，不等于「K3 能用 N 条」——引用须报对应档。"""
     __tablename__ = "strategy_stats"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True,
