@@ -120,8 +120,6 @@ def approved_selected(session: Session, selected: list[dict]) -> list[dict]:
                             "kind": link["kind"],
                             "content_sha256": approval["content_sha256"]})
         except (KeyError, TypeError, ValueError) as exc:
-            if isinstance(exc, ApprovalError):
-                raise
             raise ApprovalError("selected_approval_invalid:" +
                                 str(item.get("strategy_id", "unknown")
                                     if isinstance(item, dict) else "unknown")) from exc

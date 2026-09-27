@@ -29,7 +29,8 @@ rollback 再记失败，不留半成品会话态。
 审计整改（P0 主线第 2 条，2026-09-24）：世界可配（--book-id，默认 WK-K4 行为
 不变）；新增**只读预检** `--preflight`（零生成调用、零库写）——查 work_sources
 是否登记该 book_id、并调 K3 只读 query_knowledge 判断 A 臂包是否非空，打印可核对
-JSON，未登记/空包即非零退出。当前 strategy_reviews 缺证据指纹及审查→晋升
+JSON，未登记/空包即非零退出；内置场景仍是合成夹具，故真实作品场景卡与预算合同接入前
+即使 K2/K3 通过也不放行。当前 strategy_reviews 缺证据指纹及审查→晋升
 审计绑定；现在逐张核当前 K2 快照、双席调用收据及晋升/事后放行链接，任一缺失
 仍按 semantic_review_unverifiable 拒绝真跑。--live 路径叠加同一道闸（仅 LLM_MODE=real 时生效，
 mock 不烧钱故跳过以保双闸测试）：过闸才许起真实调用，否则拒绝起跑、零真实调用。
@@ -145,7 +146,8 @@ def preflight_world(book_id: str, s) -> dict:
     - 查 work_sources 是否登记该 book_id；
     - 调 K3 只读 query_knowledge 判断该世界 A 臂包是否非空；
     返回可核对 dict：book_id / registered / k3_status / selected_ids /
-    n_techniques / empty_reason / review_status / review_reason / ready。
+    n_techniques / empty_reason / review_status / review_reason /
+    knowledge_ready / world_reason / ready。
     不抛异常、不退出——退出决策交给调用方。
 
     这是闸，不是提示：未登记、A 臂空或当次 selected 策略缺可核验的
@@ -191,13 +193,19 @@ def preflight_world(book_id: str, s) -> dict:
                 ReceiptSchemaError) as exc:
             review_status = "semantic_review_unverifiable"
             review_reason = "semantic_review_unverifiable:" + str(exc)
-    ready = (registered and k3_status == "matched" and bool(selected_ids)
-             and review_status == "verified")
+    knowledge_ready = (registered and k3_status == "matched" and
+                       bool(selected_ids) and review_status == "verified")
+    # The bundled World/SCENES factories remain synthetic. This field is the
+    # K2/K3 subgate; overall K4 readiness stays false until a real scene-card
+    # and bounded budget contract are independently supplied and checked.
+    world_reason = "real_scene_plan_unverified:缺真实作品场景卡与逐臂预算合同"
+    ready = False
     return {"book_id": book_id, "registered": registered,
             "k3_status": k3_status, "selected_ids": selected_ids,
             "n_techniques": n_techniques, "empty_reason": empty_reason,
             "review_status": review_status, "review_reason": review_reason,
             "approval_manifest": manifest,
+            "knowledge_ready": knowledge_ready, "world_reason": world_reason,
             "ready": ready}
 
 
@@ -328,7 +336,10 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                     pkg = KnowledgePackage(
                         package_id=f"empty-{scene_id}", book_id=plan.book_id,
                         source_kind="empty", techniques=[])
-                runner = SceneRunner(store, client)
+                engine = (lg_session.get_bind()
+                          if pkg.source_kind == "knowledge_query_v2" and
+                          pkg.techniques else None)
+                runner = SceneRunner(store, client, lg_engine=engine)
                 receipt = runner.run(plan, pkg, budget)
                 usage = store.usage(receipt["job_id"])
                 export = store.export(plan.book_id)
@@ -507,7 +518,7 @@ def main() -> None:
         if not pre["ready"]:
             raise SystemExit(
                 f"[preflight] 拒绝（非零退出）："
-                f"{pre['empty_reason'] or pre['review_reason']} "
+                f"{pre['empty_reason'] or pre['review_reason'] or pre['world_reason']} "
                 f"（book_id={a.book_id}, k3_status={pre['k3_status']}）")
         print(f"[preflight] 通过：book_id={a.book_id} 已登记，A 臂包非空"
               f"（n_techniques={pre['n_techniques']}）")
@@ -538,9 +549,15 @@ def main() -> None:
                 if not pre["ready"]:
                     raise SystemExit(
                         f"[preflight] 拒绝 --live 起跑（非零退出，零真实调用）："
-                        f"{pre['empty_reason'] or pre['review_reason']}"
+                        f"{pre['empty_reason'] or pre['review_reason'] or pre['world_reason']}"
                         f"（book_id={a.book_id}, "
                         f"k3_status={pre['k3_status']}）")
+                # 本驱动的世界与三场计划仍是“林穗／三枚钱”合成夹具。
+                # 即使 K2 全绿，登记 book_id 也不能把合成剧情变成真实试点；
+                # 真实场景卡、世界状态和逐臂预算合同接入前继续拒绝模型调用。
+                raise SystemExit(
+                    "[preflight] real_scene_plan_unverified:当前 K4 世界和场景"
+                    "仍为合成夹具，缺真实作品场景卡与预算合同；零真实调用")
             from app.scene_runtime.client import GatewayClient
             client = GatewayClient(a.writer_model, a.verifier_model)
         else:

@@ -71,8 +71,9 @@ def align_quotes(text: str, review: Review) -> Review:
 
 
 class SceneRunner:
-    def __init__(self, store: Store, client):
+    def __init__(self, store: Store, client, *, lg_engine=None):
         self.store, self.client = store, client
+        self.lg_engine = lg_engine
 
     def _call(self, job_id, stage, role, system, payload, budget):
         frozen = {"role": role, "model": self.client.models[role], "system": system,
@@ -118,8 +119,38 @@ class SceneRunner:
         if (config.LLM_MODE == "real" and
                 knowledge.source_kind == "knowledge_query_v2" and
                 knowledge.techniques):
-            # 直接调用 SceneRunner 或恢复旧 job 也不能绕过桥接器的语义审查门。
-            raise RuntimeFault("semantic_review_unverifiable:Writer 知识包缺批准清单")
+            # Direct callers and restored jobs must pass the same independent
+            # check; bridge-side validation alone cannot authorize a Writer.
+            from sqlalchemy.orm import Session
+            from .approval_gate import verify_frozen_package
+            from ..semantic_approval import ApprovalError
+            from ..promotion_audits import PromotionAuditSchemaError
+            from ..semantic_receipts import ReceiptSchemaError
+            from sqlalchemy.exc import SQLAlchemyError
+            if self.lg_engine is None:
+                raise RuntimeFault(
+                    "semantic_review_unverifiable:knowledge_engine_missing")
+            try:
+                with self.lg_engine.connect() as conn:
+                    # Explicit SQLite read transaction gives one WAL snapshot
+                    # for package, K2 receipts and current evidence.
+                    conn.exec_driver_sql("BEGIN")
+                    try:
+                        with Session(bind=conn, autoflush=False) as admission:
+                            verify_frozen_package(admission, plan, knowledge)
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        raise
+            except (ApprovalError, PromotionAuditSchemaError,
+                    ReceiptSchemaError, SQLAlchemyError,
+                    ValueError, TypeError) as exc:
+                safe_code = ("knowledge_store_unavailable" if isinstance(
+                    exc, SQLAlchemyError) else
+                    "frozen_package_invalid" if isinstance(
+                        exc, (ValueError, TypeError)) else str(exc))
+                raise RuntimeFault(
+                    "semantic_review_unverifiable:" + safe_code) from exc
         job_id = self.store.prepare(plan, knowledge, budget, self.client.models)
         receipt = self.store.receipt(job_id)
         if receipt:

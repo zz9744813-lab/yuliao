@@ -326,3 +326,30 @@ def test_live_review_veto_precedes_gateway_client(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="semantic_review_unverifiable"):
         k4.main()
     assert built == []
+
+
+def test_live_still_requires_real_scene_and_budget_after_k2_preview(
+        monkeypatch, tmp_path):
+    """An approved K2 preview cannot turn the built-in synthetic plot into K4."""
+    from app import config as _cfg
+    import app.scene_runtime.client as _cm
+
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
+    monkeypatch.setenv("K4_ALLOW_LIVE", "1")
+    monkeypatch.setattr(_cfg, "LLM_MODE", "real")
+    monkeypatch.setattr(k4, "preflight_world", lambda book_id, session: {
+        "ready": True, "empty_reason": None, "review_reason": None,
+        "k3_status": "matched"})
+    constructed = []
+
+    def gateway(*args, **kwargs):
+        constructed.append(True)
+        raise AssertionError("合成世界不得构造真实客户端")
+
+    monkeypatch.setattr(_cm, "GatewayClient", gateway)
+    monkeypatch.setattr(sys, "argv", ["k4", "--live", "--book-id", "WK-A",
+                                      "--writer-model", "w",
+                                      "--verifier-model", "v"])
+    with pytest.raises(SystemExit, match="real_scene_plan_unverified"):
+        k4.main()
+    assert constructed == []
