@@ -37,6 +37,9 @@ SYSTEM_PROMPT = (
     "verdict 只能为 PASS、BLOCK、ABSTAIN；reason 必须具体；cited_instance_ids "
     "须列出实际核对的实例 ID；BLOCK 须列出至少一项 concerns。证据不足时 ABSTAIN。"
 )
+# Keep prior entries when the active prompt changes: old immutable receipts
+# must remain verifiable against the exact instructions sent at the time.
+PROMPT_REGISTRY = {PROMPT_VERSION: SYSTEM_PROMPT}
 MAX_OUTPUT_TOKENS = 4096
 MAX_RESPONSE_BYTES = 512 * 1024
 _PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
@@ -111,8 +114,13 @@ def _load_round(conn, snapshot_id: str) -> dict:
         card = session.get(ExpressionStrategyV2, row["strategy_id"])
         if card is None:
             raise ReviewPreflightError("review_strategy_missing")
-        claim = {"scope_to": card.scope, "scope_ids": card.scope_ids,
-                 "scope_basis": card.scope_basis}
+        # A replicated card may be reviewed for the *proposed* K5 scope.
+        # The saved claim is checked against current evidence here; K5 must
+        # independently compare it with its plan in the promotion transaction.
+        try:
+            claim = json.loads(row["review_input_json"])["scope_claim"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ReviewPreflightError("review_scope_claim_invalid") from exc
         verify_current_snapshot(session, snapshot_id, claim)
         frozen = json.loads(row["review_input_json"])
         if _sha(canonical_json(frozen)) != row["review_input_sha256"]:
@@ -349,8 +357,16 @@ def review_snapshot(engine: Engine, snapshot_id: str, route: ReviewRoute, *,
                 "body_bytes": len(response.content),
             })
         parsed = _parse_response(response, route, frozen["instance_ids"])
-        response_json = canonical_json({"body": parsed["data"],
-                                        "attestation": parsed["headers"]})
+        response_json = canonical_json({
+            "body": parsed["data"], "attestation": parsed["headers"],
+            "prompt_version": PROMPT_VERSION,
+            "pinned_route": {
+                "provider": route.upstream_provider,
+                "model": route.upstream_model,
+                "channel_id": route.upstream_channel_id,
+                "requested_model": route.requested_model,
+            },
+        })
         _attempt_event(attempt_dir, attempt_id, "received", {
             "upstream_request_id": parsed["headers"]["request-id"],
             "response_sha256": _sha(parsed["text"]),

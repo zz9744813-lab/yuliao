@@ -19,13 +19,14 @@ from test_semantic_review_snapshot import CLAIM, _seed
 ROUTE = runner.ReviewRoute("requested-a", "provider-a", "actual-a", "channel-7")
 
 
-def _ready(monkeypatch, tmp_path):
+def _ready(monkeypatch, tmp_path, *, apply_claim_to_card=True):
     engine, session = _seed(db_path=tmp_path / "synthetic.db")
-    card = session.get(ExpressionStrategyV2, "ESV2-S")
-    card.scope = CLAIM["scope_to"]
-    card.scope_ids = CLAIM["scope_ids"]
-    card.scope_basis = CLAIM["scope_basis"]
-    session.commit()
+    if apply_claim_to_card:
+        card = session.get(ExpressionStrategyV2, "ESV2-S")
+        card.scope = CLAIM["scope_to"]
+        card.scope_ids = CLAIM["scope_ids"]
+        card.scope_basis = CLAIM["scope_basis"]
+        session.commit()
     session.close()
     ensure_semantic_schema(engine)
     snapshot = freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
@@ -89,6 +90,12 @@ def test_one_shot_attested_review_writes_matching_call_and_vote(monkeypatch, tmp
             assert row.response_sha256 == hashlib.sha256(
                 row.response_text.encode("utf-8")).hexdigest()
             assert row.request_json == sent[0]
+            envelope = json.loads(con.exec_driver_sql(
+                "SELECT response_json FROM semantic_review_calls").scalar())
+            assert envelope["prompt_version"] == runner.PROMPT_VERSION
+            assert envelope["pinned_route"] == {
+                "provider": "provider-a", "model": "actual-a",
+                "channel_id": "channel-7", "requested_model": "requested-a"}
         attempts = tmp_path / "semantic_review_attempts"
         assert len(list(attempts.glob("*.reserved.json"))) == 1
         assert len(list(attempts.glob("*.committed.json"))) == 1
@@ -100,6 +107,21 @@ def test_one_shot_attested_review_writes_matching_call_and_vote(monkeypatch, tmp
                            match="k2_model_already_voted"):
             _run(engine, sid, tmp_path)
         assert len(sent) == 1
+    finally:
+        engine.dispose()
+
+
+def test_proposed_scope_is_reviewed_before_card_scope_changes(monkeypatch,
+                                                               tmp_path):
+    engine, sid = _ready(monkeypatch, tmp_path, apply_claim_to_card=False)
+    monkeypatch.setattr(runner, "_post_once",
+                        lambda raw, timeout: _response())
+    try:
+        assert _run(engine, sid, tmp_path)["verdict"] == "PASS"
+        with engine.connect() as con:
+            assert con.exec_driver_sql(
+                "SELECT scope FROM expression_strategies_v2"
+            ).scalar() == "UNCERTAIN"
     finally:
         engine.dispose()
 
