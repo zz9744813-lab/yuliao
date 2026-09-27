@@ -31,8 +31,13 @@ strategy_instances 快照**全量重算**——不是第二份真值，重建即
   跳过」短路**（apply=True 一律先 delete 再全量 add），老行不会因指纹而
   拿不到新键；若将来引入短路，必须同时把 extras 纳入指纹或显式绕过。
 - extras 写入方式：整字典覆盖（重建即替换，与「不是第二份真值」一致）——
-  **不允许**第三方往 extras 手填键：apply=True 会静默丢弃。新增键一律
-  在此函数内追加。
+  **不允许**第三方往 extras 手填键：apply=True 会丢弃外来键，但**非静默**
+  ——delete 之前先清点现库 strategy_stats，extras 里不在本次重建写入键集
+  （CANONICAL_EXTRAS_KEYS）内的键即外来键，按「键名→出现行数」汇总，打印
+  一行 `dropped_foreign_extras=<总次数> {…}`（stdout），同一汇总同时进
+  run() 返回 dict（键 dropped_foreign_extras；dry_run 恒为 {} 且整条路径
+  不插/不删/不改数据行）。新增键一律在此函数内追加，并同步加入
+  CANONICAL_EXTRAS_KEYS。
 - extras.k3_eligible_instances / extras.k3_eligible_root_works = K3
   可用证据的**实例级 / 根作品级**分档（分档派工 2026-09-26：审计发现
   82 条 benchmark 实例按观察口径报数，被误读成 K3 可用数）——与
@@ -67,6 +72,14 @@ from app import db                                    # noqa: E402
 from app import knowledge_query as kq                 # noqa: E402
 from app.models import (ExpressionStrategyV2, StrategyInstance,  # noqa: E402
                         StrategyStats, WorkSource)
+
+# 本次重建写入 extras 的键全集——apply 覆盖只写这些键，现库行 extras 里的
+# 其余键即「外来键」（dropped_foreign_extras 清点判据）。此处追加键时**必须**
+# 同步扩充本集合，否则自有键会被误报为外来键。
+CANONICAL_EXTRAS_KEYS = frozenset({
+    "by_root_work", "usable_evidence", "benchmark_stripped",
+    "k3_eligible_instances", "k3_eligible_root_works",
+})
 
 
 def _root_of(s, work_id: str, cache: dict) -> str:
@@ -140,12 +153,30 @@ def compute(s) -> list[dict]:
     return out
 
 
+def _count_dropped_foreign_extras(s) -> dict:
+    """覆盖前清点：现库 strategy_stats 各行 extras 里不在本次重建写入键集
+    （CANONICAL_EXTRAS_KEYS）内的键 = 外来键（apply 整字典覆盖会被丢弃）。
+    返回「键名→出现行数」（分档文档 §6⑪ 非静默口径，2026-09-27 补实现）。"""
+    dropped: dict[str, int] = {}
+    for row in s.query(StrategyStats).all():
+        for k in (row.extras or {}):
+            if k not in CANONICAL_EXTRAS_KEYS:
+                dropped[k] = dropped.get(k, 0) + 1
+    return dropped
+
+
 def run(apply: bool) -> dict:
     with db.session() as s:
         stats = compute(s)
         out = {"mode": "apply" if apply else "dry_run",
-               "n_strategies": len(stats), "rows": stats}
+               "n_strategies": len(stats), "rows": stats,
+               "dropped_foreign_extras": {}}
         if apply:
+            # 覆盖前清点并打印外来键汇总（dry_run 不写库、汇总恒 {}）。
+            dropped = _count_dropped_foreign_extras(s)
+            print(f"dropped_foreign_extras={sum(dropped.values())} {dropped}",
+                  flush=True)
+            out["dropped_foreign_extras"] = dropped
             s.query(StrategyStats).delete()   # 投影：重建即替换，无第二真值
             # 注意：extras 为整字典覆盖写，且**无「指纹未变则跳过」短路**
             # （会审 2026-09-27 要求显式声明）——见模块 docstring 指纹边界。
