@@ -124,6 +124,18 @@ BEGIN
     ) THEN RAISE(ABORT, 'semantic approval evidence invalid') END;
 END"""
 
+TRIGGER_DDL["semantic_approval_links_distinct_models"] = """
+CREATE TRIGGER IF NOT EXISTS semantic_approval_links_distinct_models
+BEFORE INSERT ON semantic_approval_links
+BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM semantic_review_votes va
+        JOIN semantic_review_votes vb ON vb.vote_id = NEW.vote_b_id
+        WHERE va.vote_id = NEW.vote_a_id
+          AND lower(va.model_id) = lower(vb.model_id)
+    ) THEN RAISE(ABORT, 'semantic approval same upstream model') END;
+END"""
+
 TRIGGER_DDL["semantic_review_snapshots_validate"] = """
 CREATE TRIGGER IF NOT EXISTS semantic_review_snapshots_validate
 BEFORE INSERT ON semantic_review_snapshots

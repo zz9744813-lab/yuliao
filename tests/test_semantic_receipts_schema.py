@@ -297,6 +297,26 @@ def test_approval_requires_two_independent_current_passes_and_no_block():
         engine.dispose()
 
 
+@pytest.mark.parametrize("other_model", ["model-a", "MODEL-A"])
+def test_same_model_via_two_provider_labels_cannot_approve(other_model):
+    engine = _seed()
+    try:
+        ensure_semantic_schema(engine)
+        with engine.begin() as con:
+            _snapshot(con)
+            _vote(con, "VOTE-A", "provider-a/model-a")
+            _vote(con, "VOTE-B", f"provider-b/{other_model}")
+        with engine.connect() as con:
+            with pytest.raises(IntegrityError,
+                               match="semantic approval same upstream model"):
+                _link(con)
+            con.rollback()
+            assert con.exec_driver_sql(
+                "SELECT COUNT(*) FROM semantic_approval_links").scalar() == 0
+    finally:
+        engine.dispose()
+
+
 def test_same_round_block_vote_prevents_approval_even_with_two_passes():
     engine = _seed()
     try:

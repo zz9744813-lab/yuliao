@@ -39,8 +39,10 @@ SEED_TEXT = (
 def _mkexp(**kw) -> str:
     db.init_db()
     with db.session() as s:
-        corpus.add_work(s, title="引擎测试书", text=SEED_TEXT * 4, source="test:engine")
+        work = corpus.add_work(s, title="引擎测试书", text=SEED_TEXT * 4,
+                               source="test:engine")
         exp = experiments.create_experiment(s, {
+            "work_ids": [work.id],
             "n_segments": 2,
             "granularities": ["S"],
             "recon_models": ["mA"],
