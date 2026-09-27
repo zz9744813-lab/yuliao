@@ -90,6 +90,7 @@ def test_live_receipts_carry_worlds_dir_fields(tmp_path):
     assert len(four["receipts"]) == 6
     for r in four["receipts"]:
         assert r["live"] is True
+        assert r["book_id"] == "WK-K4"
         assert r["worlds_dir"] == str(wd.resolve())
         assert Path(r["worlds_dir"]).is_absolute(), "必须记绝对路径"
         assert r["worlds_dir_exists"] is True and \
@@ -195,8 +196,10 @@ def test_live_main_keeps_worlds_dir_marks_not_cleaned(tmp_path, monkeypatch):
     k4.main()
     art = json.loads((out_dir / "k4_paired.json").read_text(encoding="utf-8"))
     assert art["live"] is True
+    assert art["book_id"] == "WK-K4"
     assert created, "前提：mkdtemp 走的是本测试换绑的假实现"
     for r in art["artifacts"]["receipts"]:
+        assert r["book_id"] == art["book_id"]
         assert r["worlds_dir"] == str(Path(created[0]).resolve())
         assert r["worlds_dir_exists"] is True
         assert ISO8601_UTC.match(r["created_at"]), r["created_at"]

@@ -362,6 +362,8 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                        "retried": bool(u.get("verifier_invalid_retries")),
                        "verifier_attempts": v_attempts}
                 if live:
+                    # 与顶层产物、世界库和计划绑定同一本书，供验收侧逐臂核对。
+                    rec["book_id"] = plan.book_id
                     # 审计非阻断项收口（2026-09-25）：live 收据逐条记产物
                     # 世界目录（绝对路径）、写收据时目录是否仍在、目录创建
                     # 时刻（ISO8601 UTC）——事后从收据即可定位 arm*/k4.sqlite
@@ -568,6 +570,8 @@ def main() -> None:
             out = {"artifacts": four, "analysis": analysis, "live": a.live,
                    "channel_changed": a.channel_changed,
                    "worlds_dir": str(tmp)}
+            if a.live:
+                out["book_id"] = a.book_id
             print(json.dumps(out, ensure_ascii=False, indent=1))
             receipted = True       # 收据已对外可见（stdout 即记录）——此后
                                    # 世界目录被收据引用，任何异常都不再清理
