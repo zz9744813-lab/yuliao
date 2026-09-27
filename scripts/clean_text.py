@@ -26,6 +26,11 @@
 ## 口径
 
 - **原文不动**：清洗结果写 `segments.text_clean`，`text` 保持原样（可审计、可重跑）。
+- **非空正文不静默覆写**（清洗正文保留门，审计 2026-09-23 非阻断项续作）：
+  `--polish` / `--llm` 命中**已有非空** `text_clean` 时默认**拒写**，该段记成
+  「待人工裁决」（`integrity` JSON 键 + 审计日志 JSONL）；显式
+  `--overwrite-text-clean` 才越门覆写，且**旧值全文**落审计日志留痕。
+  `text_clean` 为空的首写不受本门影响，仍是原口径。
 - 下游（取题、上下文、生成）一律优先读 `text_clean`。
 - 只用规则能修干净的，不进 LLM（省钱）；剩下还有拉丁/带调拼音的才送 LLM。
 - 规则清洗后仍带伪影且 LLM 也修不了的 → 标 `integrity.clean_failed=1`，下游照旧排除。
@@ -34,11 +39,13 @@
     python scripts/clean_text.py --scan                  # 只看分布
     python scripts/clean_text.py --rules                 # 只跑规则（秒级）
     python scripts/clean_text.py --llm --conc 8          # 规则修不掉的送 LLM
+    python scripts/clean_text.py --llm --overwrite-text-clean   # 越门：允许覆写非空正文（留痕）
     python scripts/clean_text.py --report
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -46,6 +53,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -53,7 +61,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from app import db, limits  # noqa: E402
+from app import config, db, limits  # noqa: E402
 from app.gateway import chat, is_serial_model  # noqa: E402
 from app.models import Segment  # noqa: E402
 from _conc_guard import check_conc as _check_conc, pool_workers as _pool_workers  # noqa: E402  # 并发闸唯一实现（2026-09-25 去重）
@@ -170,7 +178,8 @@ LLM_PROMPT = """下面有 {n} 段中文小说（编号 1..{n}），其中有些�
 
 _lock = threading.Lock()
 _stat = {"rule_ok": 0, "llm_ok": 0, "llm_failed": 0, "llm_rejected": 0,
-         "llm_identical": 0, "skip": 0, "still_broken": 0}
+         "llm_identical": 0, "skip": 0, "still_broken": 0,
+         "gate_blocked": 0, "gate_overwritten": 0}
 
 
 def _latin_ratio(text: str) -> float:
@@ -220,6 +229,122 @@ def _guard_enabled(guard: bool | None = None) -> bool:
     if guard is not None:
         return guard
     return os.environ.get(GUARD_ENV, "").strip().lower() not in {"0", "off", "false", "no"}
+
+
+# ── 清洗正文保留门（任务 lg-clean-text-preserve-gate；审计 2026-09-23 非阻断项续作）──
+# 上面的 GUARD_* 是**内容质量门**：判「LLM 这一次的结果坏不坏」，判据是 src↔out。
+# 它不看另一件事：**text_clean 里是否已躺着一份非空正文、马上要被整个丢掉**。
+# `--polish` 与 `--llm` 的落笔都发生在已有非空 text_clean 之上（polish 的目标段
+# 定义即「text_clean 非 None」；llm 的 src = text_clean or text），重跑即**覆写**，
+# 被覆写的旧值原本无留痕——本门补的就是这一条。
+# 口径（默认拒写）：
+# - 旧值为空（NULL/空白）→ 正常首写，门完全不介入、不留痕（原口径逐字不变）；
+# - 旧值非空且新值去空白后与旧值相同 → 幂等跳过（覆写无意义，不算事件）；
+# - 旧值非空且新值不同 → **不写**：旧值原地保留，该段记「待人工裁决」
+#   （integrity JSON 键 `text_clean_preserve_gate`，风格借 import_corpus_v2 的
+#   「JSON 键留痕、不加新列」口径），并落一条 pending_review 审计事件；
+# - 显式 `--overwrite-text-clean`（函数参数 overwrite=True）才越门：写入新值，
+#   **旧值全文 + sha256** 落审计日志 overwritten 事件，并清除待裁决标记。
+# 审计日志 = JSONL，默认 `config.DATA_DIR/clean_text_preserve_gate.jsonl`
+# （`CLEAN_TEXT_GATE_LOG` 可显式改路径，测试/隔离用）。
+PRESERVE_KEY = "text_clean_preserve_gate"          # segments.integrity 里的留痕键
+GATE_LOG_ENV = "CLEAN_TEXT_GATE_LOG"              # 审计 JSONL 路径覆盖（env）
+GATE_LOG_NAME = "clean_text_preserve_gate.jsonl"  # 默认落 config.DATA_DIR
+
+_log_lock = threading.Lock()
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _now_ts() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def gate_log_path() -> Path:
+    """覆写审计日志路径：CLEAN_TEXT_GATE_LOG 显式覆盖 > config.DATA_DIR 默认。"""
+    ov = (os.environ.get(GATE_LOG_ENV) or "").strip()
+    return Path(ov) if ov else config.DATA_DIR / GATE_LOG_NAME
+
+
+def _append_gate_log(record: dict) -> None:
+    """审计事件追加写 JSONL（行式、只增不改；进程内加锁防线程交错）。"""
+    p = gate_log_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False)
+    with _log_lock:
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+
+def _integrity_flags(raw: str | None) -> dict | None:
+    """integrity JSON → dict（空视为 {}）。解析不出 JSON 对象 → None：**不猜**。
+
+    None 时调用侧不得重写 integrity——那是别的工序的留痕，覆盖它本身就是丢数据；
+    此时裁决事件只落审计日志（JSONL 仍是全量的，DB 标记缺失可由日志对账）。"""
+    if not (raw or "").strip():
+        return {}
+    try:
+        d = json.loads(raw)
+    except Exception:                            # noqa: BLE001
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _mark_pending_review(seg: Segment, old: str, new: str, via: str) -> None:
+    """把「该段的非空正文被拒写、待人工裁决」记进 integrity JSON（只增本门键）。"""
+    flags = _integrity_flags(seg.integrity)
+    if flags is None:
+        return
+    flags[PRESERVE_KEY] = {
+        "status": "pending_review",
+        "via": via,
+        "old_sha256": _sha256(old),
+        "proposed_sha256": _sha256(new),
+        "old_len": len(old),
+        "proposed_len": len(new),
+    }
+    seg.integrity = json.dumps(flags, ensure_ascii=False)
+
+
+def _clear_pending_review(seg: Segment) -> None:
+    """越门覆写成功后清除待裁决标记（该段已裁决＝按新值落定）。"""
+    flags = _integrity_flags(seg.integrity)
+    if not isinstance(flags, dict) or PRESERVE_KEY not in flags:
+        return
+    flags.pop(PRESERVE_KEY)
+    seg.integrity = json.dumps(flags, ensure_ascii=False)
+
+
+def preserve_gate_write(seg: Segment, new_value: str, *, overwrite: bool, via: str) -> str:
+    """清洗正文保留门——`polish` / `run_llm` 两条**可能覆写非空正文**的写路径
+    落 `text_clean` 的唯一入口。返回裁决：
+
+    - 'write'       旧值为空 → 正常首写（原口径，不触发门、不留痕）；
+    - 'identical'   旧值非空、新值去空白后与旧值相同 → 幂等跳过，不写、不算事件；
+    - 'blocked'     旧值非空、未授权越门 → **拒写**，旧值原地保留，
+                    integrity 记「待人工裁决」+ 审计日志 pending_review 事件；
+    - 'overwritten' 旧值非空、`overwrite=True` 显式越门 → 写入新值，
+                    **旧值全文 + sha256** 落审计日志 overwritten 事件。
+    """
+    old = seg.text_clean or ""
+    if not old.strip():
+        seg.text_clean = new_value
+        return "write"
+    if new_value.strip() == old.strip():
+        return "identical"
+    base = {"via": via, "segment_id": seg.id, "work_id": seg.work_id,
+            "old_sha256": _sha256(old), "new_sha256": _sha256(new_value),
+            "old_len": len(old), "new_len": len(new_value), "ts": _now_ts()}
+    if overwrite:
+        _append_gate_log({**base, "action": "overwritten", "old_value": old})
+        seg.text_clean = new_value
+        _clear_pending_review(seg)
+        return "overwritten"
+    _mark_pending_review(seg, old, new_value, via)
+    _append_gate_log({**base, "action": "pending_review", "proposed_value": new_value})
+    return "blocked"
 
 
 def parse_json(text: str) -> dict | None:
@@ -284,6 +409,8 @@ def run_rules(limit: int = 0, only_dirty: bool = False, dry_run: bool = False) -
         n = 0
         for seg in segs:
             if seg.text_clean:
+                # 保留门不入本路径：非空 text_clean 在这里**永远不写**（上方 continue），
+                # 下面落笔只可能发生在空段上——不构成「覆写非空正文」。
                 continue
             c = clean_rules(seg.text)
             seg.text_clean = c
@@ -293,14 +420,19 @@ def run_rules(limit: int = 0, only_dirty: bool = False, dry_run: bool = False) -
     return {"rule_cleaned": n}
 
 
-def polish(limit: int = 0, dry_run: bool = False) -> dict:
+def polish(limit: int = 0, dry_run: bool = False, overwrite: bool = False) -> dict:
     """对**已清洗文本**再跑一遍规则。
 
     为什么要单独一步：规则表会随样本增加（本轮就补了 `阅读请锁定{　}` 与空花括号），
     而 LLM 还原的结果**不能**用原文重跑规则覆盖（那会把刚还原好的拼音打回去）。
     顺序必须是：规则 → LLM → 规则（polish）。
 
-    dry_run=True：只统计会改多少段，**不写任何行、不 commit**。
+    dry_run=True：只统计会改多少段，**不写任何行、不 commit**。dry 的口径维持
+    「加门前规则还会改多少段」的预报（残留普查用），不受保留门影响。
+
+    清洗正文保留门（默认拒写）：本函数的目标段定义即 `text_clean` 非 None，
+    每一次落笔都是对**非空正文的覆写**——默认只记「待人工裁决」、不写正文；
+    显式 `overwrite=True`（CLI `--overwrite-text-clean`）才覆写，旧值全文落审计日志。
     """
     with db.session() as s:
         segs = s.query(Segment).filter(Segment.text_clean.isnot(None)).all()
@@ -310,22 +442,32 @@ def polish(limit: int = 0, dry_run: bool = False) -> dict:
             n = sum(1 for seg in segs
                     if clean_rules(seg.text_clean) != (seg.text_clean or ""))
             return {"dry_run": True, "would_clean": n, "checked": len(segs)}
-        n = 0
+        n = overwrote = pending = 0
         for seg in segs:
             c = clean_rules(seg.text_clean)
             if c != (seg.text_clean or ""):
-                seg.text_clean = c
-                n += 1
+                verdict = preserve_gate_write(seg, c, overwrite=overwrite, via="polish")
+                if verdict in ("write", "overwritten"):
+                    n += 1
+                if verdict == "overwritten":
+                    overwrote += 1
+                elif verdict == "blocked":
+                    pending += 1
         s.commit()
-    return {"polished": n, "checked": len(segs)}
+    return {"polished": n, "checked": len(segs),
+            "gate_overwritten": overwrote, "gate_pending": pending}
 
 
 def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False,
-            guard: bool | None = None) -> dict:
+            guard: bool | None = None, overwrite: bool = False) -> dict:
     """把规则修不掉的送 LLM 还原拼音。幂等：text_clean 已无拉丁残留的会跳过。
 
     正文保留门（默认开）：LLM 结果过短/截断时不覆写 text_clean，计 llm_rejected；
     可用 guard=False 或环境变量 CLEAN_TEXT_GUARD=0 关闭（对比用）。
+    清洗正文保留门（默认拒写）：内容质量门放行后，若该段 `text_clean` **已非空**，
+    这次落笔就是**覆写**——默认不写、计 gate_blocked、该段记「待人工裁决」；
+    显式 `overwrite=True`（CLI `--overwrite-text-clean`）才越门，旧值全文落审计日志。
+    `text_clean` 为空的首写不受本门影响（计 llm_ok，与加门前逐字一致）。
     conc 是运行时兜底口径：≤ limits.MAX_CONCURRENCY，且 LLM_MODEL 命中串行
     纪律（gateway.is_serial_model）时恒 1——见 _pool_workers。
     """
@@ -367,11 +509,18 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False,
                         with _lock:
                             _stat["llm_rejected"] += 1
                         continue
-                seg.text_clean = out
+                # 内容质量门放行 ≠ 可以落笔：旧 text_clean 非空时这一步是**覆写**，
+                # 走清洗正文保留门（默认拒写 + 待人工裁决；--overwrite-text-clean 越门留痕）。
+                gate_verdict = preserve_gate_write(seg, out, overwrite=overwrite, via="llm")
                 with _lock:
-                    _stat["llm_ok"] += 1
-                    if looks_broken(out):
-                        _stat["still_broken"] += 1
+                    if gate_verdict == "blocked":
+                        _stat["gate_blocked"] += 1
+                    elif gate_verdict in ("write", "overwritten"):
+                        _stat["llm_ok"] += 1
+                        if gate_verdict == "overwritten":
+                            _stat["gate_overwritten"] += 1
+                        if looks_broken(out):
+                            _stat["still_broken"] += 1
             s.commit()
 
     t0 = time.time()
@@ -380,6 +529,7 @@ def run_llm(conc: int = 8, limit: int = 0, only_batch_segments: bool = False,
         list(ex.map(one, batches))
     print(f"完成：llm_ok={_stat['llm_ok']} failed={_stat['llm_failed']} "
           f"门拒={_stat['llm_rejected']} 幂等={_stat['llm_identical']} "
+          f"覆写拒写={_stat['gate_blocked']} 越门覆写={_stat['gate_overwritten']} "
           f"仍坏={_stat['still_broken']}（{(time.time() - t0) / 60:.1f} 分钟）")
     return dict(_stat)
 
@@ -412,6 +562,10 @@ def build_parser() -> argparse.ArgumentParser:
                          f"{limits.MAX_CONCURRENCY}，越界报错退出）")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--overwrite-text-clean", action="store_true",
+                    help="越门开关（默认关）：允许覆写非空 text_clean。清洗正文保留门"
+                         "默认对覆写**拒写**并记「待人工裁决」；越门时旧值全文+sha256 "
+                         "落审计日志 JSONL（见 clean_text_preserve_gate.jsonl）")
     return ap
 
 
@@ -441,7 +595,8 @@ def main(argv: list[str] | None = None) -> None:
             print("DRY-RUN：只统计，未写入任何数据、未 commit —— 以下数字是预报，不是真跑结果")
             print(json.dumps(polish(limit=args.limit, dry_run=True), ensure_ascii=False))
             return
-        print(json.dumps(polish(limit=args.limit), ensure_ascii=False))
+        print(json.dumps(polish(limit=args.limit,
+                                overwrite=args.overwrite_text_clean), ensure_ascii=False))
         report()
         return
     if args.llm:
@@ -453,7 +608,8 @@ def main(argv: list[str] | None = None) -> None:
             return
         # 批量防呆①（P0 死 id 事故）：拼音还原整批走 LLM_MODEL，池外=白跑一轮
         pf.require_models([LLM_MODEL], source="clean_text")
-        print(json.dumps(run_llm(conc=args.conc, limit=args.limit), ensure_ascii=False))
+        print(json.dumps(run_llm(conc=args.conc, limit=args.limit,
+                                 overwrite=args.overwrite_text_clean), ensure_ascii=False))
         report()
         return
     build_parser().print_help()
