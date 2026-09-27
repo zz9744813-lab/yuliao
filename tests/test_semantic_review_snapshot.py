@@ -5,8 +5,8 @@ import hashlib
 import json
 
 import pytest
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.orm import Session, sessionmaker
 
 from app import knowledge as K
 from app import knowledge_extract as KE
@@ -15,6 +15,8 @@ from app.db import Base
 from app.models import (ExpressionStrategyV2, Segment, StrategyCondition,
                         StrategyInstance, Work, WorkSource)
 from app.semantic_review import SnapshotError, build_snapshot
+from app.semantic_review_store import freeze_snapshot, verify_current_snapshot
+from app.semantic_receipts import ReceiptSchemaError, ensure_semantic_schema
 
 TEXT = "夜里起了风，他坐在桌前。"
 CLAIM = {"scope_to": "WORK", "scope_ids": ["WK-A"],
@@ -23,6 +25,9 @@ CLAIM = {"scope_to": "WORK", "scope_ids": ["WK-A"],
 
 def _seed(reverse=False):
     engine = create_engine("sqlite://", future=True)
+    @event.listens_for(engine, "connect")
+    def _foreign_keys(dbapi_connection, _):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
     Base.metadata.create_all(engine)
     with engine.begin() as con:
         con.execute(text(
@@ -77,6 +82,95 @@ def _seed(reverse=False):
             reviewer_version=KE.REVIEW_MARKER_NEW_DEF, status="verified"))
     s.commit()
     return engine, s
+
+
+def test_freeze_creates_independent_immutable_rounds_on_same_content():
+    engine, seed_session = _seed()
+    try:
+        seed_session.close()
+        ensure_semantic_schema(engine)
+        first = freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        second = freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        assert first["snapshot_id"] != second["snapshot_id"]
+        assert first["content_sha256"] == second["content_sha256"]
+        assert first["review_input_sha256"] == second["review_input_sha256"]
+        with Session(engine) as check:
+            assert verify_current_snapshot(check, first["snapshot_id"], CLAIM)[
+                "content_sha256"] == first["content_sha256"]
+            assert verify_current_snapshot(check, second["snapshot_id"], CLAIM)[
+                "content_sha256"] == second["content_sha256"]
+            assert check.execute(text(
+                "SELECT COUNT(*) FROM semantic_review_snapshots")).scalar() == 2
+            assert check.execute(text(
+                "SELECT COUNT(*) FROM semantic_review_votes")).scalar() == 0
+            assert check.execute(text(
+                "SELECT COUNT(*) FROM semantic_approval_links")).scalar() == 0
+    finally:
+        seed_session.close(); engine.dispose()
+
+
+def test_freeze_refuses_invalid_claim_without_partial_row():
+    engine, seed_session = _seed()
+    try:
+        seed_session.close()
+        ensure_semantic_schema(engine)
+        with pytest.raises(SnapshotError, match="scope_claim_unbacked"):
+            freeze_snapshot(engine, "ESV2-S", 1, {
+                **CLAIM, "scope_ids": ["OTHER-WORK"]})
+        with Session(engine) as check:
+            assert check.execute(text(
+                "SELECT COUNT(*) FROM semantic_review_snapshots")).scalar() == 0
+    finally:
+        seed_session.close(); engine.dispose()
+
+
+def test_freeze_refuses_missing_or_weakened_receipt_schema():
+    engine, seed_session = _seed()
+    try:
+        seed_session.close()
+        with pytest.raises(ReceiptSchemaError, match="table_schema_drift"):
+            freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        ensure_semantic_schema(engine)
+        frozen = freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "DROP TRIGGER semantic_review_snapshots_no_update")
+            conn.exec_driver_sql(
+                "CREATE TRIGGER semantic_review_snapshots_no_update "
+                "BEFORE UPDATE ON semantic_review_snapshots BEGIN SELECT 1; END")
+        with pytest.raises(ReceiptSchemaError, match="trigger_schema_drift"):
+            freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        with Session(engine) as check:
+            with pytest.raises(ReceiptSchemaError, match="trigger_schema_drift"):
+                verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)
+            assert check.execute(text(
+                "SELECT COUNT(*) FROM semantic_review_snapshots")).scalar() == 1
+    finally:
+        seed_session.close(); engine.dispose()
+
+
+def test_saved_round_rejects_changed_evidence_or_scope():
+    engine, seed_session = _seed()
+    try:
+        seed_session.close()
+        ensure_semantic_schema(engine)
+        frozen = freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        with Session(engine) as check:
+            changed_claim = {**CLAIM, "scope_basis": "另一审查依据"}
+            with pytest.raises(SnapshotError, match="snapshot_stale"):
+                verify_current_snapshot(check, frozen["snapshot_id"],
+                                        changed_claim)
+            check.get(ExpressionStrategyV2,
+                      "ESV2-S").abstract_operation += " 现在改写"
+            check.flush()
+            with pytest.raises(SnapshotError, match="snapshot_stale"):
+                verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)
+            check.rollback()
+        with Session(engine) as check:
+            assert verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)[
+                "snapshot_id"] == frozen["snapshot_id"]
+    finally:
+        seed_session.close(); engine.dispose()
 
 
 def test_same_content_has_same_digest_despite_insertion_order_and_row_timestamp():

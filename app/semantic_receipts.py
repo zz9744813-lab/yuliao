@@ -134,38 +134,47 @@ def _normalized(sql: str) -> str:
     return " ".join(sql.replace(" IF NOT EXISTS", "").split()).lower()
 
 
+def _require_parents(conn) -> None:
+    if conn.engine.url.get_backend_name() != "sqlite":
+        raise ReceiptSchemaError("semantic_receipts_require_sqlite")
+    if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+        raise ReceiptSchemaError("foreign_keys_disabled")
+    # SQLite permits a child table to reference a nonexistent parent.
+    for table, primary_key, required in (
+            ("expression_strategies_v2", "id", {"id", "version"}),
+            ("promotion_audits", "audit_id",
+             {"audit_id", "strategy_id", "strategy_version", "to_status"})):
+        info = conn.exec_driver_sql(f"PRAGMA table_info({table})").all()
+        columns = {row[1] for row in info}
+        if (not required <= columns or
+                not any(row[1] == primary_key and row[5] == 1
+                        for row in info)):
+            raise ReceiptSchemaError(f"parent_schema_missing:{table}")
+
+
+def require_semantic_schema(conn) -> None:
+    """Read-only check of every required receipt table and trigger."""
+    _require_parents(conn)
+    for kind, definitions in (("table", TABLE_DDL),
+                              ("trigger", TRIGGER_DDL)):
+        for name, expected in definitions.items():
+            stored = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name)).scalar()
+            if stored is None or _normalized(stored) != _normalized(expected):
+                raise ReceiptSchemaError(f"{kind}_schema_drift:{name}")
+
+
 def ensure_semantic_schema(engine: Engine) -> None:
     """Create only missing receipt objects, then reject any schema drift.
 
     Existing review and promotion rows are untouched. The caller's SQLite
     connection must enforce foreign keys; the app engine does so on connect.
     """
-    if engine.url.get_backend_name() != "sqlite":
-        raise ReceiptSchemaError("semantic_receipts_require_sqlite")
     with engine.begin() as conn:
-        if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
-            raise ReceiptSchemaError("foreign_keys_disabled")
-        # SQLite permits a child table to reference a nonexistent parent.
-        # Require both parents and their PKs before creating empty receipts.
-        for table, primary_key, required in (
-                ("expression_strategies_v2", "id", {"id", "version"}),
-                ("promotion_audits", "audit_id",
-                 {"audit_id", "strategy_id", "strategy_version", "to_status"})):
-            info = conn.exec_driver_sql(f"PRAGMA table_info({table})").all()
-            columns = {row[1] for row in info}
-            if (not required <= columns or
-                    not any(row[1] == primary_key and row[5] == 1
-                            for row in info)):
-                raise ReceiptSchemaError(f"parent_schema_missing:{table}")
+        _require_parents(conn)
         for ddl in TABLE_DDL.values():
             conn.exec_driver_sql(ddl)
         for ddl in TRIGGER_DDL.values():
             conn.exec_driver_sql(ddl)
-        for kind, definitions in (("table", TABLE_DDL),
-                                  ("trigger", TRIGGER_DDL)):
-            for name, expected in definitions.items():
-                stored = conn.exec_driver_sql(
-                    "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
-                    (kind, name)).scalar()
-                if stored is None or _normalized(stored) != _normalized(expected):
-                    raise ReceiptSchemaError(f"{kind}_schema_drift:{name}")
+        require_semantic_schema(conn)
