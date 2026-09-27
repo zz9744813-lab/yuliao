@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app import knowledge as K
 from app import knowledge_extract as KE
+from app import knowledge_query as KQ
 from app.db import Base
 from app.models import (ExpressionStrategyV2, Segment, StrategyCondition,
                         StrategyInstance, Work, WorkSource)
@@ -77,7 +78,7 @@ def _seed(reverse=False):
     return engine, s
 
 
-def test_same_content_has_same_digest_despite_insertion_order_and_timestamps():
+def test_same_content_has_same_digest_despite_insertion_order_and_row_timestamp():
     e1, s1 = _seed()
     e2, s2 = _seed(reverse=True)
     try:
@@ -134,15 +135,20 @@ def test_material_change_invalidates_snapshot(change):
         elif change == "scope_claim":
             claim["scope_basis"] = "另一份审查依据"
         s.flush()
-        assert build_snapshot(s, "ESV2-S", 1, claim)[
-            "content_sha256"] != before
+        if change in {"reviewer_marker", "segment_role", "segment_integrity"}:
+            with pytest.raises(SnapshotError):
+                build_snapshot(s, "ESV2-S", 1, claim)
+        else:
+            assert build_snapshot(s, "ESV2-S", 1, claim)[
+                "content_sha256"] != before
     finally:
         s.close(); engine.dispose()
 
 
 @pytest.mark.parametrize("failure", [
     "wrong_version", "missing_source", "bad_positive_span", "bad_positive_hash",
-    "missing_audit",
+    "missing_audit", "missing_segment", "segment_work_mismatch",
+    "invalid_integrity", "observation_not_replicated", "audit_ref_missing",
 ])
 def test_unverifiable_evidence_refuses_snapshot(failure):
     engine, s = _seed()
@@ -157,8 +163,110 @@ def test_unverifiable_evidence_refuses_snapshot(failure):
             s.get(StrategyInstance, "SI-A").evidence_sha256 = "0" * 64
         elif failure == "missing_audit":
             s.execute(text("DELETE FROM promotion_audits"))
+        elif failure == "missing_segment":
+            s.delete(s.get(Segment, "SEG-A"))
+        elif failure == "segment_work_mismatch":
+            s.get(Segment, "SEG-A").work_id = "WK-M"
+        elif failure == "invalid_integrity":
+            s.get(Segment, "SEG-A").integrity = "not-json"
+        elif failure == "observation_not_replicated":
+            s.get(ExpressionStrategyV2, "ESV2-S").observation_status = "observed"
+        elif failure == "audit_ref_missing":
+            s.execute(text("UPDATE promotion_audits SET evidence_ref='[\"MISSING\"]'"))
         s.flush()
         with pytest.raises(SnapshotError):
             build_snapshot(s, "ESV2-S", 1, CLAIM)
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_default_source_policy_is_enforced_and_frozen_in_review_input(monkeypatch):
+    engine, s = _seed()
+    try:
+        before = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        monkeypatch.setattr(
+            KQ, "DEFAULT_EXCLUDED_SOURCE_TYPES",
+            KQ.DEFAULT_EXCLUDED_SOURCE_TYPES | frozenset({"new_excluded_type"}))
+        after = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        assert after["review_input_sha256"] != before["review_input_sha256"]
+        assert after["content_sha256"] != before["content_sha256"]
+
+        s.query(WorkSource).filter_by(work_id="WK-A").one().source_type = "fixture"
+        s.flush()
+        claim = {**CLAIM, "scope_ids": ["WK-M"]}
+        filtered = build_snapshot(s, "ESV2-S", 1, claim)
+        assert "SI-A:excluded_source_type:fixture" in filtered["payload"][
+            "evidence"]["stripped"]
+        assert filtered["payload"]["evidence"]["facts"][
+            "reviewed_ids"] == ["SI-Z"]
+        assert filtered["review_input"]["policy"] == filtered["payload"]["policy"]
+
+        s.query(WorkSource).filter_by(work_id="WK-A").one().source_type = "human_fiction"
+        s.get(StrategyInstance, "SI-A").text_version = "corpus-v9"
+        s.flush()
+        version_filtered = build_snapshot(s, "ESV2-S", 1, claim)
+        assert "SI-A:text_version:corpus-v9" in version_filtered["payload"][
+            "evidence"]["stripped"]
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_filtered_verified_instance_with_bad_span_still_blocks_snapshot():
+    engine, s = _seed()
+    try:
+        s.query(WorkSource).filter_by(work_id="WK-A").one().source_type = "fixture"
+        s.get(StrategyInstance, "SI-A").evidence_text = "伪造的原文"
+        s.flush()
+        with pytest.raises(SnapshotError, match="positive_span_or_hash_mismatch:SI-A"):
+            build_snapshot(s, "ESV2-S", 1,
+                           {**CLAIM, "scope_ids": ["WK-M"]})
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_anchor_uses_chronological_utc_order_not_text_order():
+    engine, s = _seed()
+    try:
+        s.execute(text(
+            "INSERT INTO promotion_audits VALUES "
+            "('AUD-EARLIER', 'ESV2-S', 1, 'replicated', "
+            "'[\"SI-A\"]', '2026-09-27T01:00:00+08:00')"))
+        first = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        assert first["replicated_audit_id"] == "AUD-R"
+        s.execute(text(
+            "INSERT INTO promotion_audits VALUES "
+            "('AUD-LATER', 'ESV2-S', 1, 'replicated', "
+            "'[\"SI-A\"]', '2026-09-27T09:00:00+08:00')"))
+        second = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        assert second["replicated_audit_id"] == "AUD-LATER"
+        assert second["content_sha256"] != first["content_sha256"]
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_invalid_scope_and_audit_inputs_fail_closed():
+    engine, s = _seed()
+    try:
+        with pytest.raises(SnapshotError, match="strategy_version_not_found"):
+            build_snapshot(s, "ESV2-S", 2, CLAIM)
+        with pytest.raises(SnapshotError, match="unreviewable_scope_claim"):
+            build_snapshot(s, "ESV2-S", 1, {**CLAIM, "scope_ids": []})
+        with pytest.raises(SnapshotError, match="scope_claim_unbacked"):
+            build_snapshot(s, "ESV2-S", 1,
+                           {**CLAIM, "scope_ids": ["OTHER-WORK"]})
+        s.execute(text("UPDATE promotion_audits SET ts='2026-09-27T00:00:00'"))
+        with pytest.raises(SnapshotError, match="replicated_audit_invalid"):
+            build_snapshot(s, "ESV2-S", 1, CLAIM)
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_null_and_empty_effect_reference_have_different_digests():
+    engine, s = _seed()
+    try:
+        before = build_snapshot(s, "ESV2-S", 1, CLAIM)["content_sha256"]
+        s.get(StrategyInstance, "SI-A").effect_ref = ""
+        s.flush()
+        assert build_snapshot(s, "ESV2-S", 1, CLAIM)["content_sha256"] != before
     finally:
         s.close(); engine.dispose()

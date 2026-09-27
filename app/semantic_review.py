@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -34,10 +34,22 @@ def _text_digest(value: str | None) -> str:
 
 
 def _integrity_value(value: str | None):
+    if value is None:
+        return None
     try:
-        return json.loads(value) if value is not None else None
-    except (TypeError, ValueError):
-        return value
+        return json.loads(value)
+    except (TypeError, ValueError) as exc:
+        raise SnapshotError("segment_integrity_invalid") from exc
+
+
+def _audit_time(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise SnapshotError("replicated_audit_invalid") from exc
+    if parsed.tzinfo is None:
+        raise SnapshotError("replicated_audit_invalid")
+    return parsed.astimezone(timezone.utc)
 
 
 def _scope_claim(value: dict, rule_version: str) -> dict:
@@ -68,7 +80,10 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
     """
     # Import locally so the K5 writer can later call this module without an
     # import cycle. Reuse its strict src_ok and reviewed-evidence predicates.
-    from scripts import k5_promotion_write as KP
+    try:
+        from scripts import k5_promotion_write as KP
+    except ImportError as exc:
+        raise SnapshotError("k5_evidence_predicates_unavailable") from exc
 
     card = s.get(ExpressionStrategyV2, strategy_id)
     if card is None or card.version != strategy_version:
@@ -77,25 +92,27 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         raise SnapshotError("observation_not_replicated")
 
     try:
-        anchor = s.execute(text(
+        anchors = s.execute(text(
             "SELECT audit_id, ts, evidence_ref FROM promotion_audits "
             "WHERE strategy_id=:sid AND strategy_version=:version "
-            "AND to_status='replicated' "
-            "ORDER BY ts DESC, audit_id DESC LIMIT 1"),
-            {"sid": strategy_id, "version": strategy_version}).mappings().first()
+            "AND to_status='replicated'"),
+            {"sid": strategy_id, "version": strategy_version}).mappings().all()
     except SQLAlchemyError as exc:
         raise SnapshotError("replicated_audit_unavailable") from exc
-    if anchor is None:
+    if not anchors:
         raise SnapshotError("replicated_audit_missing")
+    # TEXT timestamps can mix Z, offsets and fractional seconds. Parse every
+    # candidate before selecting the genuinely latest observation anchor.
+    stamped = [(_audit_time(a["ts"]), a) for a in anchors]
+    audit_time, anchor = max(stamped, key=lambda item: (
+        item[0], item[1]["audit_id"]))
     try:
         anchor_refs = json.loads(anchor["evidence_ref"])
-        audit_ts = datetime.fromisoformat(anchor["ts"])
     except (TypeError, ValueError) as exc:
         raise SnapshotError("replicated_audit_invalid") from exc
     if (not isinstance(anchor_refs, list) or not anchor_refs or
             any(not isinstance(i, str) or not i for i in anchor_refs) or
-            len(anchor_refs) != len(set(anchor_refs)) or
-            audit_ts.tzinfo is None):
+            len(anchor_refs) != len(set(anchor_refs))):
         raise SnapshotError("replicated_audit_invalid")
 
     claim = _scope_claim(scope_claim, KP.SCOPE_RULE_VERSION)
@@ -143,7 +160,8 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
             "evidence_text_sha256": _text_digest(i.evidence_text),
             "observed_content_sha256": _text_digest(i.observed_content),
             "conditions_observed": i.conditions_observed,
-            "effect_ref_sha256": _text_digest(i.effect_ref),
+            "effect_ref_sha256": (None if i.effect_ref is None
+                                  else _text_digest(i.effect_ref)),
             "extractor_model": i.extractor_model,
         })
         review_instances.append({
@@ -201,19 +219,48 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         "evidence_refs": c.evidence_refs, "version": c.version,
     } for c in conditions]
 
-    source_policy = {}
+    source_policy = {
+        "excluded_source_types": sorted(KQ.DEFAULT_EXCLUDED_SOURCE_TYPES),
+        "excluded_uses": sorted(KQ.DEFAULT_EXCLUDED_USES),
+        "allowed_text_versions": sorted(KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
+    }
     query_policy = {"source_policy": source_policy}
-    refs, _, stripped = KQ._evidence_for(s, strategy_id, query_policy)
+    refs, admitted_count, stripped = KQ._evidence_for(
+        s, strategy_id, query_policy)
     facts = KP.evidence_facts(s, strategy_id, query_policy)
     by_id = {i.id: i for i in all_instances}
-    for instance_id in facts["reviewed_ids"]:
-        ins = by_id[instance_id]
+    expected_facts = {"evidence_count", "instance_ids", "stripped",
+                      "src_ok_ids", "reviewed_ids", "roots", "works"}
+    if set(facts) != expected_facts or admitted_count != facts["evidence_count"]:
+        raise SnapshotError("evidence_facts_contract_changed")
+    if (not facts["reviewed_ids"] or
+            not set(facts["reviewed_ids"]) <= set(by_id) or
+            not set(facts["reviewed_ids"]) <=
+            {r["instance_id"] for r in refs}):
+        raise SnapshotError("reviewed_evidence_missing")
+    # Validate every verified instance, including rows currently excluded by
+    # source policy or mirror dedup. Filtering must never hide corrupt spans.
+    for ins in (i for i in all_instances if i.status == "verified"):
         seg = segments[ins.segment_id]
         effective = seg.text_clean if seg.text_clean is not None else seg.text
         if (not K.verify_instance_span(effective, ins.span_start,
                                        ins.span_end, ins.evidence_text) or
                 K.evidence_sha256(ins.evidence_text) != ins.evidence_sha256):
-            raise SnapshotError("positive_span_or_hash_mismatch:" + instance_id)
+            raise SnapshotError("positive_span_or_hash_mismatch:" + ins.id)
+
+    def _root_interval(instance_id: str) -> tuple[str, int, int]:
+        ins = by_id[instance_id]
+        return (sources[ins.work_id].canonical_work_id,
+                ins.span_start, ins.span_end)
+
+    reviewed_intervals = {_root_interval(i) for i in facts["reviewed_ids"]}
+    if not {_root_interval(i) for i in anchor_refs} <= reviewed_intervals:
+        raise SnapshotError("replicated_audit_evidence_unbacked")
+    candidates, _ = KP.scope_candidates(s, facts["works"])
+    if not any(level == claim["scope_to"] and
+               set(claim["scope_ids"]) <= set(ids)
+               for level, ids, _basis in candidates):
+        raise SnapshotError("scope_claim_unbacked")
 
     policy = {
         "source_policy": source_policy,
@@ -228,13 +275,19 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         "sources": source_rows, "conditions": condition_rows,
         "admitted_refs": sorted(refs, key=lambda r: r["instance_id"]),
         "stripped": sorted(stripped),
-        "facts": {**facts,
-                  "instance_ids": sorted(facts["instance_ids"]),
-                  "src_ok_ids": sorted(facts["src_ok_ids"]),
-                  "reviewed_ids": sorted(facts["reviewed_ids"])},
+        "facts": {
+            "evidence_count": facts["evidence_count"],
+            "instance_ids": sorted(facts["instance_ids"]),
+            "stripped": facts["stripped"],
+            "src_ok_ids": sorted(facts["src_ok_ids"]),
+            "reviewed_ids": sorted(facts["reviewed_ids"]),
+            "roots": sorted(facts["roots"]),
+            "works": sorted(facts["works"]),
+        },
         "replicated_audit": {
             "audit_id": anchor["audit_id"],
-            "ts": anchor["ts"],
+            "ts": audit_time.isoformat(timespec="microseconds").replace(
+                "+00:00", "Z"),
             "evidence_ref": sorted(anchor_refs),
         },
     }
@@ -248,6 +301,7 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         "schema_version": SCHEMA_VERSION,
         "algorithm_version": ALGORITHM_VERSION,
         "strategy": card_payload, "scope_claim": claim,
+        "policy": policy,
         "instances": review_instances, "sources": source_rows,
         "segments": segment_rows, "conditions": condition_rows,
         "admitted_refs": evidence["admitted_refs"],
