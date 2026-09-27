@@ -29,7 +29,9 @@ rollback 再记失败，不留半成品会话态。
 审计整改（P0 主线第 2 条，2026-09-24）：世界可配（--book-id，默认 WK-K4 行为
 不变）；新增**只读预检** `--preflight`（零生成调用、零库写）——查 work_sources
 是否登记该 book_id、并调 K3 只读 query_knowledge 判断 A 臂包是否非空，打印可核对
-JSON，未登记/空包即非零退出。--live 路径叠加同一道闸（仅 LLM_MODE=real 时生效，
+JSON，未登记/空包即非零退出。当前 strategy_reviews 缺证据指纹及审查→晋升
+审计绑定，非空包仍按 semantic_review_unverifiable 拒绝真跑，不把两个 PASS 当
+当前证据的充分证明。--live 路径叠加同一道闸（仅 LLM_MODE=real 时生效，
 mock 不烧钱故跳过以保双闸测试）：过闸才许起真实调用，否则拒绝起跑、零真实调用。
 禁止用未登记 WK-K4 虚构场景把空包对照当真跑证据。
 
@@ -143,11 +145,14 @@ def preflight_world(book_id: str, s) -> dict:
     - 查 work_sources 是否登记该 book_id；
     - 调 K3 只读 query_knowledge 判断该世界 A 臂包是否非空；
     返回可核对 dict：book_id / registered / k3_status / selected_ids /
-    n_techniques / empty_reason。不抛异常、不退出——退出决策交给调用方。
+    n_techniques / empty_reason / review_status / review_reason / ready。
+    不抛异常、不退出——退出决策交给调用方。
 
-    这是闸，不是提示：registered=False 或 k3_status!="matched" 即「A 臂空」，
-    调用方（--preflight / --live）必须据此非零退出，绝不允许把空包对照当真跑
-    证据（审计 P0 主线第 2 条禁的动作）。"""
+    这是闸，不是提示：未登记、A 臂空或当次 selected 策略缺可核验的
+    当前证据语义审查收据，调用方（--preflight / --live）均非零退出。
+    旧 strategy_reviews 只有 strategy_id / judge_kind / reviewer_model /
+    verdict，没有证据指纹、策略版本及审查→晋升审计绑定；即使有两个 PASS
+    也不能证明审的是此刻要送进 Writer 的证据，故当前一律 fail-closed。"""
     from app import knowledge_query as kq
     from app.models import WorkSource, ExpressionStrategyV2
     from app.knowledge import PACKAGE_CONTRACT_VERSION
@@ -172,9 +177,20 @@ def preflight_world(book_id: str, s) -> dict:
         empty_reason = (f"empty_package:k3_status={k3_status}；全库策略状态"
                         f"分布={dist}，verified={verified}（eligible_statuses "
                         f"只认 verified ⇒ A 臂知识包恒空，无合格证据可进包）")
+    review_status = ("semantic_review_unverifiable" if selected_ids
+                     else "not_applicable")
+    review_reason = (
+        "semantic_review_unverifiable:当次 A 臂 selected 策略缺可核验的"
+        "当前证据语义审查收据；strategy_reviews 未绑定策略版本、证据指纹"
+        "及晋升审计，两个 PASS 亦不能单独放行"
+        if selected_ids else None)
+    ready = (registered and k3_status == "matched" and bool(selected_ids)
+             and review_status == "verified")
     return {"book_id": book_id, "registered": registered,
             "k3_status": k3_status, "selected_ids": selected_ids,
-            "n_techniques": n_techniques, "empty_reason": empty_reason}
+            "n_techniques": n_techniques, "empty_reason": empty_reason,
+            "review_status": review_status, "review_reason": review_reason,
+            "ready": ready}
 
 
 class FxClient:
@@ -224,6 +240,7 @@ def gateway_host_from_url(url) -> str:
 
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
                freeze: bool = False, n_scenes: int = 3,
+               book_id: str = "WK-K4",
                channel_changed: bool = False,
                worlds_dir: str | None = None,
                worlds_created_at: str | None = None,
@@ -287,7 +304,8 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
             store = stores[arm]
             plan = build_plan(scene_id, sp["rev"], sp["before"], sp["after"],
                               sp["idem"] + f"-{arm}", fact=sp["fact"],
-                              goal=sp["goal"], desc=sp["desc"])
+                              goal=sp["goal"], desc=sp["desc"],
+                              book_id=book_id)
             try:
                 if arm == "A":
                     pkg, meta = frozen_package_for_scene(
@@ -445,9 +463,8 @@ def main() -> None:
     ap.add_argument("--live", action="store_true",
                     help="真实调用（拍板后）：K4_ALLOW_LIVE=1 + LLM_MODE=real")
     ap.add_argument("--preflight", action="store_true",
-                    help="只读预检（零生成调用、零库写）：查 book_id 是否在 "
-                         "work_sources 登记、并调 K3 只读 query_knowledge 判断"
-                         "该世界 A 臂包是否非空；未登记或空包 → 非零退出")
+                    help="只读预检（零生成调用、零库写）：查登记、非空包与"
+                         "可核验语义审查收据；任一缺失 → 非零退出")
     ap.add_argument("--book-id", default="WK-K4",
                     help="世界 id（默认 WK-K4，行为逐字不变）；须为有登记、"
                          "可匹配的真实试点世界（如 production_nonbenchmark_* 源）")
@@ -477,9 +494,10 @@ def main() -> None:
         with db.session() as s:
             pre = preflight_world(a.book_id, s)
         print(json.dumps(pre, ensure_ascii=False, indent=1))
-        if not pre["registered"] or pre["k3_status"] != "matched":
+        if not pre["ready"]:
             raise SystemExit(
-                f"[preflight] 拒绝（非零退出）：{pre['empty_reason']} "
+                f"[preflight] 拒绝（非零退出）："
+                f"{pre['empty_reason'] or pre['review_reason']} "
                 f"（book_id={a.book_id}, k3_status={pre['k3_status']}）")
         print(f"[preflight] 通过：book_id={a.book_id} 已登记，A 臂包非空"
               f"（n_techniques={pre['n_techniques']}）")
@@ -503,14 +521,15 @@ def main() -> None:
             # 预检闸仅在「确实会发起真实调用」时生效（LLM_MODE=real）：
             # mock 环境下 GatewayClient 本就拒构（RuntimeFault），不会烧钱，
             # 故跳过预检以免破坏离线/双闸测试；真实试点侧必须过闸才能起跑——
-            # 世界未登记 或 A 臂空（无 verified 策略）即拒绝，零真实调用。
+            # 世界未登记、A 臂空或语义审查收据不可核验即拒绝，零真实调用。
             if getattr(_cfg, "LLM_MODE", "mock") == "real":
                 with db.session() as s:
                     pre = preflight_world(a.book_id, s)
-                if not pre["registered"] or pre["k3_status"] != "matched":
+                if not pre["ready"]:
                     raise SystemExit(
                         f"[preflight] 拒绝 --live 起跑（非零退出，零真实调用）："
-                        f"{pre['empty_reason']}（book_id={a.book_id}, "
+                        f"{pre['empty_reason'] or pre['review_reason']}"
+                        f"（book_id={a.book_id}, "
                         f"k3_status={pre['k3_status']}）")
             from app.scene_runtime.client import GatewayClient
             client = GatewayClient(a.writer_model, a.verifier_model)
@@ -526,11 +545,12 @@ def main() -> None:
             def factory():
                 factory.n = getattr(factory, "n", 0) + 1
                 store = Store(tmp / f"arm{factory.n}" / "k4.sqlite")
-                store.create_world(build_world())
+                store.create_world(build_world(a.book_id))
                 return store
             with db.session() as s:
                 four = run_paired(factory, client, s, live=a.live,
                                   freeze=a.live, n_scenes=a.scenes,
+                                  book_id=a.book_id,
                                   channel_changed=a.channel_changed,
                                   worlds_dir=str(tmp),
                                   worlds_created_at=worlds_created_at,

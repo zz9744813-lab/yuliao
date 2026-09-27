@@ -3,13 +3,17 @@
 验收点：
 ① 未登记 book_id → 预检非零退出（夹具库）；
 ② 已登记 book_id + 空包 → 预检非零退出，且「没有发生任何真实调用」（假 client 计数断言 0）；
-③ 已登记 book_id + 非空包（夹具里塞一条 verified 策略 + 合格证据）→ 预检通过并给
-   n_techniques 真值；
+③ 已登记 book_id + 非空包（夹具里塞一条 verified 策略 + 合格证据）→
+   如实给 n_techniques，但语义审查收据不可核验，仍拒绝起跑；
 ④ 默认路径回归：不传 --book-id 时 build_world()/build_plan() 产物与改动前逐字一致；
 ⑤ --live 预检闸（真实模式生效）：世界未登记/空包 → 拒绝起跑、零真实调用。
+⑥ 非默认 --book-id 离线运行：世界创建与六份计划都使用同一本书，不回落 WK-K4。
+⑦ 即使夹具里有两席 PASS，旧 strategy_reviews 无证据指纹/晋升审计绑定，
+   --preflight 与真实模式 --live 都 fail-closed，GatewayClient 构造为零。
 
 纪律：默认（离线夹具）路径与既有 test_k4_paired.py 全绿；preflight 只读、零生成调用。
 """
+import json
 import sys
 from pathlib import Path
 
@@ -27,7 +31,7 @@ _spec.loader.exec_module(k4)
 
 from app import db                                     # noqa: E402
 from app.models import (Work, WorkSource,              # noqa: E402
-                        ExpressionStrategyV2, StrategyCondition,
+                        ExpressionStrategyV2, StrategyCondition, StrategyReview,
                         StrategyInstance, Segment)
 import knowledge_seed as KS                            # noqa: E402
 from registry_anchor import anchor as _anchor          # noqa: E402  登记行内容锚同源
@@ -69,6 +73,7 @@ def _register_world(s, wid, *, author_id=None,
 
 def _clear_strategies(s) -> None:
     """清空全库策略/条件/实例——用于「空包」场景的确定性（不依赖其他测试残留）。"""
+    s.query(StrategyReview).delete(synchronize_session=False)
     s.query(StrategyInstance).delete(synchronize_session=False)
     s.query(StrategyCondition).delete(synchronize_session=False)
     s.query(ExpressionStrategyV2).delete(synchronize_session=False)
@@ -94,6 +99,21 @@ def _add_guaranteed_verified_strategy(s, wid) -> None:
         conditions_observed={}, observed_content="测试",
         extractor_model="test", status="verified"))
     s.flush()
+
+
+def _seed_matched_world(wid, *, two_pass=False):
+    KS.seed_knowledge()
+    with db.session() as s:
+        _clear_strategies(s)
+        _register_world(s, wid, author_id="AUTH-1")
+        _add_guaranteed_verified_strategy(s, wid)
+        if two_pass:
+            for model in ("reviewer-one", "reviewer-two"):
+                s.add(StrategyReview(
+                    strategy_id="K4T-MATCH", judge_kind="semantic_card_v2",
+                    reviewer_model=model, verdict="PASS",
+                    evidence_support=1, distinct_flag=1))
+        s.commit()
 
 
 # ── ① 未登记 book_id → 预检非零退出 ────────────────────────────────────────
@@ -156,25 +176,40 @@ def test_preflight_registered_but_empty_package_exits_zero_calls(monkeypatch):
     assert pre["empty_reason"] and "empty_package" in pre["empty_reason"]
 
 
-# ── ③ 已登记 book_id + 非空包 → 预检通过，给 n_techniques 真值 ───────────────
+# ── ③ 已登记 + 非空包，但语义审查不可核验 → 拒绝起跑 ───────────────────────
 
-def test_preflight_registered_nonempty_package_passes(monkeypatch):
-    KS.seed_knowledge()
-    with db.session() as s:
-        _register_world(s, "WK-REG2", author_id="AUTH-1")  # 匹配 AUTHOR 策略
-        _add_guaranteed_verified_strategy(s, "WK-REG2")     # 一条 verified + 实例
-        s.commit()   # 主控修：同上——跨 Session 可见性必须落库
-    # 函数层：matched + n_techniques 真值
+def test_preflight_registered_nonempty_package_reports_review_veto(monkeypatch):
+    _seed_matched_world("WK-REG2")
+    # K3 确实 matched；拒绝原因只能是审查收据不可核验，不得冒充空包。
     with db.session() as s:
         pre = k4.preflight_world("WK-REG2", s)
     assert pre["registered"] is True
     assert pre["k3_status"] == "matched", pre
     assert pre["n_techniques"] == len(pre["selected_ids"]) > 0, pre
     assert pre["empty_reason"] is None
-    # CLI 层：通过、不抛 SystemExit
+    assert pre["review_status"] == "semantic_review_unverifiable"
+    assert pre["ready"] is False
     monkeypatch.setattr(sys, "argv",
                         ["k4", "--preflight", "--book-id", "WK-REG2"])
-    k4.main()                                      # 不抛即过闸
+    with pytest.raises(SystemExit, match="semantic_review_unverifiable"):
+        k4.main()
+
+
+def test_two_pass_reviews_without_evidence_binding_still_refused(monkeypatch):
+    """两个不同 reviewer_model 的 PASS 也不能为当前证据背书。"""
+    wid = "WK-REG-TWO-PASS"
+    _seed_matched_world(wid, two_pass=True)
+    with db.session() as s:
+        pre = k4.preflight_world(wid, s)
+        votes = s.query(StrategyReview).filter_by(strategy_id="K4T-MATCH",
+                                                  verdict="PASS").all()
+    assert len({v.reviewer_model for v in votes}) == 2
+    assert pre["selected_ids"] == ["K4T-MATCH"]
+    assert pre["review_status"] == "semantic_review_unverifiable"
+    assert pre["ready"] is False
+    monkeypatch.setattr(sys, "argv", ["k4", "--preflight", "--book-id", wid])
+    with pytest.raises(SystemExit, match="semantic_review_unverifiable"):
+        k4.main()
 
 
 # ── ④ 默认路径回归：不传 --book-id 时产物与改动前逐字一致 ───────────────────
@@ -198,6 +233,42 @@ def test_default_build_plan_book_id_unchanged():
     # 显式 book_id="WK-K4" 同物
     assert k4.build_plan(s0[0], s0[1], s0[2], s0[3], s0[4],
                          book_id="WK-K4").model_dump() == p.model_dump()
+
+
+def test_nondefault_book_id_reaches_world_and_every_plan(monkeypatch, tmp_path):
+    """只用 FxClient 离线跑 CLI；同时钉世界工厂与逐臂计划的 book_id。"""
+    KS.seed_knowledge()
+    book_id = "WK-K4-NONDEFAULT"
+    with db.session() as s:
+        _register_world(s, book_id)
+        s.commit()
+
+    world_ids = []
+    plan_ids = []
+    build_world = k4.build_world
+    build_plan = k4.build_plan
+
+    def track_world(selected_book_id="WK-K4"):
+        world_ids.append(selected_book_id)
+        return build_world(selected_book_id)
+
+    def track_plan(*args, **kwargs):
+        plan_ids.append(kwargs.get("book_id", "WK-K4"))
+        return build_plan(*args, **kwargs)
+
+    monkeypatch.setattr(k4, "build_world", track_world)
+    monkeypatch.setattr(k4, "build_plan", track_plan)
+    out_dir = tmp_path / "nondefault"
+    monkeypatch.setattr(sys, "argv", ["k4", "--book-id", book_id,
+                                      "--out", str(out_dir)])
+    k4.main()
+
+    artifact = json.loads(
+        (out_dir / "k4_paired.json").read_text(encoding="utf-8"))
+    assert world_ids == [book_id, book_id]
+    assert plan_ids == [book_id] * 6
+    assert len(artifact["artifacts"]["receipts"]) == 6
+    assert not artifact["artifacts"]["failures"]
 
 
 # ── ⑤ --live 预检闸（真实模式生效）：未登记/空包 → 拒绝起跑、零真实调用 ──────
@@ -230,3 +301,28 @@ def test_live_gate_refuses_unregistered_real_mode(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="preflight"):
         k4.main()
     assert calls["gw"] == 0, "预检未过不得构造 GatewayClient（零真实调用）"
+
+
+def test_live_review_veto_precedes_gateway_client(monkeypatch, tmp_path):
+    """K3 matched 且有两席 PASS，仍因缺当前证据绑定而零客户端构造。"""
+    wid = "WK-REG-LIVE-VETO"
+    _seed_matched_world(wid, two_pass=True)
+    monkeypatch.setenv("LG_LOCK_DIR", str(tmp_path / "live-lock"))
+    monkeypatch.setenv("K4_ALLOW_LIVE", "1")
+    from app import config as _cfg
+    import app.scene_runtime.client as _cm
+    monkeypatch.setattr(_cfg, "LLM_MODE", "real")
+    built = []
+
+    class _BoomGateway:
+        def __init__(self, *args, **kwargs):
+            built.append(True)
+            raise AssertionError("审查收据不可核验时不许构造 GatewayClient")
+
+    monkeypatch.setattr(_cm, "GatewayClient", _BoomGateway)
+    monkeypatch.setattr(sys, "argv", ["k4", "--live", "--book-id", wid,
+                                      "--writer-model", "fixture-writer",
+                                      "--verifier-model", "fixture-verifier"])
+    with pytest.raises(SystemExit, match="semantic_review_unverifiable"):
+        k4.main()
+    assert built == []
