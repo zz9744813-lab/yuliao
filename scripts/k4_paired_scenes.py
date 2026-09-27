@@ -44,6 +44,11 @@ worlds_dir_exists + created_at（目录创建时刻 ISO8601 UTC）+ worlds_dir_c
 （正常收口留库=False 供 tokens 对账；异常/中断且收据未落盘时保守清理本次自建的
 临时目录=True——清理只作用于本次 mkdtemp 自建目录，绝不碰他处）。
 离线（非 live）路径的收据字段与产物 JSON 逐字不变。
+
+审计对账链消费侧（2026-09-26，docs/K4收据世界目录_20260926.md）：逐条收据的
+worlds_dir + job_id 才是「这一臂产物出自哪个世界目录」的权威口径——k4_accept_report
+按它反查该臂的 arm*/k4.sqlite（只读），旧收据缺键时退回历史顶层键口径并在报告
+标注来源；已清理的目录显式标 cleaned=true，不伪装成「仍在」。
 """
 from __future__ import annotations
 
@@ -237,8 +242,16 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
     worlds_dir / worlds_created_at：本次跑的世界目录（main() 里
     tempfile.mkdtemp(prefix="k4_worlds_") 自建）及其创建时刻（ISO8601
     UTC）。仅 live 消费——审计非阻断项收口（2026-09-25）：live 收据逐条
-    记 worlds_dir/worlds_dir_exists/created_at，缺参即拒跑（不带无收据的
-    真跑）；离线（live=False）不消费、收据字段逐字不变。"""
+    记 worlds_dir/worlds_dir_exists/created_at/worlds_dir_cleaned，缺参即
+    拒跑（不带无收据的真跑）；离线（live=False）不消费、收据字段逐字
+    不变。
+
+    消费侧对账（审计非阻断项第二段，2026-09-26，docs/K4收据世界目录_
+    20260926.md）：k4_accept_report 不再靠「产物顶层 worlds_dir + 工厂序
+    arm1=A/arm2=B」猜臂—世界目录映射，改为**以逐条收据的 worlds_dir 为准**
+    并用收据 job_id 在该目录的 arm*/k4.sqlite 里只读反查定位该臂世界库；
+    旧收据（缺 worlds_dir 键）退回历史口径并在报告里标明来源，绝不崩、
+    绝不假装知道。收据里 worlds_dir_cleaned 恒显式落值（已清理即 true）。"""
     if live:
         if worlds_dir is None or worlds_created_at is None:
             raise ValueError("run_paired: live 跑必须记 worlds_dir 与 "
@@ -338,6 +351,12 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                     rec["worlds_dir"] = worlds_dir_abs
                     rec["worlds_dir_exists"] = Path(worlds_dir_abs).exists()
                     rec["created_at"] = worlds_created_at
+                    # worlds_dir_cleaned 在此写时即落 False（写收据这一刻
+                    # 目录必在，谎报不得）——补 2026-09-26 消费侧缺口：作为
+                    # 库被直接调用（不经 main）时收据也恒带这四键，消费侧
+                    # （k4_accept_report）不靠「有没有这键」猜清理状态。main
+                    # 收口处仍逐条复核写 False（见下，正常收口留库不删）。
+                    rec["worlds_dir_cleaned"] = False
                 four["receipts"].append(rec)
             except Exception as exc:             # noqa: BLE001
                 failed_at[arm] = scene_id       # 断臂标记：本臂后续场 skip
