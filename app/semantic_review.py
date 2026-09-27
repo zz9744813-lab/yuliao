@@ -24,6 +24,10 @@ SCHEMA_VERSION = 1
 class SnapshotError(ValueError):
     """Current evidence cannot be frozen into a reviewable snapshot."""
 
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
 
 def _digest(value) -> str:
     return hashlib.sha256(KQ.canonical_json(value).encode("utf-8")).hexdigest()
