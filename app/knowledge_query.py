@@ -17,7 +17,9 @@
   泄漏，全部在服务层硬拦（复用 K1-A work_sources 契约）；
 - 包内容不含任何原文（§4.2：Writer 只得到抽象操作/条件/例外/无原文引用）；
 - 语义需求=显式输入+有版本的**确定性映射**：只认 operator=eq 且维度在
-  requirements 里的谓词，其余一律 unknown——模型猜测不当剧情事实。
+  requirements 里的谓词，其余一律 unknown——模型猜测不当剧情事实；
+- 「scope_ids 声明 vs 合格证据实况」的差异**只披露、不参与判定**（见
+  _scope_disclosure）：判定收紧/放宽属集霸裁定，查询层不代劳。
 """
 from __future__ import annotations
 
@@ -330,6 +332,43 @@ def _scope_matches(s, strategy: ExpressionStrategyV2, policy: dict) -> str:
     return "excluded_scope_uncertain"
 
 
+def _scope_disclosure(strategy: ExpressionStrategyV2, refs: list[dict],
+                       roots: list[str], query_root: str | None) -> dict:
+    """范围声明 vs 证据实况的**只读披露**（不参与任何判定，本函数只做数数）。
+
+    补一个此前没有出口的问题：「这条策略在**我这本书**上到底有几条**同书**
+    证据？」——`evidence_cross_work` 只给「是否跨书」这一个布尔，读者无从
+    区分「12 条全在本书」与「12 条全是跨书聚合」，也看不到 `scope_ids` 里
+    **声明了却零合格证据**的作品（「看起来配了其实没证据」）。
+
+    输入全部来自 `_evidence_for` **已有**的 refs（已带 `canonical_work`），
+    不另跑一次查询、不改 `_evidence_for` 的过滤顺序与任何判定结果：
+    - `same_book_count`：`canonical_work` 等于查询作品 canonical 根的唯一
+      区间数（键与 `evidence_count` 同口径：(canonical_work, span)）；
+    - `declared`：`scope_ids` 声明条数（原样计数，不去重）；
+    - `with_evidence`：声明里真有合格证据根作品的作品数；
+    - `unbacked_ids`：声明了却零合格证据的作品 id（按声明顺序、去重）——
+      `with_evidence + len(unbacked_ids)` = 去重后的声明条数。
+
+    `scope != WORK` 时 `scope_ids` 是作者/题材 id 而非作品 id，作品级
+    unbacked 名单没有意义 ⇒ `with_evidence` 恒 0、`unbacked_ids` 恒 []
+    （**不适用**，不是「全部有证据」），`declared` 仍如实报声明条数。"""
+    declared = [str(sid) for sid in (strategy.scope_ids or [])]
+    same_book_intervals = {
+        (ref["canonical_work"], tuple(ref["span"])) for ref in refs
+        if query_root is not None and ref["canonical_work"] == query_root}
+    if strategy.scope == "WORK":
+        root_set = set(roots)
+        distinct = list(dict.fromkeys(declared))
+        with_evidence = sum(1 for sid in distinct if sid in root_set)
+        unbacked = [sid for sid in distinct if sid not in root_set]
+    else:
+        with_evidence, unbacked = 0, []
+    return {"same_book_count": len(same_book_intervals),
+            "declared": len(declared), "with_evidence": with_evidence,
+            "unbacked_ids": unbacked}
+
+
 def _condition_pipeline(s, strategy_id: int, requirements: dict
                         ) -> tuple[str, dict, list[dict]]:
     """②必需条件/bad_when 排除（固定顺序第二步）。
@@ -447,6 +486,8 @@ def query_knowledge(policy: dict, s, *,
         chars = 0
         for i, item in enumerate(ranked[:cap]):
             st = item["strategy"]
+            disclosure = _scope_disclosure(st, item["refs"], item["roots"],
+                                           query_root)
             entry = {
                 "strategy_id": st.id, "strategy_key": st.strategy_key,
                 "version": st.version, "status": st.status,
@@ -466,6 +507,14 @@ def query_knowledge(policy: dict, s, *,
                     query_root is not None
                     and any(root != query_root for root in item["roots"])),
                 "evidence_root_works": item["roots"],
+                # 单书披露四字段：只加披露、不改判定——score_components、
+                # evidence_count、evidence_cross_work、evidence_root_works
+                # 逐字不变，下面四字段只是把「声明」与「实况」的差摊开
+                "evidence_same_book_count": disclosure["same_book_count"],
+                "evidence_scope_ids_declared": disclosure["declared"],
+                "evidence_scope_ids_with_evidence": disclosure[
+                    "with_evidence"],
+                "evidence_scope_unbacked_ids": disclosure["unbacked_ids"],
                 "for_context": False}
             if query_root is None:
                 entry["evidence_cross_work_note"] = (
@@ -536,6 +585,14 @@ def capabilities(s) -> dict:
                         "该策略选中证据的 canonical 根作品 id，去重并按字典序排序",
                     "evidence_cross_work_note":
                         "查询作品缺 WorkSource 登记行时出现，说明未判跨作品",
+                    "evidence_same_book_count":
+                        "该策略合格证据里 canonical_work 等于查询作品 canonical 根的唯一区间数；查询作品缺登记行时为 0",
+                    "evidence_scope_ids_declared":
+                        "该策略 scope_ids 的声明条数（原样计数，不去重）",
+                    "evidence_scope_ids_with_evidence":
+                        "scope_ids 声明里真有合格证据根作品的作品数；scope≠WORK 时恒 0（scope_ids 非作品 id，不适用）",
+                    "evidence_scope_unbacked_ids":
+                        "scope_ids 声明了却零合格证据的作品 id（按声明顺序、去重）；scope≠WORK 时恒 []（不适用）",
                 },
                 "require_same_book_evidence": {
                     "location": "source_policy.require_same_book_evidence",
