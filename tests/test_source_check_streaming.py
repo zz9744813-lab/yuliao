@@ -31,18 +31,21 @@ grep `iter_targets` 命中 0 个文件）。两席会审都把「测试缺口」
    - `nonbench` 分页与 `scan()` **每批自开自闭 session** ⇒ 批与批之间
      不持有读事务（长读事务残余）。
 
-纪律：全部离线（conftest 临时 sqlite + mock LLM），零网络、零密钥读取；
-不跑真实 `--run`（只 monkeypatch 掉 check_one 与预检）、不碰真库。
+纪律：全部离线（**每个用例独占一个临时 sqlite**，见 `_isolated_db` + mock LLM），
+零网络、零密钥读取；不跑真实 `--run`（只 monkeypatch 掉 check_one 与预检）、不碰真库。
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import shutil
 import sys
 from pathlib import Path
 
 import pytest
 
 from sqlalchemy import or_ as _or
+from sqlalchemy.orm import sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
 for _p in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")):
@@ -52,7 +55,8 @@ for _p in (str(ROOT), str(ROOT / "scripts"), str(ROOT / "tests")):
 import source_check as sc                                    # noqa: E402
 from app import db                                           # noqa: E402
 from app.models import (Candidate, ControlledCorruption,     # noqa: E402
-                        Experiment, Frame, Segment, Work, WorkSource)
+                        Experiment, Frame, Segment, Work,
+                        WorkSource)                          # noqa: E402
 from registry_anchor import anchor as _anchor, refresh as _refresh  # noqa: E402
 
 BATCH = 3          # 故意小批：让「整除 / 末批不足 / 空批」三种边界都撞上
@@ -62,29 +66,56 @@ TEXT = "他把茶盏搁回去，半天没有说话，外头风声一阵紧过一
 # ── 夹具 ──────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
-def _isolated_db():
-    """每个用例前把 conftest 那份共享临时 sqlite 清空。
+def _isolated_db(monkeypatch, tmp_path_factory):
+    """每个用例独占一个临时 sqlite 库（**不碰 conftest 那份共享库**）。
 
-    conftest 一轮只建一个临时库（同进程内所有测试文件共用），不隔离的话
-    本文件的段会被别的文件（以及本文件自己的前一个用例）计入选取集
-    ——「分页产出 = 本用例播的 n 段」这种断言会假红（实测 13 段里混进 47 条
-    别人的段）。这里按外键逆序删干净：子表先删，父表后删。
-    夹具库是临时的，删完不留痕迹。
+    为什么不是「在共享库里把表清空」（2026-09-27 全量红 30 ERROR 的根因）：
+    旧写法在 conftest 那份**全进程共用**的临时库上按固定五表顺序
+    `DELETE FROM candidates → controlled_corruptions → frames → segments →
+    work_sources → works`。app/db.py 的每条连接都开着 `PRAGMA foreign_keys=ON`，
+    而全库引用 segments / works / candidates 的表远不止这六张（residuals_sem、
+    residuals_det、propositions、judge_runs、frames、candidates…
+    `grep 'ForeignKey("segments.id")' app/models.py` 即全清单）——别的测试文件
+    在共享库里留下的任何一行只要落在这六张表之外，本夹具的删除顺序就撞上
+    `sqlite3.IntegrityError: FOREIGN KEY constraint failed`：单跑本文件
+    30 passed 全绿、进全量即 30 ERROR，即会审（reviews/language-genome-92d70941c8.md
+    glm-5.3 席）预警过的「对共享临时库做全表 delete 属脆弱设计，会跨文件串扰」。
+
+    三个候选修法里选「独立临时库」（= 立案口径①，落地形态是②每例独立
+    engine+sessionmaker）。另两条**实测过**（docs/全量红门修复_20260927.md
+    §4 反向自检 M2：把夹具换回共享库 + 删除窗口 `PRAGMA foreign_keys=OFF`，
+    全量门同样 rc=0 / 1873 passed）——它们不是修不好，是**不该要**：
+    - ③「关外键再清表」能过门，但代价是：本文件继续**删别的文件留下的行**
+      （把「本文件自扫门前雪」升级成主动制造跨文件污染）；删除窗口内
+      `foreign_keys=OFF` 关掉了本套件唯一的外键约束防线；清理清单
+      （那六张表，或将来抄全的 22+ 张闭包）会随模型演进**静默失效**——
+      失效时不会响，只会等下一个「谁在别人库里留了行」的机会再炸一次。
+    - ①②零共享：新建的空库里根本没有别人的行，既不需要 DELETE，也不需要
+      动 `PRAGMA foreign_keys`（保持 ON，真违反外键照样红）；失效方向单一
+      （本文件造出坏数据 ⇒ 自己红），不依赖对全库拓扑的知识。
     """
-    db.init_db()
-    with db.session() as s:
-        for model in (Candidate, ControlledCorruption, Frame, Segment,
-                      WorkSource, Work):
-            s.query(model).delete()
-        s.commit()
-    _reset_stat()
-    yield
-    with db.session() as s:
-        for model in (Candidate, ControlledCorruption, Frame, Segment,
-                      WorkSource, Work):
-            s.query(model).delete()
-        s.commit()
-    _reset_stat()
+    root = tmp_path_factory.mktemp("sc_streaming_db")
+    app_db = str((root / "app.db").resolve().as_posix())
+    # _make_engine() 读的是模块属性 config.DATABASE_URL ⇒ 打桩后现造一台
+    # 与生产同口径的引擎（sqlite + WAL + PRAGMA foreign_keys=ON +
+    # check_same_thread=False，见 app/db.py:_make_engine）。
+    monkeypatch.setattr(db.config, "DATABASE_URL", f"sqlite:///{app_db}")
+    isolated_engine = db._make_engine()
+    try:
+        monkeypatch.setattr(db, "engine", isolated_engine)
+        # 所有取会话的路径都过这里：app/db.py:session()、source_check 的
+        # `with db.session()`，以及 app/{engine,gateway,experiments,jobs}.py 里
+        # `from .db import session` 那份引用（函数体每次调 db.SessionLocal）。
+        monkeypatch.setattr(
+            db, "SessionLocal",
+            sessionmaker(bind=isolated_engine, autoflush=False,
+                         expire_on_commit=False))
+        db.init_db()        # create_all + _migrate 全部落在隔离引擎上
+        yield
+    finally:
+        isolated_engine.dispose()   # 先断连，Windows 下才删得掉 .db/-wal/-shm
+        shutil.rmtree(str(root), ignore_errors=True)
+        _reset_stat()       # sc._stat 是进程级累加器：离场清零，不给下家留残值
 
 
 def _seed_work(s, *, source_type=None, register=True, label="t-stream") -> str:

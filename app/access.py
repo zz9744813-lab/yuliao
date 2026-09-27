@@ -17,6 +17,12 @@
 - **但要识别反向代理**：cloudflared 把隧道流量转到本机，`request.client.host` 会是 `127.0.0.1`。
   若只看 host 就会**把整条外网流量当本机放行**，鉴权形同虚设。
   故：只有在 host 是本机 **且没有** `CF-Connecting-IP` / `X-Forwarded-For` 时才免鉴权。
+- **2026-09-27（R2b）代理来源判定升为显式策略**：判定链抽成具名路由标签
+  （`classify` / `access_route`）——`loopback_direct`（回环 + 无代理头，唯一可
+  免令牌的前提）/ `trusted_proxy` / `untrusted_proxy` / `remote`（后三者一律需令牌）。
+  新增 `LG_TRUSTED_PROXIES`（逗号分隔 IP/CIDR，**默认空=最严**）：回环 peer 带着
+  代理头时，只有 peer 命中白名单才标 `trusted_proxy`，否则 `untrusted_proxy`——
+  **两者同样要求令牌**，白名单只提供可观测性与审计线索，绝不放宽。
 - **`?t=<token>` 一次性换 cookie 并跳回干净 URL** → 手机上点一下链接就长期免输；
   也避免令牌留在地址栏/历史/分享里。
   ⚠ 2026-09-19 修正：此前表单硬编码跳回 `/?t=`，从研究台 `/lab/*` 被拦时会跳到盲评台首页。
@@ -51,6 +57,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import os
 import secrets
 from pathlib import Path
@@ -64,6 +71,8 @@ ADMIN_TOKEN_PATH = _ROOT / "data" / "admin_token.txt"
 COOKIE = "rv_token"
 COOKIE_MAX_AGE = 90 * 24 * 3600          # 90 天
 _LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+# 启动自检里做实算演示用的回环 peer 样例（`_LOCAL_HOSTS` 的首项，纯展示用常量）
+LOCAL_SAMPLE = "127.0.0.1"
 # 反向代理注入的请求头：出现任一即说明请求来自隧道/代理，不得按本机放行
 _PROXY_HEADERS = ("cf-connecting-ip", "x-forwarded-for", "x-real-ip")
 
@@ -149,18 +158,101 @@ def local_bypass_enabled() -> bool:
     return os.environ.get(_LOCAL_BYPASS_ENV) == "1"
 
 
+# ── R2b（审计残留 2026-09-27）：可信代理白名单，从「隐式否决」升为「显式策略」 ──
+#
+# 改前的判定链只有一句「有代理头 ⇒ 不按本机放行」。它**行为上最严**，但部署方
+# 看不出「我是不是正处在回环代理漏传头的风险面上」——白/灰/黑三态在日志里长得
+# 一模一样。本次把判定抽成具名路由标签并新增 `LG_TRUSTED_PROXIES`：
+#
+#   peer 回环 + 无代理头           ⇒ via=loopback_direct  （唯一可免令牌的前提）
+#   peer 回环 + 有代理头 + 在白名单 ⇒ via=trusted_proxy    （仍需令牌）
+#   peer 回环 + 有代理头 + 不在     ⇒ via=untrusted_proxy  （仍需令牌）
+#   peer 非回环                    ⇒ via=remote           （仍需令牌）
+#
+# **白名单不放宽任何一格**：trusted_proxy 与 untrusted_proxy 同样要求令牌，
+# 区别只在标签可观测 + 启动自检能原样喊出「这条流量来自你声明的代理」。
+# 环境变量未设（默认）⇒ 白名单为空 ⇒ 任何带代理头的请求都不免令牌。
+# 绝不引入静默放宽，也没有任何 env 能把「需令牌」翻成「免令牌」
+# （`LG_LOCAL_BYPASS` 的既有语义一字未改）。
+_TRUSTED_PROXIES_ENV = "LG_TRUSTED_PROXIES"
+
+
+def trusted_proxies() -> tuple[str, ...]:
+    """`LG_TRUSTED_PROXIES` 的实际生效条目：逗号分隔的 IP / CIDR，逐项 strip。
+
+    默认空 = 最严。空项（`,,` / 尾逗号 / 纯空白）直接丢弃，不产生「空串匹配一切」
+    的口子。每次调用现读环境（测试可 monkeypatch），与 `local_bypass_enabled` 同协议。
+    """
+    raw = os.environ.get(_TRUSTED_PROXIES_ENV) or ""
+    out = [p.strip() for p in raw.split(",")]
+    return tuple(p for p in out if p)
+
+
+def _parse_trusted_proxies() -> tuple[tuple[tuple[str, object], ...], tuple[str, ...]]:
+    """把声明条目解析成 `(合法条目, 被忽略的非法条目原文)`。
+
+    合法条目形如 `(原文, ip_network)`（单 IP 归一为 /32，掩码补齐也接受）。
+    非法条目**剔除**而非放行；单独把它们的原文带回，是为了让 `self_check` 能
+    如实喊出「声明 N 条 / 合法 M 条 / 忽略 K 条 + 具体哪几条」——拼错的 IP 被
+    静默忽略正是要消灭的那类「看起来配了其实没生效」。
+    """
+    good: list[tuple[str, object]] = []
+    bad: list[str] = []
+    for entry in trusted_proxies():
+        try:
+            good.append((entry, ipaddress.ip_network(entry, strict=False)))
+        except ValueError:
+            bad.append(entry)
+    return tuple(good), tuple(bad)
+
+
+def peer_is_trusted_proxy(host: str) -> bool:
+    """`host` 是否命中 `LG_TRUSTED_PROXIES`（单 IP 精确匹配 / CIDR 包含）。
+
+    非法条目（拼错的 IP、非 CIDR 文本）**一律不匹配**，绝不「解析失败就当全信」——
+    白名单是收紧工具，容错方向只能是更严。一个坏条目不让其余合法条目失效。
+    """
+    if not host:
+        return False
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False                      # peer 主机名/怪值：不在白名单内
+    good, _bad = _parse_trusted_proxies()
+    return any(addr in net for _raw, net in good)
+
+
+
+def classify(host: str, has_proxy_headers: bool) -> str:
+    """判定该请求的鉴权路由标签（与请求对象解耦的纯函数，便于自检直接调用）。
+
+    标签即 `access_route` 的返回值域：
+    `loopback_direct` / `trusted_proxy` / `untrusted_proxy` / `remote`。
+    注意**只有** `loopback_direct` 是免令牌的前提，另三格一律需令牌——
+    这条不变量由 `_is_local` 的等值比较机械保证。
+    """
+    if host not in _LOCAL_HOSTS:
+        return "remote"
+    if not has_proxy_headers:
+        return "loopback_direct"
+    if peer_is_trusted_proxy(host):
+        return "trusted_proxy"
+    return "untrusted_proxy"
+
+
+def access_route(request: Request) -> str:
+    """从真实请求取 peer + 代理头事实，交给 `classify` 出标签。"""
+    host = request.client.host if request.client else ""
+    return classify(host, any(h in request.headers for h in _PROXY_HEADERS))
+
+
 def _is_local(request: Request) -> bool:
     """本机直连（非经代理）**且** loopback 免令牌已显式开启。
 
     经代理的请求即便 host 是 127.0.0.1 也不算本机（代理头一票否决，
     即使 LG_LOCAL_BYPASS=1 也不豁免——回环代理漏传头不能变成全站免鉴权）。
     """
-    host = request.client.host if request.client else ""
-    if host not in _LOCAL_HOSTS:
-        return False
-    if any(h in request.headers for h in _PROXY_HEADERS):
-        return False
-    return local_bypass_enabled()
+    return access_route(request) == "loopback_direct" and local_bypass_enabled()
 
 
 def _is_https(request: Request) -> bool:
@@ -230,13 +322,18 @@ _GATE_HTML = """<!doctype html><html lang="zh"><head><meta charset="utf-8">
 
 
 def self_check() -> None:
-    """启动自检（R2 + 两档令牌）：如实打印鉴权面、loopback 免令牌开关状态、
-    两档令牌状态、兼容期开关（若开）与各端点档位。
+    """启动自检（R2 + R2b + 两档令牌）：如实打印鉴权面、loopback 免令牌开关状态、
+    两档令牌状态、兼容期开关（若开）、`LG_TRUSTED_PROXIES` 实际取值、代理头出现时
+    的判定结果与各端点档位。
 
     绑定面（0.0.0.0 还是 loopback）归 uvicorn `--host` 管，应用进程内拿
     不到真实值，这里指明去哪看；serve_remote.sh 侧会另行打印它控制的
     `--host`。免令牌状态是应用侧能确知的事实，必须原样亮出来——审计
     残留 R2 的诉求就是「免令牌不许再是隐式默认」。
+
+    R2b 追加的诉求：白名单**原样**打印（未设即 `(未设)`，不许折叠成「无」之类
+    的说法），并把「代理头出现时会怎么判」落成一行可机械核对的文字，
+    使部署方一眼看出自己是否处在「回环代理漏传头 ⇒ 全站免鉴权」的风险面上。
     """
     if _TOKEN is None:
         mode = ("鉴权=关闭（REVIEW_NO_AUTH=1，评审档与管理档**同时失效**"
@@ -259,10 +356,48 @@ def self_check() -> None:
           f"ADMIN_TOKEN={'已配置' if _ADMIN_TOKEN else '已关闭'}；"
           f"LG_ADMIN_LEGACY_SHARED={'开' if admin_legacy_shared() else '关'}",
           flush=True)
+    # ── R2b：可信代理白名单 + 代理头判定，原样可核对 ──────────────
+    entries = trusted_proxies()
+    good, bad = _parse_trusted_proxies()
+    raw = (os.environ.get(_TRUSTED_PROXIES_ENV) or "").strip()
+    print(f"[access] 可信代理白名单：LG_TRUSTED_PROXIES="
+          f"{raw if raw else '(未设)'}（声明 {len(entries)} 条 / 合法 "
+          f"{len(good)} 条 / 非法忽略 {len(bad)} 条）"
+          + ("——默认最严：带代理头的请求一律需令牌"
+             if not entries else
+             "——仅用于标注代理来源，**不放宽**鉴权（仍需令牌）"),
+          flush=True)
+    if bad:
+        print("[access] ⚠ 白名单有无法解析的条目（已按「永不匹配」处理，"
+              f"不静默放过）：{'、'.join(bad)}", flush=True)
+
+    # 用真实回环 peer 实算「有代理头 / 无代理头」两格，落成可机械核对的文字
+    print(f"[access] 代理头判定（回环 peer 样例 {LOCAL_SAMPLE}）："
+          f"带代理头 ⇒ via={classify(LOCAL_SAMPLE, True)}（需令牌）；"
+          f"无代理头 ⇒ via={classify(LOCAL_SAMPLE, False)}"
+          f"（免令牌的前提，但还需 LG_LOCAL_BYPASS=1 才真免）；"
+          f"非回环 peer 203.0.113.9 ⇒ via={classify('203.0.113.9', True)}"
+          f"（需令牌）；白名单是否覆盖该 peer："
+          f"{'是' if peer_is_trusted_proxy(LOCAL_SAMPLE) else '否'}", flush=True)
+    if local_bypass_enabled():
+        print("[access] ⚠ loopback 免令牌=开启：正处于「回环反向代理漏传代理头 ⇒ "
+              "整站免鉴权」的风险面。请确认绑定面不是 0.0.0.0，"
+              "或去掉 LG_LOCAL_BYPASS=1。", flush=True)
     if admin_legacy_shared():
         print("[access] ⚠⚠ 兼容期显式开关：LG_ADMIN_LEGACY_SHARED=1 ——"
               " 未显式配置 ADMIN_TOKEN 时管理档**共用评审档令牌**。"
               " 迁移完成后请去掉该开关恢复两档分离。", flush=True)
+
+
+def _tagged(resp, route: str):
+    """给门自己产出的响应打上路由标签（`X-Access-Via`），使 `via=trusted_proxy`
+    一类判定在**运行时可观测**，不必挂调试器。
+
+    只回显分类结论、不回显 peer/令牌值；标签本身不参与鉴权判定（判定已在
+    `classify` 里完成），故加不加它不改变任何一格放行结果。
+    """
+    resp.headers["X-Access-Via"] = route
+    return resp
 
 
 def install(app) -> None:
@@ -275,6 +410,7 @@ def install(app) -> None:
     async def _access_gate(request: Request, call_next):
         if _is_local(request):
             return await call_next(request)
+        route = access_route(request)          # 仅用于响应头打标签，不参与判定
 
         q_token = request.query_params.get("t")
         if q_token and _grade(q_token) is not None:
@@ -285,12 +421,12 @@ def install(app) -> None:
             resp = RedirectResponse(url=str(clean), status_code=302)
             resp.set_cookie(COOKIE, q_token, max_age=COOKIE_MAX_AGE,
                             httponly=True, samesite="lax", secure=_is_https(request))
-            return resp
+            return _tagged(resp, route)
         grade = _grade(request.cookies.get(COOKIE))
         if grade is None:
-            return HTMLResponse(_GATE_HTML, status_code=401)
+            return _tagged(HTMLResponse(_GATE_HTML, status_code=401), route)
         if requires_admin(request.method, request.url.path) and grade != "admin":
-            return PlainTextResponse(
+            return _tagged(PlainTextResponse(
                 "该端点需要管理档令牌（ADMIN_TOKEN）。持有评审档令牌"
-                "（REVIEW_TOKEN）不足以完成此操作。", status_code=403)
+                "（REVIEW_TOKEN）不足以完成此操作。", status_code=403), route)
         return await call_next(request)

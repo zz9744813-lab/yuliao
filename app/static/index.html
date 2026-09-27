@@ -804,8 +804,8 @@ async function initReview(){
     const exps = await api('/experiments');
     const others = exps.filter(e => e.id !== curExp && e.review_pending > 0);
     $('#rv-exp').innerHTML =
-      `<option value="${escHtml(curExp)}">${escHtml(curExp)}（本批 ${escHtml(info.pending)} 待评）</option>` +
-      others.map(e=>`<option value="${escHtml(e.id)}">${escHtml(e.id)} · ${escHtml(e.review_pending)} 待评</option>`).join('');
+      `<option value="${escAttr(curExp)}">${escHtml(curExp)}（本批 ${escHtml(info.pending)} 待评）</option>` +
+      others.map(e=>`<option value="${escAttr(e.id)}">${escHtml(e.id)} · ${escHtml(e.review_pending)} 待评</option>`).join('');
     renderProgress();
     applyCtxState();
     loadNext();
@@ -1138,6 +1138,13 @@ let pendingSel = null;
 function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
   .replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/`/g,'&#96;'); }
 
+// escAttr — **只**用于字符串拼接 HTML 里的双引号属性值位置（value="…" / data-*="…"）。
+// 与 escHtml 的差别：在文本口径（& < >）和引号口径（" ' `）之上再转义反斜杠为 &#92;
+// （不带引号的属性 / 老解析器上下文里 \ 是转义引导符，属性位不需要反转义字符但按最严口径收）。
+// 它**不能**救类名 / 样式 / 事件处理器上下文——那里问题不是引号而是 token 本身，
+// 任意字符串必须走 escClass 白名单（见 showExp）或 DOM className/textContent 赋值。
+function escAttr(s){ return escHtml(s).replace(/\\/g,'&#92;'); }
+
 function buildMarkedHtml(text, list){
   // 按 start 排序渲染；与前者重叠的跳过（避免嵌套 mark 破坏 offset 语义）
   const sorted = [...list].sort((a,b)=>a.start-b.start);
@@ -1167,7 +1174,7 @@ function renderMarks(){
     listEl.innerHTML = marks[side].map(m =>
       `<div class="mi"><b>${escHtml(m.kind)}</b>
          <span class="tx">「${escHtml(m.text.slice(0,24))}${m.text.length>24?'…':''}」</span>
-         <span class="del" data-del="${escHtml(m.id)}">删除</span></div>`).join('');
+         <span class="del" data-del="${escAttr(m.id)}">删除</span></div>`).join('');
   }
   const n = marks.A.length + marks.B.length;
   $('#rv-mark-hint').textContent = n
@@ -1340,7 +1347,11 @@ function verdictChip(w){
   const m = {human:['Human 更好','chip nov'], candidate:['候选更好','chip dis'],
              tie:['无差别','chip'], both_bad:['都差','chip up'],
              cant_judge:['无法判','chip']};
-  const [t,c] = m[w] || [w||'—','chip'];
+  // c 是类名位置：未收录的判定只回退到固定 token 'chip'——
+  // 服务端 winner 字符串本身绝不能进 class（类名不是转义能救的上下文）
+  const hit = m[w];
+  const t = hit ? hit[0] : (w || '—');
+  const c = hit ? hit[1] : 'chip';
   return `<span class="${c}">${esc(t)}</span>`;
 }
 async function loadDoneList(){
@@ -1354,7 +1365,7 @@ async function loadDoneList(){
          <td>${escHtml(it.n_annotations||0)}</td>
          <td class="muted">${escHtml((it.reviewed_at||'').slice(5,16).replace('T',' '))}</td>
          <td class="kv">${escHtml(it.id)}</td>
-         <td><button class="act" data-rejudge-id="${escHtml(it.id)}">改判</button></td></tr>`).join('') +
+         <td><button class="act" data-rejudge-id="${escAttr(it.id)}">改判</button></td></tr>`).join('') +
       `</tbody>`;
     $('#rv-table').querySelectorAll('button[data-rejudge-id]').forEach(btn => {
       btn.addEventListener('click', () => rejudgeFromDone(btn.dataset.rejudgeId));
@@ -1431,6 +1442,9 @@ function autoRefresh(id){ clearInterval(autoTimer);
   autoTimer = setInterval(()=>{ if(curExp) showExp(curExp, true); }, 5000); }
 
 async function showExp(id, quiet){
+  // 类名不是「转义能救」的上下文：属性分词靠空格，escHtml 转了引号也挡不住空格塞新类。
+  // 白名单只留 CSS 标识符安全字符，其余一律丢弃；status 原文仍在文本位经 escHtml 可读展示。
+  const escClass = s => String(s == null ? '' : s).replace(/[^A-Za-z0-9_-]/g, '');
   try{
     const e = await api('/experiments/'+id);
     $('#exp-detail').style.display='';
@@ -1438,7 +1452,7 @@ async function showExp(id, quiet){
     const stages = e.stats && e.stats.stages || {};
     $('#d-stages').innerHTML = Object.entries(e.job_states||{}).map(([k,v]) =>
       `<div class="stage-cell"><b>${escHtml(k.replace('stage:',''))}
-        <span class="tag ${escHtml(v.status)}">${escHtml(v.status)}</span></b>
+        <span class="tag ${escClass(v.status)}">${escHtml(v.status)}</span></b>
         ${stages[k.replace('stage:','')] ?
           Object.entries(stages[k.replace('stage:','')]).filter(([x])=>x!=='done')
             .map(([a,b])=>`${escHtml(a)}=${escHtml(typeof b==='object'?JSON.stringify(b):b)}`).join(' ') : ''}
@@ -1480,7 +1494,7 @@ async function loadCorpus(){
      <td>${escHtml(w.segments)}</td><td class="kv" style="font-size:11px">${escHtml(w.source)}</td>
      <td class="muted">${escHtml(w.note||'')}</td></tr>`).join('');
   $('#f-work').innerHTML = '<option value="">全部语料</option>' +
-    works.map(w=>`<option value="${escHtml(w.id)}">${escHtml(w.title)}（${escHtml(w.segments)}段）</option>`).join('');
+    works.map(w=>`<option value="${escAttr(w.id)}">${escHtml(w.title)}（${escHtml(w.segments)}段）</option>`).join('');
   const segs = await api('/segments?limit=8');
   $('#seg-list').innerHTML = segs.map(s =>
     `<div style="margin-bottom:8px">[${escHtml(s.id)}] ${escHtml(s.text)}</div>`).join('');
