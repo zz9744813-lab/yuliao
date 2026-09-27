@@ -123,7 +123,7 @@ class Store:
         return dict(row)
 
     def prepare(self, plan: ScenePlan, knowledge: KnowledgePackage, budget: Budget, models: dict):
-        request = {"plan": plan.model_dump(), "knowledge": knowledge.model_dump(),
+        request = {"plan": plan.model_dump(), "knowledge": knowledge.model_dump(exclude_none=True),
                    "budget": budget.model_dump(), "models": models, "runtime": RUNTIME_VERSION}
         request_hash = digest(request)
         job_id = "scene-" + digest([plan.book_id, plan.branch_id, plan.idempotency_key])[:24]
@@ -154,7 +154,7 @@ class Store:
                 if json.loads(prior[0])["plan"]["pov"] == plan.pov:
                     recent.append(dict(item))
             context = {"runtime": RUNTIME_VERSION, "verifier_context_version": 2, "plan": plan.model_dump(),
-                       "knowledge": knowledge.model_dump(), "world_revision": world.revision,
+                       "knowledge": knowledge.model_dump(exclude_none=True), "world_revision": world.revision,
                        "characters": world.characters, "facts": visible, "rules": world.rules,
                        "recent_committed_scenes": recent}
             if len(canonical(context)) > budget.max_input_chars:

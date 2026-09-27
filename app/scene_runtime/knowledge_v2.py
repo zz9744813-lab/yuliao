@@ -18,16 +18,52 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from contextlib import contextmanager
+from datetime import datetime, timezone
+
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+from pydantic import ValidationError
 
 from .contracts import KnowledgePackage, RuntimeFault, Technique, digest
 from .store import Store
+
+
+@contextmanager
+def _reserved_knowledge_connection(engine):
+    """Hold one SQLite writer reservation across admission and K3 insertion."""
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+    except SQLAlchemyError as exc:
+        raise RuntimeFault("knowledge_store_unavailable") from exc
+
+
+def scene_policy(plan, *, context_items: int = 3) -> dict:
+    """Single policy shape used by the bridge and frozen-package verifier."""
+    from ..knowledge import PACKAGE_CONTRACT_VERSION
+
+    return {"contract_version": PACKAGE_CONTRACT_VERSION,
+            "book_id": plan.book_id, "branch_id": plan.branch_id,
+            "scene_id": plan.scene_id,
+            "plan_sha256": digest(plan.model_dump()),
+            "semantic_requirements": {"goal": plan.goal, "pov": plan.pov,
+                                      "style": plan.style},
+            "limits": {"context_items": context_items}}
 
 
 def _techniques_from_selected(selected: list[dict]) -> list[Technique]:
     """选中策略 → Runtime 技巧（只取进上下文的 for_context 条目，≤3）。
 
     无原文：source_refs 只带策略 id/版本/证据 instance id（§4.2）；
-    evidence_status 用 v2 效果层（枚举恰好与旧 Technique 契约一致）。"""
+    evidence_status 用 v2 效果层；untested 诚实传递，不冒充效果证明。"""
     out: list[Technique] = []
     for e in selected:
         if not e.get("for_context"):
@@ -55,7 +91,6 @@ def frozen_package_for_scene(store: Store, lg_session, plan, *,
                              freeze: bool = True) -> tuple[KnowledgePackage, dict]:
     """首 prepare 前查冻；恢复复用不重查。返回 (包, 对账元数据)。"""
     from .. import config, knowledge_query as kq   # LG 侧服务层（只读+包写入）
-    from ..knowledge import PACKAGE_CONTRACT_VERSION
 
     job_id = "scene-" + digest([plan.book_id, plan.branch_id,
                                 plan.idempotency_key])[:24]
@@ -66,41 +101,77 @@ def frozen_package_for_scene(store: Store, lg_session, plan, *,
     if job is not None:
         # 同任务恢复：冻结包已在 job request 里——不重查（重查会拿到
         # 库漂移后的不同包，破坏「本场冻结」语义）
-        knowledge = KnowledgePackage.model_validate(
-            json.loads(job["request"])["knowledge"])
+        try:
+            knowledge = KnowledgePackage.model_validate(
+                json.loads(job["request"])["knowledge"])
+        except (KeyError, TypeError, ValueError, ValidationError) as exc:
+            raise RuntimeFault("frozen_knowledge_invalid") from exc
         if (config.LLM_MODE == "real" and
                 knowledge.source_kind == "knowledge_query_v2" and
-                knowledge.techniques):
+                knowledge.techniques and knowledge.approval_manifest is None):
             raise RuntimeFault("semantic_review_unverifiable:旧冻结包缺批准清单")
         return knowledge, {"reused": True, "job_id": job_id}
 
-    policy = {"contract_version": PACKAGE_CONTRACT_VERSION,
-              "book_id": plan.book_id, "branch_id": plan.branch_id,
-              "scene_id": plan.scene_id,
-              "plan_sha256": digest(plan.model_dump()),
-              "semantic_requirements": {"goal": plan.goal, "pov": plan.pov,
-                                       "style": plan.style},
-              "limits": {"context_items": context_items}}
-    resp = kq.query_knowledge(policy, lg_session)
+    policy = scene_policy(plan, context_items=context_items)
+    manifest = None
+    techniques = None
+    if config.LLM_MODE == "real" and freeze:
+        from ..semantic_admission import approved_selected
+        from ..semantic_approval import ApprovalError
+        from ..promotion_audits import PromotionAuditSchemaError
+        from ..semantic_receipts import ReceiptSchemaError
+        if lg_session.new or lg_session.dirty or lg_session.deleted:
+            raise RuntimeFault("semantic_review_unverifiable:session_not_clean")
+        with _reserved_knowledge_connection(lg_session.get_bind()) as conn:
+            with Session(bind=conn, autoflush=False) as admission:
+                resp = kq.query_knowledge(policy, admission)
+                if resp["status"] == "matched" and resp.get("selected"):
+                    try:
+                        techniques = _techniques_from_selected(
+                            resp["selected"])
+                    except (KeyError, TypeError, ValueError,
+                            ValidationError) as exc:
+                        raise RuntimeFault("knowledge_selection_invalid") from exc
+                    try:
+                        entries = approved_selected(admission, resp["selected"])
+                    except (ApprovalError, PromotionAuditSchemaError,
+                            ReceiptSchemaError) as exc:
+                        raise RuntimeFault(
+                            "semantic_review_unverifiable:" + str(exc)) from exc
+                    try:
+                        kq.freeze_package(resp, admission, commit=False)
+                    except ValueError as exc:
+                        raise RuntimeFault("knowledge_freeze_conflict") from exc
+                    manifest = {
+                        "schema_version": "scene-approval/1",
+                        "package_sha256": resp["package_sha256"],
+                        "selected_sha256": hashlib.sha256(
+                            kq.canonical_json(resp["selected"]).encode(
+                                "utf-8")).hexdigest(),
+                        "entries": entries,
+                        "verified_at": datetime.now(timezone.utc).isoformat(
+                            timespec="microseconds").replace("+00:00", "Z"),
+                    }
+    else:
+        resp = kq.query_knowledge(policy, lg_session)
     if resp["status"] == "unavailable":
         raise RuntimeFault("knowledge_query_unavailable")
     if resp["status"] == "unsupported":
         raise RuntimeFault("knowledge_query_unsupported")
-    if config.LLM_MODE == "real" and resp.get("selected"):
-        # 现有查询只有已 verified 工件，没有与当前证据绑定的独立语义批准。
-        # 在补齐批准清单前，真实 Writer 不冻结或消费这些旧策略。
+    if config.LLM_MODE == "real" and resp.get("selected") and not manifest:
         raise RuntimeFault("semantic_review_unverifiable:选中策略缺批准清单")
-    if resp["status"] == "matched" and freeze:
+    if resp["status"] == "matched" and freeze and config.LLM_MODE != "real":
         kq.freeze_package(resp, lg_session)   # 冻结在首 prepare 前 ✓；
         # freeze=False = 离线驱动/分析模式：只取包内容不写 LG 库
         # （零配额纪律：离线跑不许改真库）
-    techniques = _techniques_from_selected(resp.get("selected", []))
+    if techniques is None:
+        techniques = _techniques_from_selected(resp.get("selected", []))
     pkg = KnowledgePackage(
         schema_version="scene-knowledge/2",
         package_id="kq-" + (resp.get("package_sha256") or
                             digest(techniques)[:20])[:20],
         book_id=plan.book_id, source_kind="knowledge_query_v2",
-        techniques=techniques)
+        techniques=techniques, approval_manifest=manifest)
     return pkg, {"reused": False, "query_status": resp["status"],
                  "package_sha256": resp.get("package_sha256"),
                  "n_selected": len(resp.get("selected", []))}

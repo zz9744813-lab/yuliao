@@ -165,6 +165,11 @@ def test_package_roundtrip(tmp_path):
         assert got["contract_version"] == 2
         # 幂等：再冻同包不翻倍
         assert kq.freeze_package(resp, s) == pid
+        altered = {**resp, "selected": [*resp["selected"],
+                                      {"strategy_id": "ESV2-forged"}]}
+        with pytest.raises(ValueError, match="已有冻结包与当前查询不一致"):
+            kq.freeze_package(altered, s)
+        assert kq.get_package(pid, s)["selected"] == resp["selected"]
 
 
 def test_unavailable_on_store_error(monkeypatch):

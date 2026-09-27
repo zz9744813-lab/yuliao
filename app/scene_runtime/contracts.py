@@ -83,7 +83,28 @@ class Technique(Contract):
     conditions: list[str] = Field(min_length=1)
     exceptions: list[str]
     source_refs: list[str] = Field(min_length=1)
-    evidence_status: Literal["hypothesis", "pilot_verified", "quality_supported"]
+    evidence_status: Literal["untested", "hypothesis", "pilot_verified",
+                             "quality_supported"]
+
+
+class ApprovalEntry(Contract):
+    strategy_id: Identifier
+    strategy_version: int = Field(ge=1)
+    snapshot_id: Identifier
+    link_id: Identifier
+    vote_a_id: Identifier
+    vote_b_id: Identifier
+    verified_audit_id: Identifier
+    kind: Literal["pre_promotion", "posthoc_release"]
+    content_sha256: str = Field(min_length=64, max_length=64)
+
+
+class ApprovalManifest(Contract):
+    schema_version: Literal["scene-approval/1"]
+    package_sha256: str = Field(min_length=64, max_length=64)
+    selected_sha256: str = Field(min_length=64, max_length=64)
+    entries: list[ApprovalEntry] = Field(min_length=1)
+    verified_at: str = Field(min_length=1)
 
 
 class KnowledgePackage(Contract):
@@ -97,6 +118,7 @@ class KnowledgePackage(Contract):
                         "distiller_snapshot", "empty", "knowledge_query_v2"]
     data_split: Literal["runtime_reference"] = "runtime_reference"
     techniques: list[Technique] = Field(max_length=3)
+    approval_manifest: ApprovalManifest | None = None
 
 
 class Budget(Contract):

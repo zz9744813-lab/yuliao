@@ -639,21 +639,30 @@ def get_package(package_sha_or_id: str, s) -> dict | None:
             "created_at": row.created_at}
 
 
-def freeze_package(response: dict, s):
-    """K3-B 冻结流程用（K3-A 不在 HTTP 暴露写端点）：幂等写包。"""
+def freeze_package(response: dict, s, *, commit: bool = True):
+    """K3-B 幂等冻结；commit=False 供准入与冻结共用调用方事务。"""
     from .models import KnowledgePackage
     sha = response.get("package_sha256")
     if not sha:
         raise ValueError("response 无 package_sha256，不可冻结")
-    row = s.query(KnowledgePackage).filter_by(package_sha256=sha).first()
-    if row:
-        return row.id
     pol = response.get("policy_sha256")
     if not pol:
         raise ValueError("response 缺 policy_sha256，不可冻结")
     served = (response.get("contract_negotiation") or {}).get("served") or 2
     if response.get("snapshot_fingerprint") and             response["snapshot_fingerprint"] != fingerprint_knowledge(s):
         raise ValueError("库知识快照已变化（包过期）——重新查询后再冻结")
+    row = s.query(KnowledgePackage).filter_by(package_sha256=sha).first()
+    if row:
+        if (row.policy_sha256 != pol or
+                canonical_json(row.policy) !=
+                canonical_json(response.get("policy_echo") or {}) or
+                canonical_json(row.selected) !=
+                canonical_json(response.get("selected", [])) or
+                row.snapshot_fingerprint !=
+                response.get("snapshot_fingerprint", "") or
+                row.contract_version != served):
+            raise ValueError("已有冻结包与当前查询不一致")
+        return row.id
     row = KnowledgePackage(
         id="KPKG-" + sha[:24], package_sha256=sha,
         policy_sha256=pol,
@@ -663,5 +672,8 @@ def freeze_package(response: dict, s):
         rejected_summary=response.get("rejected", []),
         snapshot_fingerprint=response.get("snapshot_fingerprint", ""))
     s.add(row)
-    s.commit()
+    if commit:
+        s.commit()
+    else:
+        s.flush()
     return row.id

@@ -18,7 +18,8 @@ from knowledge_seed import seed_knowledge  # noqa: E402
 from app import config, db, knowledge_query as kq  # noqa: E402
 from app.scene_runtime.contracts import (Budget, Change, Fact,  # noqa: E402
                                           KnowledgePackage, PlannedEvent,
-                                          RuntimeFault, ScenePlan, World)
+                                          RuntimeFault, ScenePlan, World, digest)
+from app.scene_runtime import RUNTIME_VERSION
 from app.scene_runtime.knowledge_v2 import frozen_package_for_scene  # noqa: E402
 from app.scene_runtime.pipeline import SceneRunner  # noqa: E402
 from app.scene_runtime.store import Store  # noqa: E402
@@ -93,6 +94,20 @@ def test_freeze_before_prepare_recovery_no_requery(env, monkeypatch):
     r2 = SceneRunner(store, client).run(_plan(), pkg2, Budget())
     assert r2["reused"] is True, "同幂等键同输入 → 复用不重跑"
     assert store.audit("WK-ALPHA")["ok"] is True, "收据可读：audit 过"
+
+
+def test_optional_manifest_preserves_legacy_job_request_hash(env):
+    store, client = env
+    plan, budget = _plan(idem="legacy-hash"), Budget()
+    pkg, _ = frozen_package_for_scene(store, db.session(), plan,
+                                      freeze=False)
+    old_knowledge = pkg.model_dump()
+    old_knowledge.pop("approval_manifest")
+    old_request = {"plan": plan.model_dump(), "knowledge": old_knowledge,
+                   "budget": budget.model_dump(), "models": client.models,
+                   "runtime": RUNTIME_VERSION}
+    job_id = store.prepare(plan, pkg, budget, client.models)
+    assert store.job(job_id)["request_hash"] == digest(old_request)
 
 
 def test_same_idem_key_different_plan_conflicts(env):
@@ -179,6 +194,9 @@ def test_real_writer_refuses_unapproved_k3_before_freeze_or_prepare(env,
     with store.connection() as conn:
         before_jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     monkeypatch.setattr(config, "LLM_MODE", "real")
+    with db.session() as s:
+        with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
+            frozen_package_for_scene(store, s, _plan(), freeze=False)
     with db.session() as s:
         with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
             frozen_package_for_scene(store, s, _plan())
