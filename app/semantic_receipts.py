@@ -31,6 +31,26 @@ CREATE TABLE IF NOT EXISTS semantic_review_snapshots (
     review_input_json TEXT NOT NULL CHECK(json_valid(review_input_json)),
     created_at TEXT NOT NULL CHECK(length(created_at) > 0)
 )""",
+    "semantic_review_calls": """
+CREATE TABLE IF NOT EXISTS semantic_review_calls (
+    call_id TEXT PRIMARY KEY NOT NULL CHECK(length(call_id) > 0),
+    snapshot_id TEXT NOT NULL REFERENCES semantic_review_snapshots(snapshot_id),
+    channel TEXT NOT NULL CHECK(channel = 'openai_http'),
+    provider TEXT NOT NULL CHECK(length(trim(provider)) > 0),
+    model_id TEXT NOT NULL CHECK(length(trim(model_id)) > 0),
+    model_identity TEXT NOT NULL CHECK(length(trim(model_identity)) > 0),
+    requested_model TEXT NOT NULL CHECK(length(trim(requested_model)) > 0),
+    upstream_request_id TEXT NOT NULL
+        CHECK(length(trim(upstream_request_id)) > 0),
+    input_sha256 TEXT NOT NULL CHECK(length(input_sha256) = 64),
+    prompt_sha256 TEXT NOT NULL CHECK(length(prompt_sha256) = 64),
+    response_sha256 TEXT NOT NULL CHECK(length(response_sha256) = 64),
+    response_text TEXT NOT NULL CHECK(length(trim(response_text)) > 0),
+    request_json TEXT NOT NULL CHECK(json_valid(request_json)),
+    response_json TEXT NOT NULL CHECK(json_valid(response_json)),
+    completed_at TEXT NOT NULL CHECK(length(completed_at) > 0),
+    UNIQUE(provider, upstream_request_id)
+)""",
     "semantic_review_votes": """
 CREATE TABLE IF NOT EXISTS semantic_review_votes (
     vote_id TEXT PRIMARY KEY NOT NULL CHECK(length(vote_id) > 0),
@@ -128,6 +148,36 @@ BEGIN
     SELECT RAISE(ABORT, 'approved review round is closed');
 END"""
 
+TRIGGER_DDL["semantic_review_calls_validate"] = """
+CREATE TRIGGER IF NOT EXISTS semantic_review_calls_validate
+BEFORE INSERT ON semantic_review_calls
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM semantic_review_snapshots s
+        WHERE s.snapshot_id = NEW.snapshot_id
+          AND s.review_input_sha256 = NEW.input_sha256
+          AND NEW.model_identity = NEW.provider || '/' || NEW.model_id
+    ) THEN RAISE(ABORT, 'semantic call input or identity invalid') END;
+END"""
+
+TRIGGER_DDL["semantic_review_votes_validate_call"] = """
+CREATE TRIGGER IF NOT EXISTS semantic_review_votes_validate_call
+BEFORE INSERT ON semantic_review_votes
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM semantic_review_calls c
+        JOIN semantic_review_snapshots s ON s.snapshot_id = c.snapshot_id
+        WHERE c.call_id = NEW.call_receipt_id
+          AND c.snapshot_id = NEW.snapshot_id
+          AND c.provider = NEW.provider
+          AND c.model_id = NEW.model_id
+          AND c.model_identity = NEW.model_identity
+          AND c.input_sha256 = NEW.input_sha256
+          AND c.input_sha256 = s.review_input_sha256
+          AND c.response_sha256 = NEW.response_sha256
+    ) THEN RAISE(ABORT, 'semantic vote call receipt invalid') END;
+END"""
+
 
 def _normalized(sql: str) -> str:
     # sqlite_master strips IF NOT EXISTS from the stored CREATE statement.
@@ -163,6 +213,33 @@ def require_semantic_schema(conn) -> None:
                 (kind, name)).scalar()
             if stored is None or _normalized(stored) != _normalized(expected):
                 raise ReceiptSchemaError(f"{kind}_schema_drift:{name}")
+    # INSERT triggers do not retrospectively validate votes created by an
+    # older schema. Refuse to inherit a forged legacy vote after an upgrade.
+    bad_call = conn.exec_driver_sql("""
+        SELECT c.call_id FROM semantic_review_calls c
+        LEFT JOIN semantic_review_snapshots s ON s.snapshot_id = c.snapshot_id
+        WHERE s.snapshot_id IS NULL
+           OR c.input_sha256 <> s.review_input_sha256
+           OR c.model_identity <> (c.provider || '/' || c.model_id)
+        LIMIT 1
+    """).scalar()
+    if bad_call is not None:
+        raise ReceiptSchemaError(f"call_row_invalid:{bad_call}")
+    bad_vote = conn.exec_driver_sql("""
+        SELECT v.vote_id FROM semantic_review_votes v
+        LEFT JOIN semantic_review_calls c
+          ON c.call_id = v.call_receipt_id
+         AND c.snapshot_id = v.snapshot_id
+         AND c.provider = v.provider
+         AND c.model_id = v.model_id
+         AND c.model_identity = v.model_identity
+         AND c.input_sha256 = v.input_sha256
+         AND c.response_sha256 = v.response_sha256
+        WHERE c.call_id IS NULL
+        LIMIT 1
+    """).scalar()
+    if bad_vote is not None:
+        raise ReceiptSchemaError(f"vote_without_matching_call:{bad_vote}")
 
 
 def ensure_semantic_schema(engine: Engine) -> None:
