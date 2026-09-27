@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from app import db
 from app.db import Base
 from app.models import ExpressionStrategyV2
+from app.promotion_audits import AUDIT_COLUMNS, AUDIT_DDL
 from app.semantic_receipts import ReceiptSchemaError, ensure_semantic_schema
-from scripts.k5_promotion_write import AUDIT_COLUMNS, AUDIT_DDL
 
 HASH_A = "a" * 64
 HASH_B = "b" * 64
@@ -75,13 +75,13 @@ def _snapshot(con):
          HASH_A, json.dumps({}), NOW))
 
 
-def _vote(con, vote_id, identity, verdict="PASS"):
+def _vote(con, vote_id, identity, verdict="PASS", *, model_id=None):
     con.exec_driver_sql(
         "INSERT INTO semantic_review_votes "
         "(vote_id,snapshot_id,judge_kind,provider,model_id,model_identity,"
         "call_receipt_id,verdict,input_sha256,response_sha256,review_json,created_at) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (vote_id, "SNAP-1", "semantic_current", "provider", identity,
+        (vote_id, "SNAP-1", "semantic_current", "provider", model_id or identity,
          identity, "CALL-" + vote_id, verdict, HASH_A, HASH_B,
          json.dumps({"reason": "seed"}), NOW))
 
@@ -132,19 +132,18 @@ def test_receipt_rows_are_immutable_and_foreign_keys_enforced():
             _vote(con, "VOTE-B", "upstream/model-b")
             _link(con)
         with engine.connect() as con:
-            for table, key in (("semantic_review_snapshots", "SNAP-1"),
-                               ("semantic_review_votes", "VOTE-A"),
-                               ("semantic_approval_links", "LINK-1")):
+            keys = {"semantic_review_snapshots": ("snapshot_id", "SNAP-1"),
+                    "semantic_review_votes": ("vote_id", "VOTE-A"),
+                    "semantic_approval_links": ("link_id", "LINK-1")}
+            for table, (pk, key) in keys.items():
                 with pytest.raises(IntegrityError, match="append-only"):
                     con.exec_driver_sql(
-                        f"UPDATE {table} SET created_at='later' WHERE "
-                        f"{('snapshot_id' if table.endswith('snapshots') else 'vote_id' if table.endswith('votes') else 'link_id')}=?",
+                        f"UPDATE {table} SET created_at='later' WHERE {pk}=?",
                         (key,))
                 con.rollback()
                 with pytest.raises(IntegrityError, match="append-only"):
                     con.exec_driver_sql(
-                        f"DELETE FROM {table} WHERE "
-                        f"{('snapshot_id' if table.endswith('snapshots') else 'vote_id' if table.endswith('votes') else 'link_id')}=?",
+                        f"DELETE FROM {table} WHERE {pk}=?",
                         (key,))
                 con.rollback()
             with pytest.raises(IntegrityError, match="FOREIGN KEY"):
@@ -156,7 +155,7 @@ def test_receipt_rows_are_immutable_and_foreign_keys_enforced():
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     ("ORPHAN", "MISSING", "semantic_current", "p", "m", "m",
                      "CALL-O", "PASS", HASH_A, HASH_B, "{}", NOW))
-                con.rollback()
+            con.rollback()
     finally:
         engine.dispose()
 
@@ -205,6 +204,67 @@ def test_same_round_block_vote_prevents_approval_even_with_two_passes():
         engine.dispose()
 
 
+def test_approved_round_rejects_late_block_and_alias_model_pair():
+    engine = _seed()
+    try:
+        ensure_semantic_schema(engine)
+        with engine.begin() as con:
+            _snapshot(con)
+            _vote(con, "VOTE-A", "alias-a", model_id="same-upstream")
+            _vote(con, "VOTE-B", "alias-b", model_id="same-upstream")
+        with engine.connect() as con:
+            with pytest.raises(IntegrityError, match="semantic approval"):
+                _link(con)
+            con.rollback()
+        with engine.begin() as con:
+            _vote(con, "VOTE-C", "upstream/model-c")
+            _link(con, "VOTE-A", "VOTE-C")
+        with engine.connect() as con:
+            with pytest.raises(IntegrityError, match="approved review round is closed"):
+                _vote(con, "VOTE-D", "upstream/model-d", verdict="BLOCK")
+            con.rollback()
+    finally:
+        engine.dispose()
+
+
+def test_snapshot_rejects_replicated_audit_from_another_card():
+    engine = _seed()
+    try:
+        with engine.begin() as con:
+            con.exec_driver_sql(
+                "INSERT INTO expression_strategies_v2 "
+                "(id,strategy_key,version,abstract_operation,invariants,"
+                "effect_hypothesis,failure_modes,status,source,scope,scope_ids,"
+                "scope_basis,observation_status,effect_status,created_at) "
+                "VALUES ('ESV2-OTHER','other',1,'x','[]','x','[]',"
+                "'verified','seed','WORK','[\"WK-A\"]','seed','replicated',"
+                "'untested',?)", (NOW,))
+            values = {name: "seed" for name in AUDIT_COLUMNS}
+            values.update(audit_id="AUD-OTHER", strategy_id="ESV2-OTHER",
+                          strategy_version=1, to_status="replicated",
+                          evidence_count=1)
+            con.exec_driver_sql(
+                f"INSERT INTO promotion_audits ({','.join(AUDIT_COLUMNS)}) "
+                f"VALUES ({','.join('?' for _ in AUDIT_COLUMNS)})",
+                tuple(values[name] for name in AUDIT_COLUMNS))
+        ensure_semantic_schema(engine)
+        with engine.connect() as con:
+            with pytest.raises(IntegrityError, match="replicated audit does not match"):
+                con.exec_driver_sql(
+                    "INSERT INTO semantic_review_snapshots "
+                    "(snapshot_id,schema_version,algorithm_version,strategy_id,"
+                    "strategy_version,replicated_audit_id,card_sha256,evidence_sha256,"
+                    "scope_claim_sha256,policy_sha256,content_sha256,payload_json,"
+                    "review_input_sha256,review_input_json,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ("SNAP-X", 1, "semantic-evidence/v1", "ESV2-S", 1,
+                     "AUD-OTHER", HASH_A, HASH_A, HASH_A, HASH_A, HASH_A,
+                     "{}", HASH_A, "{}", NOW))
+            con.rollback()
+    finally:
+        engine.dispose()
+
+
 def test_schema_refuses_fk_disabled_or_existing_shape_drift():
     without_fk = _engine(foreign_keys=False)
     try:
@@ -216,11 +276,34 @@ def test_schema_refuses_fk_disabled_or_existing_shape_drift():
     drifted = _engine()
     try:
         with drifted.begin() as con:
+            con.exec_driver_sql(AUDIT_DDL)
             con.exec_driver_sql("CREATE TABLE semantic_review_votes (vote_id TEXT)")
         with pytest.raises(ReceiptSchemaError, match="table_schema_drift"):
             ensure_semantic_schema(drifted)
     finally:
         drifted.dispose()
+
+
+def test_schema_requires_parent_audit_and_detects_trigger_drift():
+    missing = _engine()
+    try:
+        with pytest.raises(ReceiptSchemaError, match="parent_schema_missing:promotion_audits"):
+            ensure_semantic_schema(missing)
+    finally:
+        missing.dispose()
+
+    engine = _seed()
+    try:
+        ensure_semantic_schema(engine)
+        with engine.begin() as con:
+            con.exec_driver_sql("DROP TRIGGER semantic_review_votes_closed")
+            con.exec_driver_sql(
+                "CREATE TRIGGER semantic_review_votes_closed "
+                "BEFORE INSERT ON semantic_review_votes BEGIN SELECT 1; END")
+        with pytest.raises(ReceiptSchemaError, match="trigger_schema_drift"):
+            ensure_semantic_schema(engine)
+    finally:
+        engine.dispose()
 
 
 def test_init_db_creates_empty_receipt_tables_on_fresh_sqlite(monkeypatch):

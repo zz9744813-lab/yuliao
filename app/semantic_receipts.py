@@ -95,12 +95,37 @@ BEGIN
           AND va.input_sha256 = s.review_input_sha256
           AND vb.input_sha256 = s.review_input_sha256
           AND va.model_identity <> vb.model_identity
+          AND (va.provider <> vb.provider OR va.model_id <> vb.model_id)
           AND NOT EXISTS (
               SELECT 1 FROM semantic_review_votes blocker
               WHERE blocker.snapshot_id = s.snapshot_id
                 AND blocker.verdict = 'BLOCK'
           )
     ) THEN RAISE(ABORT, 'semantic approval evidence invalid') END;
+END"""
+
+TRIGGER_DDL["semantic_review_snapshots_validate"] = """
+CREATE TRIGGER IF NOT EXISTS semantic_review_snapshots_validate
+BEFORE INSERT ON semantic_review_snapshots
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM promotion_audits a
+        WHERE a.audit_id = NEW.replicated_audit_id
+          AND a.strategy_id = NEW.strategy_id
+          AND a.strategy_version = NEW.strategy_version
+          AND a.to_status = 'replicated'
+    ) THEN RAISE(ABORT, 'replicated audit does not match snapshot') END;
+END"""
+
+TRIGGER_DDL["semantic_review_votes_closed"] = """
+CREATE TRIGGER IF NOT EXISTS semantic_review_votes_closed
+BEFORE INSERT ON semantic_review_votes
+WHEN EXISTS (
+    SELECT 1 FROM semantic_approval_links
+    WHERE snapshot_id = NEW.snapshot_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'approved review round is closed');
 END"""
 
 
@@ -120,6 +145,18 @@ def ensure_semantic_schema(engine: Engine) -> None:
     with engine.begin() as conn:
         if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
             raise ReceiptSchemaError("foreign_keys_disabled")
+        # SQLite permits a child table to reference a nonexistent parent.
+        # Require both parents and their PKs before creating empty receipts.
+        for table, primary_key, required in (
+                ("expression_strategies_v2", "id", {"id", "version"}),
+                ("promotion_audits", "audit_id",
+                 {"audit_id", "strategy_id", "strategy_version", "to_status"})):
+            info = conn.exec_driver_sql(f"PRAGMA table_info({table})").all()
+            columns = {row[1] for row in info}
+            if (not required <= columns or
+                    not any(row[1] == primary_key and row[5] == 1
+                            for row in info)):
+                raise ReceiptSchemaError(f"parent_schema_missing:{table}")
         for ddl in TABLE_DDL.values():
             conn.exec_driver_sql(ddl)
         for ddl in TRIGGER_DDL.values():

@@ -98,6 +98,9 @@ from app import knowledge_extract as KE                # noqa: E402  REVIEW_MARK
 from app import knowledge_query as KQ                  # noqa: E402
 from app.models import (ExpressionStrategyV2, Segment,  # noqa: E402
                         StrategyInstance, WorkSource)
+from app.promotion_audits import (AUDIT_TABLE, AUDIT_COLUMNS,
+                                  AUDIT_INTEGER_COLUMNS, AUDIT_DDL,
+                                  AUDIT_IMMUTABLE_DDL)
 
 TOOL = "k5_promotion_write"
 SCHEMA = "k5_promotion_write/v1"
@@ -107,7 +110,6 @@ SCOPE_RULE_VERSION = "scope-derive-1"
 PROMOTE = "PROMOTE"
 NO_PROMOTE = "NO-PROMOTE"
 EXIT_OK, EXIT_ERROR, EXIT_REFUSED = 0, 1, 2
-AUDIT_TABLE = "promotion_audits"
 
 # 晋升阶梯（一次事务只走一级）与每级落地的列取值 (status, observation_status)
 LADDER = ("hypothesis", "observed", "replicated", "verified")
@@ -121,29 +123,6 @@ SCOPE_LADDER = ("UNCERTAIN", "WORK", "AUTHOR", "GENRE")     # GLOBAL 永不推�
 MIN_REVIEWED = 1            # W2(ii)：新口径复审 ≥1 条
 MIN_INDEPENDENT_ROOTS = 2   # §4.3 replicated：独立来源复现
 DEFAULT_REVIEWER_DRY = "—（dry-run 不写审计行）"
-
-AUDIT_COLUMNS = (
-    "audit_id", "tool", "gate_version", "strategy_id", "strategy_key",
-    "strategy_version", "from_status", "to_status", "status_column_from",
-    "status_column_to", "observation_from", "observation_to", "scope_from",
-    "scope_to", "scope_ids", "scope_basis", "scope_rule_version",
-    "evidence_ref", "evidence_count", "reviewer", "ts", "policy_sha256",
-    "columns_written")
-AUDIT_INTEGER_COLUMNS = frozenset({"strategy_version", "evidence_count"})
-AUDIT_DDL = "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)".format(
-    AUDIT_TABLE, ",\n  ".join(
-        [f"{AUDIT_COLUMNS[0]} TEXT PRIMARY KEY"] + [
-            f"{c} {'INTEGER' if c in AUDIT_INTEGER_COLUMNS else 'TEXT'} NOT NULL"
-            for c in AUDIT_COLUMNS[1:]]))
-AUDIT_IMMUTABLE_DDL = (
-    f"CREATE TRIGGER IF NOT EXISTS {AUDIT_TABLE}_no_update BEFORE UPDATE ON"
-    f" {AUDIT_TABLE} BEGIN SELECT RAISE(ABORT,"
-    f" '{AUDIT_TABLE} is append-only: UPDATE blocked'); END;",
-    f"CREATE TRIGGER IF NOT EXISTS {AUDIT_TABLE}_no_delete BEFORE DELETE ON"
-    f" {AUDIT_TABLE} BEGIN SELECT RAISE(ABORT,"
-    f" '{AUDIT_TABLE} is append-only: DELETE blocked'); END;",
-)
-
 
 class PromotionRefused(Exception):
     """判词为 NO-PROMOTE（拒绝语义，不是崩溃）。"""

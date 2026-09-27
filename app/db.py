@@ -80,11 +80,13 @@ def _migrate(engine) -> None:
 
 def init_db() -> None:
     from . import models  # noqa: F401  确保表已注册
+    from .promotion_audits import ensure_promotion_audit_schema
     from .semantic_receipts import ensure_semantic_schema
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(engine)
     _migrate(engine)
+    ensure_promotion_audit_schema(engine)
     ensure_semantic_schema(engine)
 
 
