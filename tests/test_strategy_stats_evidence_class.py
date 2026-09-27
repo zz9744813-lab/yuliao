@@ -196,7 +196,6 @@ def test_k3_eligible_same_criteria_as_knowledge_query():
     assert f"SI-BONLY-{key}:benchmark_source" in stripped_b
 
 
-
 def test_excluded_source_type_zeroes_k3_eligible_but_not_valid():
     """判据链扩展位（会审 2026-09-27 要求）：除 benchmark / mirror_dedup
     之外，`excluded_source_type`（fixture/synthetic/commentary 冒充）同样
@@ -249,11 +248,17 @@ def test_excluded_source_type_zeroes_k3_eligible_but_not_valid():
     assert row["valid"] == 1, "观察口径照旧计 verified 实例"
     assert row["k3_eligible_instances"] == 0
     assert row["k3_eligible_root_works"] == 0
+    # 恒等锚点（会审 2026-09-27 要求）：文档声明 k3_eligible_instances 与
+    # usable_evidence 当前恒等——就地钉住，判据链变更时会红。
+    assert row["usable_evidence"] == row["k3_eligible_instances"]
     with db.session() as s:
         refs, ev_count, stripped = kq._evidence_for(s, st_id, {})
     assert refs == [] and ev_count == 0
-    assert f"SI-FX-{key}:excluded_source_type:fixture" in stripped
-    assert row["k3_eligible_instances"] == len(refs)
+    # 剔除原因串：只钉「本实例被以 excluded_source_type 剔除且原因含
+    # fixture」——不钉三段的精确拼接（判据链调整顺序不该假红）。
+    assert any(x.startswith(f"SI-FX-{key}:excluded_source_type")
+               and "fixture" in x for x in stripped), stripped
+
 
 def test_existing_field_values_unchanged():
     """既有字段值不变（防悄悄改口径）：既有列与 extras 键按夹具真值钉死；
@@ -262,8 +267,14 @@ def test_existing_field_values_unchanged():
     # 写库护栏（会审 2026-09-27 要求）：本用例是全文件唯一 apply=True 的
     # 不可逆写路径，必须在断言前先证明目标库是 conftest 的临时 SQLite，
     # 绝不可能是真库 data/language_genome.db。
-    assert config.DATABASE_URL.startswith("sqlite:///"),         f"apply=True 只许打临时 SQLite，实为 {config.DATABASE_URL}"
-    assert "lg_test_" in config.DATABASE_URL,         f"目标库不是 conftest 临时库：{config.DATABASE_URL}"
+    # 第一道（权威）：断言**实际连接对象**——真正执行 delete() 的写路径走
+    # db.session() 绑定的 engine，只查 config 字符串会漏掉「config 指临时库、
+    # engine 指真库」这一失配方向（会审 2026-09-27 指出）。
+    _url = str(db.engine.url)
+    assert _url.startswith("sqlite:///"),         f"apply=True 只许打临时 SQLite，实际 engine={_url}"
+    assert "lg_test_" in _url, f"engine 不是 conftest 临时库：{_url}"
+    # 第二道：config 与 engine 必须同源（防两处不一致）
+    assert config.DATABASE_URL.startswith("sqlite:///") and         "lg_test_" in config.DATABASE_URL,         f"config 与实际 engine 不一致：config={config.DATABASE_URL} engine={_url}"
     rep = ssr.run(apply=False)
     mine, bonly = _rows(rep, key)
     # 观察证据口径（含基准段实例）——与加档前逐字同式
@@ -276,6 +287,9 @@ def test_existing_field_values_unchanged():
     assert mine["known_authors"] == 0 and mine["genres"] == 0
     assert mine["by_root_work"] == {ids["plain"]: 2, ids["bench"]: 1}
     assert mine["usable_evidence"] == 1 and mine["benchmark_stripped"] == 1
+    # 恒等锚点（会审 2026-09-27）：两字段当前恒等，就地钉住
+    assert mine["usable_evidence"] == mine["k3_eligible_instances"]
+    assert bonly["usable_evidence"] == bonly["k3_eligible_instances"]
     assert bonly["unique_source_intervals"] == 1 and bonly["root_works"] == 1
     assert bonly["by_root_work"] == {ids["bench2"]: 1}
     # 落库路径：既有列 + 既有 extras 键值不变，新键旁路追加

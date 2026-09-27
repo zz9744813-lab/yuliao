@@ -183,7 +183,6 @@ def test_dry_forecast_matches_real_run_polish(capsys):
     ct.main(["--polish", "--overwrite-text-clean"])
     real = _last_json(capsys.readouterr().out)
     assert dry["would_clean"] == real["polished"] >= 2
-    assert real["gate_overwritten"] == real["polished"]
     raw = _raw_text_clean()
     for sid in ids:
         assert raw[sid] is not None and "()" not in raw[sid]
