@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 import app.semantic_review_runner as runner
 from app.knowledge_query import canonical_json
 from app.semantic_approval import (ApprovalError, _check_vote,
+                                   admission_current_approval,
                                    pre_promotion_approval)
 from app.semantic_review_store import freeze_snapshot
 from scripts.k5_promotion_write import SCOPE_RULE_VERSION
@@ -92,6 +93,30 @@ def test_current_two_pass_round_and_newer_unfinished_round(monkeypatch,
             with pytest.raises(ApprovalError, match="two_pass_votes_missing"):
                 pre_promotion_approval(session, "ESV2-S", 1, plan,
                                        SCOPE_RULE_VERSION)
+    finally:
+        engine.dispose()
+
+
+def test_promotion_evidence_is_mandatory_but_admission_is_explicit(
+        monkeypatch, tmp_path):
+    engine, sid, plan = _two_pass_round(monkeypatch, tmp_path)
+    try:
+        with Session(engine) as session:
+            for invalid in (None, [], "SI-A", [None]):
+                with pytest.raises(ApprovalError,
+                                   match="promotion_evidence_ref_invalid"):
+                    pre_promotion_approval(
+                        session, "ESV2-S", 1,
+                        {**plan, "evidence_ref": invalid},
+                        SCOPE_RULE_VERSION)
+            with pytest.raises(ApprovalError, match="snapshot_plan_mismatch"):
+                pre_promotion_approval(
+                    session, "ESV2-S", 1,
+                    {**plan, "evidence_ref": ["SI-forged"]},
+                    SCOPE_RULE_VERSION)
+            assert admission_current_approval(
+                session, "ESV2-S", 1, CLAIM,
+                SCOPE_RULE_VERSION)["snapshot_id"] == sid
     finally:
         engine.dispose()
 

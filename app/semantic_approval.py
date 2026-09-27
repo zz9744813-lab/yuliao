@@ -116,20 +116,21 @@ def _check_vote(vote: dict, call: dict, snapshot: dict,
         raise ApprovalError("vote_receipt_invalid") from exc
 
 
-def pre_promotion_approval(session: Session, strategy_id: str,
-                           strategy_version: int, plan: dict,
-                           scope_rule_version: str) -> dict:
-    """Choose the newest current review round for this exact proposed scope.
+def _current_two_pass_approval(session: Session, strategy_id: str,
+                               strategy_version: int, claim: dict,
+                               scope_rule_version: str, *,
+                               evidence_ref: list[str] | None,
+                               admission: bool) -> dict:
+    """Choose the newest current review round for the explicit scope claim.
 
     A newer incomplete/BLOCK/ABSTAIN round takes precedence over an older PASS
     round on the same content. A fresh round may resolve a prior disagreement.
+    K5 additionally binds its proposed evidence list; K4/Writer has no new
+    evidence proposal and must explicitly select ``admission=True``.
     """
+    if not admission and evidence_ref is None:
+        raise ApprovalError("promotion_evidence_ref_invalid")
     require_semantic_schema(session.connection())
-    try:
-        claim = {key: plan[key] for key in
-                 ("scope_to", "scope_ids", "scope_basis")}
-    except (KeyError, TypeError) as exc:
-        raise ApprovalError("promotion_scope_claim_missing") from exc
     try:
         claim_digest = _digest(_scope_claim(claim, scope_rule_version))
     except SnapshotError as exc:
@@ -163,7 +164,7 @@ def pre_promotion_approval(session: Session, strategy_id: str,
         frozen = json.loads(latest["review_input_json"])
         reviewed = payload["evidence"]["facts"]["reviewed_ids"]
         instance_ids = {i["instance_id"] for i in frozen["instances"]}
-        if (sorted(plan["evidence_ref"]) != sorted(reviewed) or
+        if ((not admission and sorted(evidence_ref) != sorted(reviewed)) or
                 len(instance_ids) != len(frozen["instances"])):
             raise ValueError("planned evidence differs from reviewed evidence")
     except (KeyError, TypeError, ValueError) as exc:
@@ -204,3 +205,30 @@ def pre_promotion_approval(session: Session, strategy_id: str,
     return {"snapshot_id": latest["snapshot_id"],
             "content_sha256": latest["content_sha256"],
             "vote_a_id": passes[0], "vote_b_id": passes[1]}
+
+
+def pre_promotion_approval(session: Session, strategy_id: str,
+                           strategy_version: int, plan: dict,
+                           scope_rule_version: str) -> dict:
+    """K5 must match the planned evidence as well as the current two seats."""
+    try:
+        claim = {key: plan[key] for key in
+                 ("scope_to", "scope_ids", "scope_basis")}
+    except (KeyError, TypeError) as exc:
+        raise ApprovalError("promotion_scope_claim_missing") from exc
+    evidence_ref = plan.get("evidence_ref") if isinstance(plan, dict) else None
+    if (not isinstance(evidence_ref, list) or not evidence_ref or
+            any(not isinstance(ref, str) or not ref for ref in evidence_ref)):
+        raise ApprovalError("promotion_evidence_ref_invalid")
+    return _current_two_pass_approval(
+        session, strategy_id, strategy_version, claim,
+        scope_rule_version, evidence_ref=evidence_ref, admission=False)
+
+
+def admission_current_approval(session: Session, strategy_id: str,
+                               strategy_version: int, claim: dict,
+                               scope_rule_version: str) -> dict:
+    """K4/Writer verifies current evidence without inventing a K5 proposal."""
+    return _current_two_pass_approval(
+        session, strategy_id, strategy_version, claim,
+        scope_rule_version, evidence_ref=None, admission=True)
