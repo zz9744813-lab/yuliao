@@ -34,6 +34,18 @@
 硬约束：真库与世界库一律 mode=ro 只读；零模型调用；无写路径；
 不合并不推送。
 
+世界目录对账（审计非阻断项第二段，2026-09-26，docs/K4收据世界目录_
+20260926.md）：臂—世界目录映射**以逐条收据的 worlds_dir 为准**（再用收据
+job_id 在该目录的 arm*/k4.sqlite 里只读反查该臂世界库），不再只靠「产物顶层
+worlds_dir + 工厂序 arm1=A/arm2=B」猜。报告的 `worlds` 段如实给三态：
+- cleaned=False：报告时目录仍在，可对账；
+- cleaned=True：地址已记、报告时不在（**已清理就写已清理，绝不假装仍在**），
+  依据串写明是「收据记 exists=true 后消失」还是「无法细分」；
+- cleaned=None：地址不可知（逐条收据与产物顶层皆无 worlds_dir 的旧收据）——
+  既不判已清理、也不假装知道。
+向后兼容：旧收据（缺 worlds_dir/worlds_dir_exists/worlds_dir_cleaned 键）
+读入不报错，退回历史口径并在 worlds.source / worlds.arms[*].locate 标出来源。
+
 用法：
     python scripts/k4_accept_report.py --repo-root F:/agi/language-genome \
         --out <report.json>
@@ -69,6 +81,139 @@ def latest_artifact(repo_root: Path) -> Path | None:
 def _row(scene, arm, result, verdict, basis, note=""):
     return {"scene": scene, "arm": arm, "result": result, "verdict": verdict,
             "basis": basis, "note": note}
+
+
+# ── 世界目录对账（逐条收据的 worlds_dir 为权威口径，2026-09-26）────────────
+
+def _receipt_worlds(receipts: list[dict]) -> dict:
+    """汇总逐条收据里的世界目录事实（收据四键 2026-09-25 起才有）。
+
+    旧收据缺键 ⇒ 一律 None（**不报错、不填默认值、不猜**）：报告据此区分
+    「收据说没清理」与「收据压根没说」两种不同的事实强度。"""
+    dirs: list[str] = []
+    rec_exists: list[bool] = []
+    rec_cleaned: list[bool] = []
+    n_with_dir = 0
+    for r in receipts:
+        wd = r.get("worlds_dir")
+        if isinstance(wd, str) and wd:
+            n_with_dir += 1
+            if wd not in dirs:
+                dirs.append(wd)
+        if isinstance(r.get("worlds_dir_exists"), bool):
+            rec_exists.append(r["worlds_dir_exists"])
+        if isinstance(r.get("worlds_dir_cleaned"), bool):
+            rec_cleaned.append(r["worlds_dir_cleaned"])
+    return {"dirs": dirs, "n_with_dir": n_with_dir,
+            "recorded_exists": all(rec_exists) if rec_exists else None,
+            "recorded_cleaned": any(rec_cleaned) if rec_cleaned else None}
+
+
+def _worlds_view(art: dict, receipts: list[dict]) -> dict:
+    """世界目录核对面：地址来源 / 报告时实况 / cleaned 三态（见模块 docstring）。
+
+    地址优先级：逐条收据 worlds_dir（权威）> 产物顶层 worlds_dir（历史口径）
+    > 不可知。收据多址或与顶层不一致 ⇒ 不用静默择一，如实记 drift。"""
+    rw = _receipt_worlds(receipts)
+    top = art.get("worlds_dir") or None
+    if len(rw["dirs"]) == 1:
+        wd, source = rw["dirs"][0], "receipt"
+    elif len(rw["dirs"]) > 1:
+        wd, source = rw["dirs"][0], "receipt_inconsistent"
+    elif top:
+        wd, source = top, "top_level"          # 旧收据：退回历史口径
+    else:
+        wd, source = None, "unknown"
+    exists = bool(wd) and Path(wd).exists()
+    if wd is None:
+        cleaned = None
+        basis = ("旧收据：逐条收据与产物顶层皆无 worlds_dir ⇒ 世界目录地址"
+                 "不可知（既不判已清理、也不假装仍在）")
+    elif exists:
+        cleaned = False
+        basis = f"报告时 {wd} 仍在 ⇒ 未清理，可对账"
+    elif rw["recorded_exists"] is True:
+        cleaned = True
+        basis = (f"收据记 worlds_dir_exists=true（写该收据时目录在），报告时 "
+                 f"{wd} 已不存在 ⇒ cleaned=true")
+    else:
+        cleaned = True
+        basis = (f"产物记有 worlds_dir={wd}，报告时该路径已不存在 ⇒ "
+                 f"cleaned=true（已清理或从未在位；收据未记 worlds_dir_"
+                 f"exists，无法细分——如实标注，不细分冒充确定性）")
+    drift = ""
+    if len(rw["dirs"]) > 1:
+        drift = (f"逐条收据记了 {len(rw['dirs'])} 个不同 worlds_dir："
+                 f"{rw['dirs']}（以首个为核对目标并如实并列）")
+    if top and wd and top != wd:
+        drift = (f"产物顶层 worlds_dir={top} 与逐条收据 worlds_dir={wd} 不一致"
+                 f"——以收据为准并如实并列")
+    if not drift and rw["recorded_exists"] is True and not exists:
+        drift = ("写收据时目录在、报告时已不在（收据 worlds_dir_exists=true"
+                 " → 现在不在）")
+    if rw["recorded_cleaned"] is True and exists:
+        drift = (f"收据记 worlds_dir_cleaned=true，但报告时 {wd} 仍在 ⇒ "
+                 f"收据与实况矛盾，两者如实并列（不替任一方圆场）")
+    return {"worlds_dir": wd, "source": source, "top_level": top,
+            "exists": exists, "cleaned": cleaned, "cleaned_basis": basis,
+            "drift": drift, "receipt_dirs": rw["dirs"],
+            "receipts_with_worlds_dir": rw["n_with_dir"],
+            "recorded_exists": rw["recorded_exists"],
+            "recorded_cleaned": rw["recorded_cleaned"],
+            "arms": {}}
+
+
+def _arm_world_db(wd: str | None, arm: str, fallback_n: int,
+                  job_ids: list[str]) -> tuple[Path | None, str]:
+    """该臂的世界库路径 + 定位口径（(路径, 口径串)）。
+
+    首选**收据口径**：在收据记的 worlds_dir 下遍历 arm*/k4.sqlite，只读查
+    「有没有收据 job_id 这一行」——命中即机械证明「这一臂的产物出自这个目录
+    的这个 arm*」，不依赖工厂序猜测。定位不到（旧收据没 worlds_dir/job_id、
+    或库已不可读）才退回历史口径 arm{n}/k4.sqlite 并如实标注来源。"""
+    if not wd:
+        return None, "no_worlds_dir"
+    if job_ids:
+        try:
+            for cand in sorted(Path(wd).glob("arm*/k4.sqlite")):
+                if not cand.exists():
+                    continue
+                try:
+                    con = _ro_connect(cand)
+                except sqlite3.Error:
+                    continue
+                try:
+                    for jid in job_ids:
+                        hit = con.execute(
+                            "SELECT 1 FROM jobs WHERE id=? LIMIT 1",
+                            (jid,)).fetchone()
+                        if hit is not None:
+                            return cand, "receipt_job_id"
+                except sqlite3.Error:
+                    continue
+                finally:
+                    con.close()
+        except OSError:
+            pass
+    return (Path(wd) / f"arm{fallback_n}" / "k4.sqlite",
+            "factory_order_fallback")
+
+
+def _world_note(arm: str, worlds: dict) -> str:
+    """世界库不可核的原因串：**如实分三类**（已清理 / 地址不可知 / 在但该臂
+    库不在），不把「不在」与「不知」混成一句（旧口径把两者写成「缺/已清」）。"""
+    a = worlds["arms"].get(arm) or {}
+    wd = worlds["worlds_dir"]
+    if wd is None:
+        return ("世界库不可核：旧收据未记 worlds_dir（逐条收据与产物顶层皆无）"
+                "——地址不可知 ⇒ 自洽性不可核 ⇒ 证据不足，不判诚实失败")
+    if not worlds["exists"]:
+        return (f"世界库不可核：worlds_dir={wd} 报告时已不存在"
+                f"（cleaned=true；{worlds['cleaned_basis']}）"
+                f"⇒ 自洽性不可核 ⇒ 证据不足，不判诚实失败")
+    return (f"世界库不可核：worlds_dir={wd} 存在，但该臂世界库 "
+            f"{a.get('world_db')} 不存在/不可读（定位口径="
+            f"{a.get('locate')}）⇒ 自洽性不可核 ⇒ 证据不足，不判诚实失败")
 
 
 def _job_for(con, scene: str, arm: str):
@@ -183,6 +328,7 @@ def classify(artifact_path: Path | None) -> dict:
                                  [f"收据不存在：{artifact_path}"],
                                  "缺收据 ⇒ 证据不足，绝不判通过"))
         return {"artifact": None, "rows": rows,
+                "worlds": _worlds_view({}, []),
                 "summary": _summary(rows)}
     a = art.get("artifacts") or {}
     prose = {(p["scene"], p["arm"]): p for p in (a.get("prose") or [])}
@@ -191,12 +337,28 @@ def classify(artifact_path: Path | None) -> dict:
     skips = {(s["scene"], s["arm"]): s for s in (a.get("skipped") or [])}
     receipts = {(r["scene"], r["arm"]): r
                 for r in (a.get("receipts") or [])}
-    wd = art.get("worlds_dir")
-    # live 留库的世界目录：arm1=A、arm2=B（工厂序）
+    # 世界目录核对面：地址以逐条收据 worlds_dir 为准（缺键退回产物顶层，
+    # 都没有 ⇒ 不可知），已清理如实标 cleaned=true。
+    worlds = _worlds_view(art, list(receipts.values()))
+    wd = worlds["worlds_dir"]
+    # 每臂世界库：收据 worlds_dir + 收据 job_id 只读反查（权威）；定位不到
+    # 才退回工厂序 arm1=A / arm2=B 的历史口径并标出来源。
     for arm, n in (("A", 1), ("B", 2)):
-        p = Path(wd or "") / f"arm{n}" / "k4.sqlite"
-        if wd and p.exists():
-            world_con[arm] = _ro_connect(p)
+        jids = [r["job_id"] for r in (a.get("receipts") or [])
+                if r.get("arm") == arm and r.get("job_id")]
+        p, how = _arm_world_db(wd, arm, n, jids)
+        con = None
+        if p is not None and p.exists():
+            try:
+                con = _ro_connect(p)
+                con.execute("SELECT 1 FROM jobs LIMIT 1").fetchone()
+            except sqlite3.Error:
+                con = None
+        if con is not None:
+            world_con[arm] = con
+        worlds["arms"][arm] = {"world_db": str(p) if p else None,
+                                "readable": con is not None, "locate": how,
+                                "receipt_job_ids": jids}
 
     for sc in scenes:
         for arm in ("A", "B"):
@@ -204,13 +366,23 @@ def classify(artifact_path: Path | None) -> dict:
             if key in prose and prose[key].get("status") == "committed":
                 r = receipts.get(key) or {}
                 u = r.get("usage") or {}
+                wa = worlds["arms"].get(arm) or {}
+                # 审计对账链：这一臂的产物出自哪个世界目录的哪个世界库——
+                # 逐条收据 worlds_dir（收据缺键则标顶层/不可知）+ job_id
+                # 反查；已清理的目录写 cleaned=true，不让「pass」看起来像是
+                # 产物仍可读而实际已被删。
                 rows.append(_row(sc, arm, "committed", "pass", [
                     f"prose.status=committed；receipt.job_id={r.get('job_id')}",
                     f"usage：calls={u.get('calls')}，tokens={u.get('tokens')}，"
                     f"verifier_invalid_retries="
                     f"{u.get('verifier_invalid_retries')}",
                     f"live={art.get('live')}，channel_changed="
-                    f"{art.get('channel_changed')}"]))
+                    f"{art.get('channel_changed')}",
+                    f"产物世界库：{wa.get('world_db')}（定位口径="
+                    f"{wa.get('locate')}；worlds_dir={wd}，"
+                    f"来源={worlds['source']}，"
+                    f"cleaned={worlds['cleaned']}，报告时目录在="
+                    f"{worlds['exists']}）"]))
                 continue
             if key in skips:
                 s = skips[key]
@@ -249,8 +421,7 @@ def classify(artifact_path: Path | None) -> dict:
                 if con is None:
                     rows.append(_row(sc, arm, "failed",
                                      "insufficient_evidence", basis,
-                                     "世界库不可读（worlds_dir 缺/已清）——"
-                                     "自洽性不可核 ⇒ 证据不足，不判诚实失败"))
+                                     _world_note(arm, worlds)))
                     continue
                 job = _job_for(con, sc, arm)
                 if job is None:
@@ -278,7 +449,8 @@ def classify(artifact_path: Path | None) -> dict:
     for con in world_con.values():
         con.close()
     return {"artifact": str(artifact_path), "live": art.get("live"),
-            "worlds_dir": wd, "rows": rows, "summary": _summary(rows)}
+            "worlds_dir": wd, "worlds": worlds, "rows": rows,
+            "summary": _summary(rows)}
 
 
 def _summary(rows: list[dict]) -> dict:
