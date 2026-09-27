@@ -108,6 +108,7 @@ def test_same_idem_key_different_plan_conflicts(env):
 
 def test_empty_query_zero_techniques(env, tmp_path, monkeypatch):
     store, client = env
+    monkeypatch.setattr(config, "LLM_MODE", "real")
     store.create_world(World(book_id="WK-NONE", revision=0,
                              characters={"x": "某"},
                              facts={"coins": Fact(value=3, visible_to=["x"])},
@@ -147,7 +148,7 @@ def test_cross_book_rejected(env):
             _plan(), bad, Budget()), "validate_plan 跨书双闸"
 
 
-def test_manual_mode_and_receipts_untouched(env):
+def test_manual_mode_and_receipts_untouched(env, monkeypatch):
     store, client = env
     pkg, _ = frozen_package_for_scene(store, db.session(), _plan())
     SceneRunner(store, client).run(_plan(), pkg, Budget())
@@ -162,6 +163,7 @@ def test_manual_mode_and_receipts_untouched(env):
                 "scene_id": "s2",
                 "events": [PlannedEvent(event_id="pay2", description="再支付",
                            changes=[Change(fact="coins", before=2, after=1)])]})
+    monkeypatch.setattr(config, "LLM_MODE", "real")
     r = SceneRunner(store, client).run(plan2, manual, Budget())
     assert r["status"] == "committed"
     assert store.audit("WK-ALPHA")["ok"] is True
@@ -174,6 +176,8 @@ def test_real_writer_refuses_unapproved_k3_before_freeze_or_prepare(env,
     with db.session() as s:
         pkg, _ = frozen_package_for_scene(store, s, _plan(), freeze=False)
     assert pkg.techniques, "前提：查询确实选出了会进入 Writer 的技巧"
+    with store.connection() as conn:
+        before_jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
     monkeypatch.setattr(config, "LLM_MODE", "real")
     with db.session() as s:
         with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
@@ -181,7 +185,7 @@ def test_real_writer_refuses_unapproved_k3_before_freeze_or_prepare(env,
     with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
         SceneRunner(store, client).run(_plan(), pkg, Budget())
     with store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == before_jobs
 
 
 def test_real_recovery_refuses_legacy_unapproved_frozen_package(env,
@@ -192,6 +196,8 @@ def test_real_recovery_refuses_legacy_unapproved_frozen_package(env,
         pkg, _ = frozen_package_for_scene(store, s, _plan(), freeze=False)
     assert pkg.techniques
     assert SceneRunner(store, client).run(_plan(), pkg, Budget())["status"] == "committed"
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
     monkeypatch.setattr(config, "LLM_MODE", "real")
     with db.session() as s:
         with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
