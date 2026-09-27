@@ -54,7 +54,7 @@ def frozen_package_for_scene(store: Store, lg_session, plan, *,
                              context_items: int = 3,
                              freeze: bool = True) -> tuple[KnowledgePackage, dict]:
     """首 prepare 前查冻；恢复复用不重查。返回 (包, 对账元数据)。"""
-    from .. import knowledge_query as kq   # LG 侧服务层（只读+包写入）
+    from .. import config, knowledge_query as kq   # LG 侧服务层（只读+包写入）
     from ..knowledge import PACKAGE_CONTRACT_VERSION
 
     job_id = "scene-" + digest([plan.book_id, plan.branch_id,
@@ -68,6 +68,10 @@ def frozen_package_for_scene(store: Store, lg_session, plan, *,
         # 库漂移后的不同包，破坏「本场冻结」语义）
         knowledge = KnowledgePackage.model_validate(
             json.loads(job["request"])["knowledge"])
+        if (config.LLM_MODE == "real" and
+                knowledge.source_kind == "knowledge_query_v2" and
+                knowledge.techniques):
+            raise RuntimeFault("semantic_review_unverifiable:旧冻结包缺批准清单")
         return knowledge, {"reused": True, "job_id": job_id}
 
     policy = {"contract_version": PACKAGE_CONTRACT_VERSION,
@@ -82,6 +86,10 @@ def frozen_package_for_scene(store: Store, lg_session, plan, *,
         raise RuntimeFault("knowledge_query_unavailable")
     if resp["status"] == "unsupported":
         raise RuntimeFault("knowledge_query_unsupported")
+    if config.LLM_MODE == "real" and resp.get("selected"):
+        # 现有查询只有已 verified 工件，没有与当前证据绑定的独立语义批准。
+        # 在补齐批准清单前，真实 Writer 不冻结或消费这些旧策略。
+        raise RuntimeFault("semantic_review_unverifiable:选中策略缺批准清单")
     if resp["status"] == "matched" and freeze:
         kq.freeze_package(resp, lg_session)   # 冻结在首 prepare 前 ✓；
         # freeze=False = 离线驱动/分析模式：只取包内容不写 LG 库

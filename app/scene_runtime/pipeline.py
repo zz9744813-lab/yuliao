@@ -114,6 +114,12 @@ class SceneRunner:
                               VERIFIER_SYSTEM, verify_input, budget)
 
     def run(self, plan: ScenePlan, knowledge: KnowledgePackage, budget: Budget, *, stop_after_verified=False):
+        from .. import config
+        if (config.LLM_MODE == "real" and
+                knowledge.source_kind == "knowledge_query_v2" and
+                knowledge.techniques):
+            # 直接调用 SceneRunner 或恢复旧 job 也不能绕过桥接器的语义审查门。
+            raise RuntimeFault("semantic_review_unverifiable:Writer 知识包缺批准清单")
         job_id = self.store.prepare(plan, knowledge, budget, self.client.models)
         receipt = self.store.receipt(job_id)
         if receipt:

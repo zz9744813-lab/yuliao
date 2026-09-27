@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from fastapi.testclient import TestClient  # noqa: F401  (确保 app 导入链可用)
 from knowledge_seed import seed_knowledge  # noqa: E402
 
-from app import db, knowledge_query as kq  # noqa: E402
+from app import config, db, knowledge_query as kq  # noqa: E402
 from app.scene_runtime.contracts import (Budget, Change, Fact,  # noqa: E402
                                           KnowledgePackage, PlannedEvent,
                                           RuntimeFault, ScenePlan, World)
@@ -165,3 +165,34 @@ def test_manual_mode_and_receipts_untouched(env):
     r = SceneRunner(store, client).run(plan2, manual, Budget())
     assert r["status"] == "committed"
     assert store.audit("WK-ALPHA")["ok"] is True
+
+
+def test_real_writer_refuses_unapproved_k3_before_freeze_or_prepare(env,
+                                                                 monkeypatch):
+    """已有 verified 卡未获当前证据双席批准时，真实模式不能冻结或调用 Writer。"""
+    store, client = env
+    with db.session() as s:
+        pkg, _ = frozen_package_for_scene(store, s, _plan(), freeze=False)
+    assert pkg.techniques, "前提：查询确实选出了会进入 Writer 的技巧"
+    monkeypatch.setattr(config, "LLM_MODE", "real")
+    with db.session() as s:
+        with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
+            frozen_package_for_scene(store, s, _plan())
+    with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
+        SceneRunner(store, client).run(_plan(), pkg, Budget())
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_real_recovery_refuses_legacy_unapproved_frozen_package(env,
+                                                            monkeypatch):
+    """夹具模式留下的旧 job 即使可恢复，也不能在真实模式复用未批准技巧。"""
+    store, client = env
+    with db.session() as s:
+        pkg, _ = frozen_package_for_scene(store, s, _plan(), freeze=False)
+    assert pkg.techniques
+    assert SceneRunner(store, client).run(_plan(), pkg, Budget())["status"] == "committed"
+    monkeypatch.setattr(config, "LLM_MODE", "real")
+    with db.session() as s:
+        with pytest.raises(RuntimeFault, match="semantic_review_unverifiable"):
+            frozen_package_for_scene(store, s, _plan())
