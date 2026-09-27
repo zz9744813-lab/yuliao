@@ -56,11 +56,13 @@
 """
 from __future__ import annotations
 
+import functools
 import hmac
 import ipaddress
 import os
 import secrets
 from pathlib import Path
+from typing import NamedTuple
 
 from fastapi import Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
@@ -174,7 +176,22 @@ def local_bypass_enabled() -> bool:
 # 环境变量未设（默认）⇒ 白名单为空 ⇒ 任何带代理头的请求都不免令牌。
 # 绝不引入静默放宽，也没有任何 env 能把「需令牌」翻成「免令牌」
 # （`LG_LOCAL_BYPASS` 的既有语义一字未改）。
+# - **解析结果按 env 原文缓存**（2026-09-27 收口，见 `_parse_trusted_proxies_cached`）：
+#   改前每次请求都重跑 `os.environ.get` + 逐条 `ipaddress.ip_network(...)`，401 风暴
+#   （大量未授权请求）下这是**每请求重复解析**的放大面。现在同一份 env 原文只解析一次，
+#   env 原文一变（含改空）立即失效重算——**判定口径一字未改**，只是把重解析挡在缓存外。
+#   ⚠ 本条只陈述代码事实，**未做压测**（本轮无性能实测数据，不作任何快慢声称）。
 _TRUSTED_PROXIES_ENV = "LG_TRUSTED_PROXIES"
+
+
+def _split_trusted_entries(raw: str) -> tuple[str, ...]:
+    """从 env **原文**切出实际生效条目：逗号分隔、逐项 strip、丢弃空项。
+
+    纯函数（只吃字符串、不读环境），是「读 env」与「解析」之间可缓存的那条缝。
+    返回 tuple 而非 list：调用方拿到的对象不可就地改动，缓存里存的就是同一份。
+    """
+    out = [p.strip() for p in raw.split(",")]
+    return tuple(p for p in out if p)
 
 
 def trusted_proxies() -> tuple[str, ...]:
@@ -183,24 +200,35 @@ def trusted_proxies() -> tuple[str, ...]:
     默认空 = 最严。空项（`,,` / 尾逗号 / 纯空白）直接丢弃，不产生「空串匹配一切」
     的口子。每次调用现读环境（测试可 monkeypatch），与 `local_bypass_enabled` 同协议。
     """
-    raw = os.environ.get(_TRUSTED_PROXIES_ENV) or ""
-    out = [p.strip() for p in raw.split(",")]
-    return tuple(p for p in out if p)
+    return _split_trusted_entries(os.environ.get(_TRUSTED_PROXIES_ENV) or "")
 
 
-def _parse_trusted_proxies() -> tuple[tuple[tuple[str, object], ...], tuple[str, ...]]:
-    """把声明条目解析成 `(合法条目, 被忽略的非法条目原文)`。
+@functools.lru_cache(maxsize=32)
+def _parse_trusted_proxies_cached(
+    raw: str,
+) -> tuple[tuple[tuple[str, object], ...], tuple[str, ...]]:
+    """**纯函数**版解析：入参 = `LG_TRUSTED_PROXIES` 的 env **原文**，不读环境。
+
+    缓存键就是这份原文（`maxsize=32` 有界，避免长跑进程里原文抖动把内存吃光；
+    淘汰只多一次重解析，**不影响判定结果**）。返回 `(合法条目, 被忽略的非法条目原文)`。
 
     合法条目形如 `(原文, ip_network)`（单 IP 归一为 /32；**`strict=True`**，
-    主机位被置位的写法如 `127.0.0.1/0` 视为非法——见下）。
+    主机位被置位的写法如 `127.0.0.1/0` 视为非法——见下)。
     非法条目**剔除**而非放行；单独把它们的**原文 + 原因**带回，是为了让
     `self_check` 能如实喊出「声明 N 条 / 合法 M 条 / 忽略 K 条 + 具体哪几条及
     原因」——拼错或被归一放大的 IP 被静默忽略，正是要消灭的那类「看起来配了
     其实没生效」。
+
+    **为什么敢缓存（并发安全论证）**：本函数是纯函数——只依赖入参 `raw`，不读
+    环境、不碰模块可变状态、返回值是 tuple（元素也是 tuple / 不可变的
+    `IPv4Network`）；`ip_network(...)` 对同一 `raw` 每次产出等价对象。所以
+    「跨线程共享」不产生任何可变状态：CPython 的 `lru_cache` 自身对字典操作加锁，
+    最坏情况是同键并发时多算一次并让两个线程拿到**等价**结果，绝不会把半成品
+    暴露给判定路径，也不存在「就地修改返回对象」的反作用面。
     """
     good: list[tuple[str, object]] = []
     bad: list[str] = []
-    for entry in trusted_proxies():
+    for entry in _split_trusted_entries(raw):
         try:
             net = ipaddress.ip_network(entry, strict=True)
         except ValueError as e:
@@ -213,6 +241,41 @@ def _parse_trusted_proxies() -> tuple[tuple[tuple[str, object], ...], tuple[str,
         else:
             good.append((entry, net))
     return tuple(good), tuple(bad)
+
+
+def _parse_trusted_proxies() -> tuple[tuple[tuple[str, object], ...], tuple[str, ...]]:
+    """按 env **原文**取解析结果：同原文命中缓存直接返回**同一结果对象**，
+    原文一变（含清空）立即失效重算。判定口径与解析逻辑一字未改，
+    变的只有「同一份原文不必重复解析」。
+    """
+    return _parse_trusted_proxies_cached(os.environ.get(_TRUSTED_PROXIES_ENV) or "")
+
+
+class _ProxyCacheStats(NamedTuple):
+    """白名单解析缓存的只读统计（`NamedTuple` ⇒ 不可就地改字段）。"""
+
+    hits: int
+    misses: int
+    maxsize: int | None
+    currsize: int
+
+
+def proxy_cache_info() -> _ProxyCacheStats:
+    """白名单解析缓存的命中/未命中计数（**只读访问器**，供测试与自检核对）。
+
+    数据直接取自 `lru_cache` 自己的账本，**不是**在判定路径上另挂一个计数器
+    ——不新增任何副作用，判定路径的行为与「有没有人查统计」无关。
+    `misses` 即「实际重解析次数」（每次未命中必然真跑一遍纯函数）。
+    """
+    ci = _parse_trusted_proxies_cached.cache_info()
+    return _ProxyCacheStats(hits=ci.hits, misses=ci.misses,
+                            maxsize=ci.maxsize, currsize=ci.currsize)
+
+
+def proxy_cache_clear() -> None:
+    """清空白名单解析缓存（账本与条目一并清）。只给测试与自检用：
+    让「本轮从零开始计数」这件事有确定起点，判定路径永不调用它。"""
+    _parse_trusted_proxies_cached.cache_clear()
 
 
 def peer_is_trusted_proxy(host: str) -> bool:
