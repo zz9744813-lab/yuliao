@@ -109,8 +109,10 @@ STRIP_CATEGORY = {
 # ------------------------------------------------------------ 只读连接层
 def _ro_connect(db_path: Path):
     """真库一律 mode=ro 只读。**只读承诺在连接层成立**（不是靠自觉）。"""
-    return sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True,
-                           check_same_thread=False)
+    con = sqlite3.connect(f"file:{Path(db_path).as_posix()}?mode=ro", uri=True,
+                          check_same_thread=False)
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
 
 
 def open_ro_session(db_path: Path):

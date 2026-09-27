@@ -17,7 +17,7 @@
   内容与回滚前逐字节一致。
 - 契约 4（禁跳级和语义审查）：`--to verified`（从 hypothesis 起跨 2 级）
   判 `skip_ladder`；从 replicated 起缺当前证据绑定的双席审查收据则拒绝，
-  库与审计不变，K3 仍选不出它。直接调用写函数也不能绕过。
+  库与审计不变，K3 仍选不出它；合成双席 PASS 才能同事务写批准链接。
 - 契约 5（审计行不可变）：字段含 `from_status/to_status/evidence_ref/ts`；
   `verify_promotion_audits()` 只读判 ok=True；DB 层触发器阻断 UPDATE/DELETE；
   **源码 grep 钉死**本件没有 UPDATE/DELETE `promotion_audits` 的写路径；
@@ -201,6 +201,13 @@ def test_dry_run_is_default_and_writes_nothing(tmp_path, monkeypatch):
     assert _main(db, "--dry-run") == k5w.EXIT_OK      # 前置齐 ⇒ PROMOTE ⇒ rc=0
     assert _digest(db) == dig and os.stat(db).st_mtime_ns == mt
     assert _card_row(db)[:3] == ("hypothesis", "hypothesis", "UNCERTAIN")
+
+
+def test_read_only_session_enables_fk_checks_for_receipt_schema(tmp_path):
+    db = _promotable(tmp_path)
+    with k5w.open_ro_session(db) as session:
+        assert session.connection().exec_driver_sql(
+            "PRAGMA foreign_keys").scalar() == 1
 
 
 def test_dry_run_is_the_default_mode(tmp_path, capsys):
@@ -462,6 +469,221 @@ def test_direct_verified_write_refused_before_opening_database(tmp_path,
             "to_status": "observed", "status_column_to": "verified",
             "observation_to": "replicated"}})
     assert _digest(db) == original
+
+
+def _reviewable_round(tmp_path, monkeypatch):
+    """Disposable, evidence-valid replicated card with a proposed GENRE scope."""
+    import app.semantic_review_runner as runner
+    from app import config
+    from app.semantic_receipts import ensure_semantic_schema
+    from app.semantic_review_store import freeze_snapshot
+    from sqlalchemy import create_engine, event
+
+    db = _promotable(tmp_path)
+    with sqlite3.connect(db.as_posix()) as con:
+        con.execute("UPDATE strategy_instances SET evidence_text=?,"
+                    " evidence_sha256=?", (TXT[:10], K.evidence_sha256(TXT[:10])))
+    assert _commit(db) == k5w.EXIT_OK
+    assert _commit(db, to="replicated") == k5w.EXIT_OK
+    proposed = _verdict(db, to="verified")
+    assert proposed["reason"].startswith("semantic_review_unverifiable")
+    assert proposed["plan"] is None
+    claim = {key: proposed["proposal"][key] for key in
+             ("scope_to", "scope_ids", "scope_basis")}
+    assert claim["scope_to"] == "GENRE"
+    assert _card_row(db)[2] == "AUTHOR"  # K2 must review the proposed scope.
+    engine = create_engine(f"sqlite:///{db.as_posix()}", future=True)
+
+    @event.listens_for(engine, "connect")
+    def _foreign_keys(dbapi_connection, _):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    ensure_semantic_schema(engine)
+    snapshot = freeze_snapshot(engine, "ESV2-T", 1, claim)
+    monkeypatch.setattr(config, "LLM_MODE", "real")
+    monkeypatch.setattr(config, "GATEWAY_BASE_URL", "https://synthetic.example/v1")
+    monkeypatch.setattr(config, "GATEWAY_API_KEY", "synthetic-key")
+    monkeypatch.setattr(runner, "_require_private_storage", lambda _: None)
+    return db, engine, snapshot["snapshot_id"]
+
+
+def _synthetic_vote(monkeypatch, engine, sid, seat, verdict="PASS"):
+    import httpx
+    import app.semantic_review_runner as runner
+
+    provider, model = f"provider-{seat}", f"actual-{seat}"
+    route = runner.ReviewRoute(f"requested-{seat}", provider, model,
+                               f"channel-{seat}")
+    review = {"verdict": verdict, "reason": "已核对证据、反例与拟准入范围",
+              "cited_instance_ids": ["SI-1", "SI-2"],
+              "concerns": ["范围证据不足"] if verdict == "BLOCK" else []}
+    request_id = f"upstream-{seat}"
+    response = httpx.Response(
+        200,
+        headers={"X-LG-Upstream-Provider": provider,
+                 "X-LG-Upstream-Model": model,
+                 "X-LG-Upstream-Channel-Id": f"channel-{seat}",
+                 "X-LG-Upstream-Request-Id": request_id},
+        json={"id": request_id, "model": model,
+              "choices": [{"finish_reason": "stop", "message": {
+                  "role": "assistant", "content": json.dumps(
+                      review, ensure_ascii=False)}}]})
+    monkeypatch.setattr(runner, "_post_once", lambda raw, timeout: response)
+    return runner.review_snapshot(engine, sid, route, max_output_tokens=512,
+                                  max_request_bytes=100_000,
+                                  timeout_seconds=15)
+
+
+def test_verified_promotion_requires_two_current_votes_and_links_atomically(
+        tmp_path, monkeypatch):
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        assert _verdict(db, to="verified")["reason"].endswith(
+            "two_pass_votes_missing")
+        _synthetic_vote(monkeypatch, engine, sid, "b")
+        verdict = _verdict(db, to="verified")
+        assert verdict["decision"] == k5w.PROMOTE
+        assert verdict["approval"]["snapshot_id"] == sid
+        result = k5w.commit_promotion(db, verdict)
+        assert result["approval_rows"] == 1
+        assert _card_row(db)[:3] == ("verified", "replicated", "GENRE")
+        assert _rows(db, "promotion_audits", "to_status")[-1] == ("verified",)
+        link = _rows(db, "semantic_approval_links",
+                     "kind,snapshot_id,verified_audit_id")
+        assert link == [("pre_promotion", sid, result["audit_id"])]
+    finally:
+        engine.dispose()
+
+
+def test_verified_promotion_refuses_caller_policy_even_after_two_passes(
+        tmp_path, monkeypatch):
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        _synthetic_vote(monkeypatch, engine, sid, "b")
+        good = _verdict(db, to="verified")
+        assert good["decision"] == k5w.PROMOTE
+        with k5w.open_ro_session(db) as session:
+            card = session.get(ExpressionStrategyV2, "ESV2-T")
+            filtered = k5w.evaluate(session, card, {"book_id": "WK-A"},
+                                    "verified", "R1")
+        assert filtered["decision"] == k5w.NO_PROMOTE
+        assert filtered["reason"] == "verified_requires_default_policy"
+        good["policy"] = {"book_id": "WK-A"}
+        before = _rows(db, "promotion_audits")
+        with pytest.raises(k5w.PromotionGuardError,
+                           match="semantic_review_unverifiable"):
+            k5w.commit_promotion(db, good)
+        assert _rows(db, "promotion_audits") == before
+        assert _rows(db, "semantic_approval_links") == []
+    finally:
+        engine.dispose()
+
+
+def test_direct_verified_commit_cannot_use_forged_approval(
+        tmp_path, monkeypatch):
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        forged = _verdict(db, to="verified")
+        forged["plan"] = forged["proposal"]
+        forged["decision"] = k5w.PROMOTE
+        forged["approval"] = {"snapshot_id": sid,
+                              "content_sha256": "0" * 64,
+                              "vote_a_id": "fake-a", "vote_b_id": "fake-b"}
+        before = _rows(db, "promotion_audits")
+        with pytest.raises(k5w.PromotionGuardError,
+                           match="事务内证据或计划变化"):
+            k5w.commit_promotion(db, forged)
+        assert _card_row(db)[0] == "hypothesis"
+        assert _rows(db, "promotion_audits") == before
+        assert _rows(db, "semantic_approval_links") == []
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("second_verdict", ["ABSTAIN", "BLOCK"])
+def test_verified_refuses_non_pass_round(tmp_path, monkeypatch, second_verdict):
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        _synthetic_vote(monkeypatch, engine, sid, "b", second_verdict)
+        before = _rows(db, "promotion_audits")
+        assert _verdict(db, to="verified")["reason"].endswith(
+            "non_pass_vote:" + second_verdict)
+        assert _commit(db, to="verified") == k5w.EXIT_REFUSED
+        assert _card_row(db)[0] == "hypothesis"
+        assert _rows(db, "promotion_audits") == before
+        assert _rows(db, "semantic_approval_links") == []
+    finally:
+        engine.dispose()
+
+
+def test_verified_transaction_rechecks_evidence_and_rolls_back(
+        tmp_path, monkeypatch):
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        _synthetic_vote(monkeypatch, engine, sid, "b")
+        verdict = _verdict(db, to="verified")
+        before = _rows(db, "promotion_audits")
+        with sqlite3.connect(db.as_posix()) as con:
+            con.execute("UPDATE segments SET text=text || '。'"
+                        " WHERE id='SG-WK-A'")
+        with pytest.raises(k5w.PromotionGuardError,
+                           match="事务内证据或计划变化"):
+            k5w.commit_promotion(db, verdict)
+        assert _card_row(db)[0] == "hypothesis"
+        assert _rows(db, "promotion_audits") == before
+        assert _rows(db, "semantic_approval_links") == []
+    finally:
+        engine.dispose()
+
+
+def test_verified_link_failure_rolls_back_status_and_audit(
+        tmp_path, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        _synthetic_vote(monkeypatch, engine, sid, "b")
+        verdict = _verdict(db, to="verified")
+        before = _rows(db, "promotion_audits")
+        with sqlite3.connect(db.as_posix()) as con:
+            con.execute("CREATE TRIGGER synthetic_link_failure BEFORE INSERT ON "
+                        "semantic_approval_links BEGIN SELECT RAISE(ABORT, "
+                        "'synthetic link failure'); END")
+        with pytest.raises(IntegrityError, match="synthetic link failure"):
+            k5w.commit_promotion(db, verdict)
+        assert _card_row(db)[0] == "hypothesis"
+        assert _rows(db, "promotion_audits") == before
+        assert _rows(db, "semantic_approval_links") == []
+    finally:
+        engine.dispose()
+
+
+def test_verified_requires_immutable_audit_schema_before_cas(
+        tmp_path, monkeypatch):
+    from app.promotion_audits import PromotionAuditSchemaError
+
+    db, engine, sid = _reviewable_round(tmp_path, monkeypatch)
+    try:
+        _synthetic_vote(monkeypatch, engine, sid, "a")
+        _synthetic_vote(monkeypatch, engine, sid, "b")
+        verdict = _verdict(db, to="verified")
+        before = _rows(db, "promotion_audits")
+        with sqlite3.connect(db.as_posix()) as con:
+            con.execute("DROP TRIGGER promotion_audits_no_delete")
+        with pytest.raises(PromotionAuditSchemaError,
+                           match="trigger_schema_drift"):
+            k5w.commit_promotion(db, verdict)
+        assert _card_row(db)[0] == "hypothesis"
+        assert _rows(db, "promotion_audits") == before
+        assert _rows(db, "semantic_approval_links") == []
+    finally:
+        engine.dispose()
 
 
 # ============================================== 契约 5：审计不可变

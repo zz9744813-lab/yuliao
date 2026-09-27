@@ -37,6 +37,21 @@ def _normalized(sql: str) -> str:
         " IF NOT EXISTS", "").split()).lower()
 
 
+def require_promotion_audit_schema(conn) -> None:
+    """Read-only check of the existing audit table and immutability guards."""
+    if conn.engine.url.get_backend_name() != "sqlite":
+        raise PromotionAuditSchemaError("promotion_audits_require_sqlite")
+    objects = [("table", AUDIT_TABLE, AUDIT_DDL)]
+    objects.extend(("trigger", ddl.split()[5], ddl)
+                   for ddl in AUDIT_IMMUTABLE_DDL)
+    for kind, name, expected in objects:
+        stored = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
+            (kind, name)).scalar()
+        if stored is None or _normalized(stored) != _normalized(expected):
+            raise PromotionAuditSchemaError(f"{kind}_schema_drift:{name}")
+
+
 def ensure_promotion_audit_schema(engine: Engine) -> None:
     """Only create a missing audit table/triggers; never rewrite existing rows."""
     if engine.url.get_backend_name() != "sqlite":
@@ -45,12 +60,4 @@ def ensure_promotion_audit_schema(engine: Engine) -> None:
         conn.exec_driver_sql(AUDIT_DDL)
         for ddl in AUDIT_IMMUTABLE_DDL:
             conn.exec_driver_sql(ddl)
-        objects = [("table", AUDIT_TABLE, AUDIT_DDL)]
-        objects.extend(("trigger", ddl.split()[5], ddl)
-                       for ddl in AUDIT_IMMUTABLE_DDL)
-        for kind, name, expected in objects:
-            stored = conn.exec_driver_sql(
-                "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
-                (kind, name)).scalar()
-            if stored is None or _normalized(stored) != _normalized(expected):
-                raise PromotionAuditSchemaError(f"{kind}_schema_drift:{name}")
+        require_promotion_audit_schema(conn)

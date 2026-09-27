@@ -35,11 +35,10 @@
 |---|---|
 | `observed` | 净剩证据 ≥1（`_evidence_for`）且其中 ≥1 条 `src_ok=true` 且 ≥1 条已按新口径复审 |
 | `replicated` | 上一条 + 过闸证据的**独立根作品** ≥2（§4.3「独立来源复现」） |
-| `verified` | 当前暂时 NO-GO：缺与本版本、当前证据和拟准入范围绑定的两席独立语义审查收据；该链落地前 `evaluate` 与 `commit_promotion` 均拒绝 |
+| `verified` | 当前证据与拟晋升范围的最新复核轮次须有两名不同上游模型的 PASS 及可信调用收据；权威核验在同一写事务中重做 |
 
-2026-09-27 补闸：旧 `strategy_reviews` 自由判词和实例的 `reviewer_version`
-不能证明两席审的是本轮证据。`verified` 在新语义收据链接入同一写事务前保持拒绝，
-旧晋升审计和已有 8 张 `verified` 卡不回滚、不追认。详见
+旧 `strategy_reviews` 自由判词和实例的 `reviewer_version` 不能证明两席审的是本轮证据。
+缺当前双席收据时 `verified` 仍拒绝；已有 8 张 `verified` 卡不回滚、不追认。详见
 `docs/K2_语义审查收据链_20260927.md`。
 
 **gate2/gate4/条件管道不作晋升前置**（如实声明的取舍）：`gate4_scope` 与
@@ -65,8 +64,9 @@ scope 同样逐级（`UNCERTAIN → WORK → AUTHOR → GENRE`）：推导结果
 - `--commit` 必须显式给出**恰好 1 条** `--strategy` 且 `--reviewer` 非空：选择集 ≠1
   条直接 rc=1 拒（`批量升格禁止`，U2「批量升格在任何读数下都不解冻」）；
 - 一次 `--commit` = `BEGIN IMMEDIATE` → 单行 CAS `UPDATE`（WHERE 带旧值，rowcount
-  必须 ==1，否则整体回滚）→ 同事务 INSERT **1** 行审计 → `COMMIT`；任一步抛异常
-  即 `ROLLBACK`，两表都无变化；
+  必须 ==1，否则整体回滚）→ 同事务 INSERT **1** 行审计 → `COMMIT`；`verified`
+  还须在同一事务中重算当前快照及双席票并插入 **1** 条 `pre_promotion` 链接；
+  任一步抛异常即 `ROLLBACK`；
 - 审计行 append-only：建表同时建 `BEFORE UPDATE`/`BEFORE DELETE` 的 `RAISE(ABORT)`
   触发器；本文件**没有**任何 UPDATE/DELETE `promotion_audits` 的代码路径（测试用
   源码 grep 钉死）；只读校验入口 = `verify_promotion_audits()`。
@@ -88,6 +88,10 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
 ROOT = Path(__file__).resolve().parent.parent          # 工作树根
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -100,7 +104,11 @@ from app.models import (ExpressionStrategyV2, Segment,  # noqa: E402
                         StrategyInstance, WorkSource)
 from app.promotion_audits import (AUDIT_TABLE, AUDIT_COLUMNS,
                                   AUDIT_INTEGER_COLUMNS, AUDIT_DDL,
-                                  AUDIT_IMMUTABLE_DDL)
+                                  AUDIT_IMMUTABLE_DDL,
+                                  PromotionAuditSchemaError,
+                                  require_promotion_audit_schema)
+from app.semantic_approval import ApprovalError, pre_promotion_approval
+from app.semantic_receipts import ReceiptSchemaError, require_semantic_schema
 
 TOOL = "k5_promotion_write"
 SCHEMA = "k5_promotion_write/v1"
@@ -123,6 +131,12 @@ SCOPE_LADDER = ("UNCERTAIN", "WORK", "AUTHOR", "GENRE")     # GLOBAL 永不推�
 MIN_REVIEWED = 1            # W2(ii)：新口径复审 ≥1 条
 MIN_INDEPENDENT_ROOTS = 2   # §4.3 replicated：独立来源复现
 DEFAULT_REVIEWER_DRY = "—（dry-run 不写审计行）"
+BEGIN_WRITE = "BEGIN IMMEDIATE"
+CAS_SQL = ("UPDATE expression_strategies_v2 SET status=?,"
+           " observation_status=?, scope=?, scope_ids=?, scope_basis=?"
+           " WHERE id=? AND status=? AND observation_status=? AND scope=?")
+CAS_VERIFIED_SQL = CAS_SQL + " AND version=?"
+
 
 class PromotionRefused(Exception):
     """判词为 NO-PROMOTE（拒绝语义，不是崩溃）。"""
@@ -290,8 +304,10 @@ def evaluate(s, st: ExpressionStrategyV2, policy: dict, requested: str | None,
          "scope_ids": list(st.scope_ids or []), "level": level,
          "requested": requested, "skipped": None, "note": None,
          "gates": gates, "blocked_at": explain["blocked_at"],
-         "evidence": ev, "decision": NO_PROMOTE, "reason": None, "plan": None,
-         "index": index, "total": total}
+         "evidence": ev, "decision": NO_PROMOTE, "reason": None,
+         "plan": None, "proposal": None,
+         "index": index, "total": total, "policy": policy,
+         "approval": None}
 
     def refuse(reason: str, skipped=None, note=None) -> dict:
         v["reason"], v["skipped"], v["note"] = reason, skipped, note
@@ -325,11 +341,6 @@ def evaluate(s, st: ExpressionStrategyV2, policy: dict, requested: str | None,
                       f"（跨 {ti - li} 级，禁跳级）", list(LADDER[li + 1:ti]))
     target = LADDER[ti]
     v["target"] = target
-    if target == "verified":
-        # 旧 strategy_reviews 没有版本、当前证据指纹和晋升审计绑定。
-        # 新收据链落地前，不能把 reviewer_version 或 CLI 签名当双席语义批准。
-        return refuse("semantic_review_unverifiable:缺当前证据绑定的双席审查收据")
-
     # ── 硬契约 2：证据为空即拒（判词字面量取自库/解释器）───────────
     if ev["evidence_count"] == 0:
         return refuse(gates["gate3_evidence"],
@@ -372,6 +383,19 @@ def evaluate(s, st: ExpressionStrategyV2, policy: dict, requested: str | None,
         "gate_version": GATE_VERSION, "reviewer": reviewer,
         "policy_sha256": KQ.policy_sha256(policy),
     }
+    v["proposal"] = plan
+    if target == "verified":
+        # Verification is global over the fixed K2 source policy. Caller
+        # book/policy filters cannot alter its immutable audit receipt.
+        if policy != {}:
+            return refuse("verified_requires_default_policy")
+        try:
+            v["approval"] = pre_promotion_approval(
+                s, st.id, st.version, plan, SCOPE_RULE_VERSION)
+        except ApprovalError as exc:
+            return refuse("semantic_review_unverifiable:" + str(exc))
+        except ReceiptSchemaError as exc:
+            return refuse("semantic_review_unverifiable:schema_invalid:" + str(exc))
     v["decision"] = PROMOTE
     v["reason"] = "step_preconditions_met"
     v["plan"] = plan
@@ -394,53 +418,133 @@ def _now_iso() -> str:
         ).isoformat(timespec="seconds")
 
 
+def _audit_values(plan: dict, st: dict, ts: str) -> tuple:
+    return (
+        audit_id_for(plan), TOOL, plan["gate_version"],
+        plan["strategy_id"], plan["strategy_key"], st["version"],
+        plan["from_status"], plan["to_status"],
+        plan["status_column_from"], plan["status_column_to"],
+        plan["observation_from"], plan["observation_to"],
+        plan["scope_from"], plan["scope_to"],
+        KQ.canonical_json(plan["scope_ids"]), plan["scope_basis"],
+        SCOPE_RULE_VERSION, KQ.canonical_json(plan["evidence_ref"]),
+        plan["evidence_count"], plan["reviewer"], ts,
+        plan["policy_sha256"],
+        KQ.canonical_json({"status": plan["status_column_to"],
+                           "observation_status": plan["observation_to"],
+                           "scope": plan["scope_to"]}))
+
+
+def _audit_insert_sql() -> str:
+    return (f"INSERT INTO {AUDIT_TABLE} (" + ", ".join(AUDIT_COLUMNS)
+            + ") VALUES (" + ",".join("?" * len(AUDIT_COLUMNS)) + ")")
+
+
+def _cas_values(plan: dict, st: dict, *, verified: bool = False) -> tuple:
+    values = (plan["status_column_to"], plan["observation_to"],
+              plan["scope_to"], KQ.canonical_json(plan["scope_ids"]),
+              plan["scope_basis"], plan["strategy_id"],
+              st["status"], st["observation_status"], st["scope"])
+    return values + ((st["version"],) if verified else ())
+
+
+def _commit_verified(db_path: Path, verdict: dict) -> dict:
+    """Reserve the writer, re-evaluate current evidence, then write all 3 rows."""
+    plan = verdict["plan"]
+    if (verdict.get("decision") != PROMOTE or
+            not isinstance(verdict.get("approval"), dict) or
+            verdict.get("policy") != {} or
+            not isinstance(plan.get("reviewer"), str) or
+            not plan["reviewer"].strip() or
+            plan["reviewer"] == DEFAULT_REVIEWER_DRY or
+            not isinstance(plan.get("strategy_id"), str)):
+        raise PromotionGuardError("semantic_review_unverifiable:判词或签认不完整")
+    if not Path(db_path).is_file():
+        raise PromotionGuardError("database_missing")
+    engine = create_engine(f"sqlite:///{Path(db_path).as_posix()}", future=True,
+                           connect_args={"timeout": 30.0})
+    try:
+        with engine.connect() as conn:
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+            if conn.exec_driver_sql("PRAGMA foreign_keys").scalar() != 1:
+                raise PromotionGuardError("foreign_keys_disabled")
+            conn.exec_driver_sql(BEGIN_WRITE)
+            try:
+                # Verified admission never creates schema objects implicitly.
+                # Both ledgers must already be present and immutable.
+                require_promotion_audit_schema(conn)
+                require_semantic_schema(conn)
+                with Session(bind=conn, autoflush=False) as session:
+                    card = session.get(ExpressionStrategyV2, plan["strategy_id"])
+                    if card is None:
+                        raise PromotionGuardError("strategy_missing")
+                    current = evaluate(session, card, verdict["policy"],
+                                       "verified", plan["reviewer"])
+                if (current["decision"] != PROMOTE or
+                        current["plan"] != plan or
+                        current["approval"] != verdict["approval"] or
+                        any(current[k] != verdict[k] for k in
+                            ("status", "observation_status", "scope",
+                             "scope_ids", "version"))):
+                    raise PromotionGuardError(
+                        "semantic_review_unverifiable:事务内证据或计划变化")
+                changed = conn.exec_driver_sql(
+                    CAS_VERIFIED_SQL,
+                    _cas_values(plan, current, verified=True)).rowcount
+                if changed != 1:
+                    raise PromotionGuardError(
+                        f"影响行数={changed}（必须 1）——事务内 CAS 失配")
+                ts = _now_iso()
+                audit_id = audit_id_for(plan)
+                conn.exec_driver_sql(
+                    _audit_insert_sql(), _audit_values(plan, current, ts))
+                approval = current["approval"]
+                link_id = "SAP-" + hashlib.sha256(
+                    (audit_id + "\n" + approval["snapshot_id"]).encode(
+                        "utf-8")).hexdigest()[:24]
+                conn.exec_driver_sql("""
+                    INSERT INTO semantic_approval_links
+                    (link_id,strategy_id,strategy_version,verified_audit_id,
+                     snapshot_id,vote_a_id,vote_b_id,kind,content_sha256,
+                     created_at) VALUES (?,?,?,?,?,?,?,?,?,?)
+                """, (link_id, plan["strategy_id"], current["version"],
+                      audit_id, approval["snapshot_id"],
+                      approval["vote_a_id"], approval["vote_b_id"],
+                      "pre_promotion", approval["content_sha256"], ts))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+    finally:
+        engine.dispose()
+    return {"committed": True, "audit_id": audit_id, "approval_link_id": link_id,
+            "ts": ts, "strategy_id": plan["strategy_id"],
+            "from_status": plan["from_status"], "to_status": "verified",
+            "rows_changed": 1, "audit_rows": 1, "approval_rows": 1}
+
+
 def commit_promotion(db_path: Path, verdict: dict) -> dict:
-    """一次事务：CAS UPDATE 1 行 + INSERT 1 行审计；任一步异常整体回滚。"""
+    """One transaction; verified also requires and writes its K2 approval."""
+    if not isinstance(verdict.get("plan"), dict):
+        raise PromotionGuardError("no_promotion_plan")
     plan, st = verdict["plan"], verdict
     target = plan.get("to_status")
     if ((plan.get("status_column_to"), plan.get("observation_to"))
             != LADDER_COLUMNS.get(target)):
         raise PromotionGuardError("target_columns_mismatch:晋升级与目标列不一致")
     if target == "verified":
-        # 直接调用写函数也不得绕过 evaluate() 的临时 NO-GO；在打开可写
-        # 连接之前拒绝，避免连审计 DDL 都写进未获审查的库。
-        raise PromotionGuardError(
-            "semantic_review_unverifiable:缺当前证据绑定的双席审查收据")
+        return _commit_verified(db_path, verdict)
     con = open_write_connection(db_path)
     ts = _now_iso()
     try:
         ensure_audit_schema(con)
-        con.execute("BEGIN IMMEDIATE")
+        con.execute(BEGIN_WRITE)
         try:
-            cur = con.execute(
-                "UPDATE expression_strategies_v2 SET status=?,"
-                " observation_status=?, scope=?, scope_ids=?, scope_basis=?"
-                " WHERE id=? AND status=? AND observation_status=? AND scope=?",
-                (plan["status_column_to"], plan["observation_to"],
-                 plan["scope_to"], KQ.canonical_json(plan["scope_ids"]),
-                 plan["scope_basis"], plan["strategy_id"],
-                 st["status"], st["observation_status"], st["scope"]))
+            cur = con.execute(CAS_SQL, _cas_values(plan, st))
             if cur.rowcount != 1:
                 raise PromotionGuardError(
                     f"影响行数={cur.rowcount}（必须 1）——行已被并发改变或 CAS 失配")
-            con.execute(
-                f"INSERT INTO {AUDIT_TABLE} ("
-                + ", ".join(AUDIT_COLUMNS) + ") VALUES ("
-                + ",".join("?" * len(AUDIT_COLUMNS)) + ")",
-                (audit_id_for(plan), TOOL, plan["gate_version"],
-                 plan["strategy_id"], plan["strategy_key"], st["version"],
-                 plan["from_status"], plan["to_status"],
-                 plan["status_column_from"], plan["status_column_to"],
-                 plan["observation_from"], plan["observation_to"],
-                 plan["scope_from"], plan["scope_to"],
-                 KQ.canonical_json(plan["scope_ids"]), plan["scope_basis"],
-                 SCOPE_RULE_VERSION, KQ.canonical_json(plan["evidence_ref"]),
-                 plan["evidence_count"], plan["reviewer"], ts,
-                 plan["policy_sha256"],
-                 KQ.canonical_json({"status": plan["status_column_to"],
-                                    "observation_status":
-                                        plan["observation_to"],
-                                    "scope": plan["scope_to"]})))
+            con.execute(_audit_insert_sql(), _audit_values(plan, st, ts))
             con.execute("COMMIT")
         except Exception:
             con.execute("ROLLBACK")
@@ -735,9 +839,10 @@ def _execute_commit(db_path: Path, rep: dict, reviewer: str) -> int:
     print(f"[{TOOL}] 复检判词（与 dry-run 同一函数产出）：{verdict['line']}")
     try:
         res = commit_promotion(Path(db_path), verdict)
-    except (PromotionGuardError, sqlite3.Error) as exc:
+    except (PromotionGuardError, PromotionAuditSchemaError, ReceiptSchemaError,
+            sqlite3.Error, SQLAlchemyError) as exc:
         print(f"[{TOOL}] 写入失败已回滚：{type(exc).__name__}: {exc}"
-              f" —— 两张表均无变化", file=sys.stderr)
+              f" —— 本次策略、审计及批准链接均无变化", file=sys.stderr)
         return EXIT_ERROR
     print(f"[{TOOL}] COMMITTED {res['audit_id']} "
           f"{res['from_status']}->{res['to_status']} "
