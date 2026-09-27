@@ -9,19 +9,33 @@
 HEAD b856b63 预检（42/42 命中）后才入表，零臆造。
 
 三类特殊条目：
-- reverse：断言**不存在**（声称过度的实现——如 dropped_foreign_extras——
-  若日后有人补实现，本断言转红提醒同步回改文档）；
+- reverse：断言**不存在**（声称过度的实现——若日后有人补实现，本断言转红
+  提醒同步回改文档）。dropped_foreign_extras 本条 2026-09-27 已补实现，
+  改判在位（见 REVERSED_TO_PRESENT_CLAIMS）；
 - min_count：文档声称「N 个用例」→ 断言实际数量 ≥ N（新增不红，缩水才红）；
 - moved：文档所指文件已迁移（api.py→corpus_routes.py）→ 断言新位置仍在
   （旧位置缺失即代码已变，台账已记录）。
 """
 from __future__ import annotations
 
+import importlib.util as _ilu
+import json
+import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+
+_ssr_spec = _ilu.spec_from_file_location(
+    "ssr_fen", ROOT / "scripts" / "strategy_stats_rebuild.py")
+ssr = _ilu.module_from_spec(_ssr_spec)
+_ssr_spec.loader.exec_module(ssr)
+
+from app import config, db                                # noqa: E402
+from app.models import StrategyStats                      # noqa: E402
 
 # (文档, 代码文件, 必须存在的精确串)
 PRESENT_CLAIMS = [
@@ -124,9 +138,11 @@ PRESENT_CLAIMS = [
      "workers = pool_workers(6, JUDGES, serial_check=is_serial_model)"),
 ]
 
-# 文档声称「已实现」但当前代码**不应存在**（会审处置⑪未落地——台账判定
-# 声称过度）。若日后补实现，本断言转红，提醒同步回改文档口径。
-ABSENT_CLAIMS = [
+# 曾按「声称过度、实现缺失」以 reverse 口径入册的条目（台账 2026-09-27）：
+# dropped_foreign_extras 一条已于 2026-09-27 补齐实现（覆盖前清点并打印），
+# 据此**改判在位断言**——实现字面量必须存在，再消失即红，提醒同步回改
+# docs/策略统计证据分档_20260926.md §6⑪ 与台账口径。
+REVERSED_TO_PRESENT_CLAIMS = [
     ("策略统计证据分档_20260926.md（会审处置⑪）", "scripts/strategy_stats_rebuild.py",
      "dropped_foreign_extras"),
 ]
@@ -160,14 +176,15 @@ def test_doc_claim_present_in_current_code(doc: str, path: str, needle: str):
         "代码已漂移，请对账并回改文档（或恢复实现）")
 
 
-@pytest.mark.parametrize("doc,path,needle", ABSENT_CLAIMS,
-                         ids=[f"{c[0]}::{c[2][:36]}" for c in ABSENT_CLAIMS])
-def test_overclaim_still_absent(doc: str, path: str, needle: str):
-    """声称过度条目：文档说有、代码当前没有——保持缺失态；
-    一旦有人补实现，此断言转红提醒回改文档口径。"""
-    assert needle not in _read(path), (
-        f"{path} 出现了 {needle!r}——台账判定「声称过度」的前提已变化，"
-        "请更新 docs/策略统计证据分档_20260926.md §6⑪ 的对账注记")
+@pytest.mark.parametrize("doc,path,needle", REVERSED_TO_PRESENT_CLAIMS,
+                         ids=[f"{c[0]}::{c[2][:36]}"
+                              for c in REVERSED_TO_PRESENT_CLAIMS])
+def test_overclaim_reversed_to_present(doc: str, path: str, needle: str):
+    """reverse 条目改判在位（2026-09-27）：该声称曾判「实现缺失」，实现补齐
+    后断言字面量必须存在于实现文件；实现再丢失即红。"""
+    assert needle in _read(path), (
+        f"{path} 不再包含 {needle!r}——条目已于 2026-09-27 改判在位，"
+        "实现不应回缩；若确要回缩请同步回改台账与文档口径")
 
 
 @pytest.mark.parametrize("doc,path,minimum", MIN_COUNT_CLAIMS,
@@ -193,3 +210,95 @@ def test_reconcile_ledger_exists():
     text = ledger.read_text(encoding="utf-8")
     assert "STATUS:" in text, "台账缺 STATUS 行"
     assert "对账方法" in text, "台账缺「对账方法与可复现命令」节"
+
+
+# ══ dropped_foreign_extras 功能回归（foreign-extras-notice，2026-09-27）══
+# 分档文档 §6⑪ 的声称（run(apply=True) 覆盖前清点并打印被丢弃的第三方
+# extras 键）由「声称过度」补成真实实现——以下钉行为：清点计数正确、打印
+# 一行汇总（stdout）、汇总进 run() 返回 dict、apply 后库里外来键确实没了、
+# dry_run 恒 {} 且零库写。
+
+# 重建写入 extras 的键全集（与脚本 CANONICAL_EXTRAS_KEYS 同步，漂移即红）
+CANON = {"by_root_work", "usable_evidence", "benchmark_stripped",
+         "k3_eligible_instances", "k3_eligible_root_works"}
+
+
+def _assert_temp_db() -> None:
+    """写库护栏（同 test_strategy_stats_evidence_class 的双道断言）：
+    apply=True 只许打 conftest 临时 SQLite，绝不可能是真库。顺带建表
+    （run() 不自带 init_db，本文件单跑时表可能尚未创建）。"""
+    db.init_db()
+    _url = str(db.engine.url)
+    assert _url.startswith("sqlite:///") and "lg_test_" in _url, \
+        f"engine 不是 conftest 临时库：{_url}"
+    assert config.DATABASE_URL.startswith("sqlite:///") and \
+        "lg_test_" in config.DATABASE_URL, \
+        f"config 与实际 engine 不一致：config={config.DATABASE_URL} engine={_url}"
+
+
+def _seed_stats(strategy_id: str, extras: dict) -> None:
+    db.init_db()
+    with db.session() as s:
+        s.add(StrategyStats(strategy_id=strategy_id, strategy_version=1,
+                            snapshot_at="seed", data_fingerprint="fen",
+                            extras=dict(extras)))
+        s.commit()
+
+
+def _all_stats_rows() -> list[tuple]:
+    """全表逐行快照（含 extras），供 dry_run 前后一致性对照。"""
+    with db.session() as s:
+        return sorted(
+            (r.id, r.strategy_id, r.strategy_version, r.data_fingerprint,
+             r.attempts,
+             json.dumps(r.extras, sort_keys=True, ensure_ascii=False)
+             if r.extras is not None else None)
+            for r in s.query(StrategyStats).all())
+
+
+def test_apply_counts_drops_and_reports_foreign_extras(capsys):
+    """①造 2 个外来键（k_fen_a 现于 2 行、k_fen_b 现于 1 行）：apply 后
+    汇总计数正确、打印行在位、库里外来键确实没了。"""
+    _assert_temp_db()
+    assert CANON == set(ssr.CANONICAL_EXTRAS_KEYS), \
+        "测试端键全集与脚本 CANONICAL_EXTRAS_KEYS 漂移"
+    ssr.run(apply=True)      # 归一：清掉会话内可能残留的它处 stats 外来键
+    _seed_stats("SS-fen-x1", {"by_root_work": {}, "k_fen_a": 1})
+    _seed_stats("SS-fen-x2", {"k_fen_a": 2, "k_fen_b": 3})
+    capsys.readouterr()
+    rep = ssr.run(apply=True)
+    assert rep["dropped_foreign_extras"] == {"k_fen_a": 2, "k_fen_b": 1}
+    printed = capsys.readouterr().out
+    assert "dropped_foreign_extras=3" in printed
+    assert "'k_fen_a': 2" in printed and "'k_fen_b': 1" in printed
+    with db.session() as s:
+        assert s.query(StrategyStats).filter(
+            StrategyStats.strategy_id.in_(["SS-fen-x1", "SS-fen-x2"])
+        ).count() == 0, "被覆盖的旧行（外来键载体）必须已不在库"
+        for r in s.query(StrategyStats).all():
+            assert set(r.extras or {}) <= CANON, \
+                f"apply 覆盖后 extras 仍含外来键：{r.extras}"
+
+
+def test_apply_without_foreign_keys_reports_zero(capsys):
+    """②无外来键：汇总恒空、打印 `dropped_foreign_extras=0 {}`、不报错。"""
+    _assert_temp_db()
+    ssr.run(apply=True)      # 归一（同上）
+    capsys.readouterr()
+    rep = ssr.run(apply=True)
+    assert rep["dropped_foreign_extras"] == {}
+    assert "dropped_foreign_extras=0 {}" in capsys.readouterr().out
+
+
+def test_dry_run_reports_empty_and_writes_nothing(capsys):
+    """③dry_run：即便库里现存外来键，汇总恒 {}、不打印清点行、库零改动
+    （前后逐行一致，沿用零库写纪律）。"""
+    _seed_stats("SS-fen-dry", {"k_fen_dry": 1})
+    before = _all_stats_rows()
+    rep = ssr.run(apply=False)
+    assert rep["dropped_foreign_extras"] == {}
+    assert _all_stats_rows() == before, "dry_run 必须零库写"
+    assert "dropped_foreign_extras" not in capsys.readouterr().out
+    with db.session() as s:   # 收尾清掉本用例自造的行，不留污染
+        s.query(StrategyStats).filter_by(strategy_id="SS-fen-dry").delete()
+        s.commit()
