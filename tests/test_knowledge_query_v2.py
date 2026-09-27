@@ -12,11 +12,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from app import db, knowledge_query as kq          # noqa: E402
+from app import knowledge_query as kq              # noqa: E402
+from app.db import Base                            # noqa: E402
 from app.models import (ExpressionStrategyV2, Segment, StrategyCondition,  # noqa: E402
                         StrategyInstance, Work, WorkSource)
 
@@ -39,11 +42,18 @@ POLICY = {"contract_version": 2, "book_id": BOOK,
           "semantic_requirements": {"节奏": "短句"}}
 
 
-@pytest.fixture(scope="module", autouse=True)
-def seeded():
-    """临时库里造 v1/v2 混合语料（含 hypothesis 行），用完即清。"""
-    db.init_db()
-    with db.session() as s:
+@pytest.fixture(scope="module")
+def seeded(tmp_path_factory):
+    """独立临时库里造 v1/v2 混合语料，避免别的测试留卡污染 golden。"""
+    path = tmp_path_factory.mktemp("kqv2") / "knowledge.db"
+    engine = create_engine(f"sqlite:///{path.as_posix()}", future=True)
+    @event.listens_for(engine, "connect")
+    def _fk(dbapi_connection, _):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine, autoflush=False,
+                           expire_on_commit=False)
+    with Session() as s:
         _purge(s)
         s.add(Work(id=BOOK, title="口径书", source="file:kqv2"))
         s.flush()                                # Work 先落，免 FK 撞序
@@ -79,10 +89,8 @@ def seeded():
                                value={"v": "短句"}, required=False,
                                predicate_state="unknown"))
         s.commit()
-    yield
-    with db.session() as s:
-        _purge(s)
-        s.commit()
+    yield Session
+    engine.dispose()
 
 
 def _purge(s) -> None:
@@ -138,7 +146,7 @@ def test_eligible_statuses_returns_immutable_gate():
 
 # ── ② 默认行为钉死（golden 字面量手写）─────────────────────────────
 def test_default_call_is_byte_identical_to_golden(seeded):
-    with db.session() as s:
+    with seeded() as s:
         resp = _q(s)
     assert resp["status"] == "matched"
     assert [(e["strategy_key"], e["version"], e["status"],
@@ -161,7 +169,7 @@ def test_default_call_is_byte_identical_to_golden(seeded):
 
 def test_versions_none_equals_omitting_the_kwarg(seeded):
     """显式 versions=None ≡ 不传参（None=全部版本，行为不变）。"""
-    with db.session() as s:
+    with seeded() as s:
         a = _q(s)
         b = _q(s, versions=None)
         c = _q(s, versions={"1", "2", "3"})
@@ -171,7 +179,7 @@ def test_versions_none_equals_omitting_the_kwarg(seeded):
 
 # ── ③ 按版本查：v1/v2 互不越界 ────────────────────────────────────
 def test_version_2_returns_only_v2_rows(seeded):
-    with db.session() as s:
+    with seeded() as s:
         resp = _q(s, versions={"2"})
     assert _keys(resp) == ["V2-OK", "V2-REP"], resp["selected"]
     assert all(e["version"] == 2 for e in resp["selected"])
@@ -180,7 +188,7 @@ def test_version_2_returns_only_v2_rows(seeded):
 
 
 def test_version_1_returns_only_v1_rows(seeded):
-    with db.session() as s:
+    with seeded() as s:
         resp = _q(s, versions={"1"})
     assert _keys(resp) == ["V1-OK"], resp["selected"]
     assert resp["selected"][0]["version"] == 1
@@ -188,7 +196,7 @@ def test_version_1_returns_only_v1_rows(seeded):
 
 
 def test_multi_version_set_is_union_of_buckets(seeded):
-    with db.session() as s:
+    with seeded() as s:
         resp = _q(s, versions={"1", "2"})
     assert _keys(resp) == ["V1-OK", "V2-OK", "V2-REP"], resp["selected"]
     assert "V3-OK" not in _keys(resp), "契约外版本只在显式全集里出现"
@@ -196,7 +204,7 @@ def test_multi_version_set_is_union_of_buckets(seeded):
 
 def test_empty_version_set_selects_nothing(seeded):
     """{} = 点名「零个版本」≠ None（全部版本）——不静默回退成全量。"""
-    with db.session() as s:
+    with seeded() as s:
         resp = _q(s, versions=set())
     assert resp["status"] == "empty" and resp["selected"] == []
     assert resp["budget"]["considered"] == 0
@@ -205,7 +213,7 @@ def test_empty_version_set_selects_nothing(seeded):
 # ── ④ hypothesis 在任何调用下都不出现（默认与按版本查一致）─────────
 def test_hypothesis_rows_never_selected_in_any_call(seeded):
     for vers in (None, {"1"}, {"2"}, {"1", "2"}, {"1", "2", "3"}):
-        with db.session() as s:
+        with seeded() as s:
             resp = _q(s, versions=vers)
         keys = _keys(resp)
         assert "V1-HYP" not in keys and "V2-HYP" not in keys, vers
@@ -220,7 +228,7 @@ def test_hypothesis_rows_never_selected_in_any_call(seeded):
 def test_policy_cannot_smuggle_eligibility_widening(seeded):
     """policy 里塞 versions/eligible_statuses 不生效：门禁只认服务端常量。"""
     pol = {**POLICY, "versions": ["2"], "eligible_statuses": ["hypothesis"]}
-    with db.session() as s:
+    with seeded() as s:
         resp = kq.query_knowledge(pol, s)
     assert _keys(resp) == ["V1-OK", "V2-OK", "V2-REP", "V3-OK"], resp["selected"]
     assert "V1-HYP" not in _keys(resp)
@@ -228,7 +236,7 @@ def test_policy_cannot_smuggle_eligibility_widening(seeded):
 
 # ── ⑤ 收据字段：上层写包/冻结时能区分新旧口径 ──────────────────────
 def test_selected_entries_carry_key_version_status(seeded):
-    with db.session() as s:
+    with seeded() as s:
         resp = _q(s)
     for e in resp["selected"]:
         assert {"strategy_key", "version", "status"} <= set(e), e

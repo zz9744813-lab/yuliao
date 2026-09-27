@@ -15,8 +15,9 @@
 - **离线夹具**（`tmp_path_factory`，常跑）：按真库形态造 8 条 WORK 范围
   hypothesis 策略 + 真实证据实例（两条根作品、跨作品），把 ①~⑤ 全部**逐条
   确定钉死**——真库缺席/换库时回归仍然红得住。
-- **真库**（`resolve_db` 候选，缺则 `pytest.skip`）：同一组断言复跑真库
-  `WK-6e5d2623`，把「库实际长这样」也钉住。
+- **真库**（`resolve_db` 候选，缺则 `pytest.skip`）：只读复跑
+  `WK-6e5d2623`，按当前 status 实况解释两臂；历史 hypothesis 阶段的
+  `selected=0` 断言只属于离线夹具，不能在卡升为 verified 后继续硬套。
 
 另钉：缺 `--book` 时**如实报错退出**（rc=2，绝不猜一个作品）；`--out` 是唯一
 的写；收据 JSON 可序列化且键集稳定；脚本源码里没有写库 API 的调用点。
@@ -198,13 +199,18 @@ def test_side_a_default_gate_selects_nothing(offline_report):
     assert side["budget"]["considered"] == 0      # 候选集在筛子处就空了
 
 
-def test_side_a_default_gate_selects_nothing_on_real_db(real_report):
-    """①真库：同一断言（WK-6e5d2623，status=empty / selected=0）。"""
+def test_side_a_default_gate_tracks_current_real_db(real_report):
+    """真库：默认门的候选数须对应当下可查询的 status/观察行。"""
     side = real_report["side_a_default_gate"]
+    audit = real_report["candidate_filter_audit"]
     assert real_report["policy"] == {"book_id": "WK-6e5d2623"}
-    assert side["status"] == "empty"
-    assert side["n_selected"] == 0
-    assert side["budget"]["considered"] == 0
+    candidates = [r for r in audit["all_rows"]
+                  if r["status_gate"] and r["observation_gate"]]
+    assert side["budget"]["considered"] == len(candidates)
+    assert len(side["selected_keys"]) == side["n_selected"]
+    assert side["status"] == ("matched" if side["n_selected"] else "empty")
+    assert set(side["selected_keys"]) <= {
+        r["strategy_key"] for r in candidates}
 
 
 # ------------------------- ② rejected==0 但 status 门丢弃名单非空（台账漏报）
@@ -231,17 +237,16 @@ def test_side_a_ledger_reports_zero_rejected_while_status_gate_drops_rows(
 
 
 def test_side_a_ledger_gap_on_real_db(real_report):
-    """②真库：台账漏报（rejected=0 vs status 门丢弃 8 条）复跑。"""
-    side = real_report["side_a_default_gate"]
+    """真库：status 门若已无丢弃项，不能继续报历史漏报。"""
     gap = real_report["ledger_gap"]
-    assert side["n_rejected"] == 0
-    assert gap["n_silently_dropped_by_status_gate"] > 0
-    assert gap["silently_dropped_keys"]
-    assert gap["ledger_covers_status_drops"] is False
-    assert gap["verdict"] == "ledger_under_reports"
-    # 真库这批行 status 逐字是 hypothesis（被默认口径挡掉的那一档）
-    rows = real_report["candidate_filter_audit"]["status_gate"]["rows"]
-    assert rows and {r["status"] for r in rows} == {"hypothesis"}
+    gate = real_report["candidate_filter_audit"]["status_gate"]
+    assert gap["n_silently_dropped_by_status_gate"] == gate[
+        "n_silently_dropped"]
+    assert gap["silently_dropped_keys"] == gate["keys"]
+    assert all(r["status_gate"] is False for r in gate["rows"])
+    assert gap["verdict"] == (
+        "ledger_under_reports" if gate["n_silently_dropped"] else
+        "ledger_consistent")
 
 
 # ------------------------------------------- ③ 只读放宽后 selected==8 且有证据
@@ -272,7 +277,7 @@ def test_relaxed_status_gate_selects_every_strategy_with_evidence(
 
 
 def test_relaxed_status_gate_on_real_db(real_report):
-    """③真库：放宽后 selected == 该库真实策略数，每条 evidence_count>0。"""
+    """真库：放宽不得减少选中数；无被挡行时两侧应完全一致。"""
     side = real_report["side_b_status_gate_relaxed"]
     n_rows = real_report["candidate_filter_audit"]["n_rows_total"]
     assert n_rows > 0
@@ -288,8 +293,14 @@ def test_relaxed_status_gate_on_real_db(real_report):
     # 同一份数据、只差 status 门 ⇒ 两侧 snapshot 指纹逐字相同
     assert (side["snapshot_fingerprint"]
             == real_report["side_a_default_gate"]["snapshot_fingerprint"])
-    assert real_report["comparison"]["readings_identical"] is False
-    assert real_report["comparison"]["delta_selected"] == side["n_selected"]
+    assert side["n_selected"] >= real_report["side_a_default_gate"][
+        "n_selected"]
+    assert real_report["comparison"]["delta_selected"] == (
+        side["n_selected"] - real_report["side_a_default_gate"]["n_selected"])
+    if real_report["candidate_filter_audit"]["status_gate"][
+            "n_silently_dropped"] == 0:
+        assert real_report["comparison"]["readings_identical"] is True
+        assert real_report["comparison"]["delta_selected"] == 0
 
 
 # ----------------------------------- ④ 放宽是局部且会恢复（含「确实放宽过」）

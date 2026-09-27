@@ -178,21 +178,19 @@ def test_k3_eligible_same_criteria_as_knowledge_query():
     assert bonly["k3_eligible_instances"] == len(refs_b) == 0
     assert bonly["k3_eligible_root_works"] == \
         len({r["canonical_work"] for r in refs_b}) == 0
-    # refs 确实只含非 benchmark、非镜像重复的那一条：镜像与根同
-    # (canonical, span)，_evidence_for 内部按「先到者进 seen_intervals」
-    # 去重，**行序未排序**（判据链无 ORDER BY）——因此本处只钉「恰好一条、
-    # 根作品正确、被剔的那条以 mirror_dedup 命中」，不钉具体是哪条 id
-    # （钉 id 等于钉 DB 行序，换后端会假红；会审 2026-09-27 指出）。
+    # 镜像与根同 (canonical, span)，现按实例 ID 稳定排序后选代表，
+    # 不再依赖数据库返回行序。
     assert len(refs_m) == 1
     assert {r["canonical_work"] for r in refs_m} == {ids["plain"]}
-    assert refs_m[0]["instance_id"] in {f"SI-PLAIN-{key}", f"SI-MIRR-{key}"}
+    assert refs_m[0]["instance_id"] == min(
+        f"SI-PLAIN-{key}", f"SI-MIRR-{key}")
     _deduped = ({f"SI-PLAIN-{key}", f"SI-MIRR-{key}"}
                 - {refs_m[0]["instance_id"]})
     assert _deduped == {x.split(":")[0] for x in stripped_m
                         if x.endswith(":mirror_dedup")}
     # 剔除链逐条命中（K3 判据生效的直接证据）
     assert f"SI-BENCH-{key}:benchmark_source" in stripped_m
-    assert f"SI-MIRR-{key}:mirror_dedup" in stripped_m
+    assert f"{next(iter(_deduped))}:mirror_dedup" in stripped_m
     assert f"SI-BONLY-{key}:benchmark_source" in stripped_b
 
 
