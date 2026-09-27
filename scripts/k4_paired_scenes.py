@@ -30,8 +30,8 @@ rollback 再记失败，不留半成品会话态。
 不变）；新增**只读预检** `--preflight`（零生成调用、零库写）——查 work_sources
 是否登记该 book_id、并调 K3 只读 query_knowledge 判断 A 臂包是否非空，打印可核对
 JSON，未登记/空包即非零退出。当前 strategy_reviews 缺证据指纹及审查→晋升
-审计绑定，非空包仍按 semantic_review_unverifiable 拒绝真跑，不把两个 PASS 当
-当前证据的充分证明。--live 路径叠加同一道闸（仅 LLM_MODE=real 时生效，
+审计绑定；现在逐张核当前 K2 快照、双席调用收据及晋升/事后放行链接，任一缺失
+仍按 semantic_review_unverifiable 拒绝真跑。--live 路径叠加同一道闸（仅 LLM_MODE=real 时生效，
 mock 不烧钱故跳过以保双闸测试）：过闸才许起真实调用，否则拒绝起跑、零真实调用。
 禁止用未登记 WK-K4 虚构场景把空包对照当真跑证据。
 
@@ -150,9 +150,8 @@ def preflight_world(book_id: str, s) -> dict:
 
     这是闸，不是提示：未登记、A 臂空或当次 selected 策略缺可核验的
     当前证据语义审查收据，调用方（--preflight / --live）均非零退出。
-    旧 strategy_reviews 只有 strategy_id / judge_kind / reviewer_model /
-    verdict，没有证据指纹、策略版本及审查→晋升审计绑定；即使有两个 PASS
-    也不能证明审的是此刻要送进 Writer 的证据，故当前一律 fail-closed。"""
+    旧 strategy_reviews 没有版本、证据指纹及审查→晋升审计绑定，不能放行；
+    新收据链逐张重算当前证据与实际模型身份，最终冻结仍在 Writer 入场重核。"""
     from app import knowledge_query as kq
     from app.models import WorkSource, ExpressionStrategyV2
     from app.knowledge import PACKAGE_CONTRACT_VERSION
@@ -177,19 +176,28 @@ def preflight_world(book_id: str, s) -> dict:
         empty_reason = (f"empty_package:k3_status={k3_status}；全库策略状态"
                         f"分布={dist}，verified={verified}（eligible_statuses "
                         f"只认 verified ⇒ A 臂知识包恒空，无合格证据可进包）")
-    review_status = ("semantic_review_unverifiable" if selected_ids
-                     else "not_applicable")
-    review_reason = (
-        "semantic_review_unverifiable:当次 A 臂 selected 策略缺可核验的"
-        "当前证据语义审查收据；strategy_reviews 未绑定策略版本、证据指纹"
-        "及晋升审计，两个 PASS 亦不能单独放行"
-        if selected_ids else None)
+    review_status = "not_applicable"
+    review_reason = None
+    manifest = []
+    if selected_ids:
+        from app.semantic_admission import approved_selected
+        from app.semantic_approval import ApprovalError
+        from app.promotion_audits import PromotionAuditSchemaError
+        from app.semantic_receipts import ReceiptSchemaError
+        try:
+            manifest = approved_selected(s, selected)
+            review_status = "verified"
+        except (ApprovalError, PromotionAuditSchemaError,
+                ReceiptSchemaError) as exc:
+            review_status = "semantic_review_unverifiable"
+            review_reason = "semantic_review_unverifiable:" + str(exc)
     ready = (registered and k3_status == "matched" and bool(selected_ids)
              and review_status == "verified")
     return {"book_id": book_id, "registered": registered,
             "k3_status": k3_status, "selected_ids": selected_ids,
             "n_techniques": n_techniques, "empty_reason": empty_reason,
             "review_status": review_status, "review_reason": review_reason,
+            "approval_manifest": manifest,
             "ready": ready}
 
 
