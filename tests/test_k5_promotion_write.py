@@ -15,10 +15,9 @@
 - 契约 3（单事务）：`--commit` 恰好改 1 行策略 + 写 1 行审计；两种中途失败
   （审计主键撞键重放 / CAS 旧值失配 → rowcount=0）都**整体回滚**，两表
   内容与回滚前逐字节一致。
-- 契约 4（禁跳级）：`--to verified`（从 hypothesis 起跨 2 级）判 `skip_ladder`
-  且点名被跨过的级、库不变；降级/同级/契约外取值各自判词；反向还有**四级
-  阶梯全走通**的可证伪路径——终态 `status=verified` 且 `scope≠UNCERTAIN`，
-  `KQ.query_knowledge` 从「选不出它」变成**选中它**（K3 合格集 0→≥1 的最小闭环）。
+- 契约 4（禁跳级和语义审查）：`--to verified`（从 hypothesis 起跨 2 级）
+  判 `skip_ladder`；从 replicated 起缺当前证据绑定的双席审查收据则拒绝，
+  库与审计不变，K3 仍选不出它。直接调用写函数也不能绕过。
 - 契约 5（审计行不可变）：字段含 `from_status/to_status/evidence_ref/ts`；
   `verify_promotion_audits()` 只读判 ok=True；DB 层触发器阻断 UPDATE/DELETE；
   **源码 grep 钉死**本件没有 UPDATE/DELETE `promotion_audits` 的写路径；
@@ -407,8 +406,8 @@ def test_top_of_ladder_refused(tmp_path):
     assert v["reason"].startswith("already_top:verified")
 
 
-def test_full_ladder_walk_ends_k3_eligible(tmp_path):
-    """四级阶梯逐级走通 ⇒ 终态被 `KQ.query_knowledge` **选中**（K3 合格集 0→≥1）。"""
+def test_verified_requires_evidence_bound_semantic_review(tmp_path):
+    """观察阶梯可走到 replicated；零语义票不能写 verified 或进入 K3。"""
     db = _promotable(tmp_path)
     s = k5w.open_ro_session(db)
     qr0 = KQ.query_knowledge({"book_id": "WK-A"}, s)
@@ -416,26 +415,53 @@ def test_full_ladder_walk_ends_k3_eligible(tmp_path):
     assert "t-restrain" not in {e["strategy_key"] for e in qr0["selected"]}
 
     steps = [(None, ("hypothesis", "observed", "WORK")),
-             ("replicated", ("hypothesis", "replicated", "AUTHOR")),
-             ("verified", ("verified", "replicated", "GENRE"))]
+             ("replicated", ("hypothesis", "replicated", "AUTHOR"))]
     for n, (tgt, exp) in enumerate(steps, 1):
         assert _commit(db, to=tgt) == k5w.EXIT_OK, tgt
         assert _card_row(db)[:3] == exp, tgt
         assert len(_rows(db, k5w.AUDIT_TABLE)) == n, tgt        # 一步一条审计
-    # 三步三条审计、to_status 恰是阶梯前缀（逐级不跳）
+    before_card = _card_row(db)
+    before_audits = _rows(db, k5w.AUDIT_TABLE)
+    assert _commit(db, to="verified") == k5w.EXIT_REFUSED
+    assert _verdict(db, to="verified")["reason"].startswith(
+        "semantic_review_unverifiable")
+    assert _card_row(db) == before_card
+    assert _rows(db, k5w.AUDIT_TABLE) == before_audits
+    # 只写了 observed/replicated 两条审计；未伪造第三条语义批准。
     assert [r[0] for r in _rows(db, k5w.AUDIT_TABLE, "to_status")] == \
-        ["observed", "replicated", "verified"]
+        ["observed", "replicated"]
 
     integ = k5w.verify_promotion_audits(db)
-    assert integ["ok"] is True and integ["n_audits"] == 3
-    assert integ["n_strategies_verified"] == 1
+    assert integ["ok"] is True and integ["n_audits"] == 2
+    assert integ["n_strategies_verified"] == 0
     s = k5w.open_ro_session(db)
     qr = KQ.query_knowledge({"book_id": "WK-A"}, s)
     s.close()
-    assert {e["strategy_key"] for e in qr["selected"]} == {"t-restrain"}
-    assert qr["status"] == "matched"
-    assert qr["selected"][0]["status"] == "verified"
-    assert qr["selected"][0]["scope"] != "UNCERTAIN"
+    assert "t-restrain" not in {e["strategy_key"] for e in qr["selected"]}
+
+
+def test_direct_verified_write_refused_before_opening_database(tmp_path,
+                                                            monkeypatch):
+    """伪造判词直调 commit_promotion，也不能打开可写连接或落审计。"""
+    db = _promotable(tmp_path, status="hypothesis", obs="replicated",
+                     scope="AUTHOR", scope_ids=["AU-1"])
+    original = _digest(db)
+
+    def no_write_connection(_):
+        raise AssertionError("未过语义审查不应打开可写连接")
+
+    monkeypatch.setattr(k5w, "open_write_connection", no_write_connection)
+    with pytest.raises(k5w.PromotionGuardError,
+                       match="semantic_review_unverifiable"):
+        k5w.commit_promotion(db, {"plan": {
+            "to_status": "verified", "status_column_to": "verified",
+            "observation_to": "replicated"}})
+    with pytest.raises(k5w.PromotionGuardError,
+                       match="target_columns_mismatch"):
+        k5w.commit_promotion(db, {"plan": {
+            "to_status": "observed", "status_column_to": "verified",
+            "observation_to": "replicated"}})
+    assert _digest(db) == original
 
 
 # ============================================== 契约 5：审计不可变

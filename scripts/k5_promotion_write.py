@@ -35,7 +35,12 @@
 |---|---|
 | `observed` | 净剩证据 ≥1（`_evidence_for`）且其中 ≥1 条 `src_ok=true` 且 ≥1 条已按新口径复审 |
 | `replicated` | 上一条 + 过闸证据的**独立根作品** ≥2（§4.3「独立来源复现」） |
-| `verified` | 上一条 + 当前已在 `replicated` 级（相邻性保证）+ 事务后 `scope` 非 `UNCERTAIN` |
+| `verified` | 当前暂时 NO-GO：缺与本版本、当前证据和拟准入范围绑定的两席独立语义审查收据；该链落地前 `evaluate` 与 `commit_promotion` 均拒绝 |
+
+2026-09-27 补闸：旧 `strategy_reviews` 自由判词和实例的 `reviewer_version`
+不能证明两席审的是本轮证据。`verified` 在新语义收据链接入同一写事务前保持拒绝，
+旧晋升审计和已有 8 张 `verified` 卡不回滚、不追认。详见
+`docs/K2_语义审查收据链_20260927.md`。
 
 **gate2/gate4/条件管道不作晋升前置**（如实声明的取舍）：`gate4_scope` 与
 `gate_condition` 的真假依赖**查询侧 policy**（`book_id`/`semantic_requirements`），
@@ -341,6 +346,10 @@ def evaluate(s, st: ExpressionStrategyV2, policy: dict, requested: str | None,
                       f"（跨 {ti - li} 级，禁跳级）", list(LADDER[li + 1:ti]))
     target = LADDER[ti]
     v["target"] = target
+    if target == "verified":
+        # 旧 strategy_reviews 没有版本、当前证据指纹和晋升审计绑定。
+        # 新收据链落地前，不能把 reviewer_version 或 CLI 签名当双席语义批准。
+        return refuse("semantic_review_unverifiable:缺当前证据绑定的双席审查收据")
 
     # ── 硬契约 2：证据为空即拒（判词字面量取自库/解释器）───────────
     if ev["evidence_count"] == 0:
@@ -409,6 +418,15 @@ def _now_iso() -> str:
 def commit_promotion(db_path: Path, verdict: dict) -> dict:
     """一次事务：CAS UPDATE 1 行 + INSERT 1 行审计；任一步异常整体回滚。"""
     plan, st = verdict["plan"], verdict
+    target = plan.get("to_status")
+    if ((plan.get("status_column_to"), plan.get("observation_to"))
+            != LADDER_COLUMNS.get(target)):
+        raise PromotionGuardError("target_columns_mismatch:晋升级与目标列不一致")
+    if target == "verified":
+        # 直接调用写函数也不得绕过 evaluate() 的临时 NO-GO；在打开可写
+        # 连接之前拒绝，避免连审计 DDL 都写进未获审查的库。
+        raise PromotionGuardError(
+            "semantic_review_unverifiable:缺当前证据绑定的双席审查收据")
     con = open_write_connection(db_path)
     ts = _now_iso()
     try:
