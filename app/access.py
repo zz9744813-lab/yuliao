@@ -191,18 +191,27 @@ def trusted_proxies() -> tuple[str, ...]:
 def _parse_trusted_proxies() -> tuple[tuple[tuple[str, object], ...], tuple[str, ...]]:
     """把声明条目解析成 `(合法条目, 被忽略的非法条目原文)`。
 
-    合法条目形如 `(原文, ip_network)`（单 IP 归一为 /32，掩码补齐也接受）。
-    非法条目**剔除**而非放行；单独把它们的原文带回，是为了让 `self_check` 能
-    如实喊出「声明 N 条 / 合法 M 条 / 忽略 K 条 + 具体哪几条」——拼错的 IP 被
-    静默忽略正是要消灭的那类「看起来配了其实没生效」。
+    合法条目形如 `(原文, ip_network)`（单 IP 归一为 /32；**`strict=True`**，
+    主机位被置位的写法如 `127.0.0.1/0` 视为非法——见下）。
+    非法条目**剔除**而非放行；单独把它们的**原文 + 原因**带回，是为了让
+    `self_check` 能如实喊出「声明 N 条 / 合法 M 条 / 忽略 K 条 + 具体哪几条及
+    原因」——拼错或被归一放大的 IP 被静默忽略，正是要消灭的那类「看起来配了
+    其实没生效」。
     """
     good: list[tuple[str, object]] = []
     bad: list[str] = []
     for entry in trusted_proxies():
         try:
-            good.append((entry, ipaddress.ip_network(entry, strict=False)))
-        except ValueError:
-            bad.append(entry)
+            net = ipaddress.ip_network(entry, strict=True)
+        except ValueError as e:
+            # strict=True 拒绝「主机位被置位」的写法（如 `127.0.0.1/0`）。
+            # 2026-09-27 会审（qwen 席）实测：旧写法 strict=False 会把
+            # `127.0.0.1/0` **归一成 `0.0.0.0/0`**（匹配全部 IPv4），与本函数
+            # 「容错方向只能是更严」的注释自相矛盾——一条手滑的条目就能把整个
+            # v4 空间拉进白名单。改 strict 后这类条目落 bad，只被剔除、不放行。
+            bad.append(f"{entry}（{e}）")
+        else:
+            good.append((entry, net))
     return tuple(good), tuple(bad)
 
 

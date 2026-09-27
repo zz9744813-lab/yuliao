@@ -1139,10 +1139,13 @@ function escHtml(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/`/g,'&#96;'); }
 
 // escAttr — **只**用于字符串拼接 HTML 里的双引号属性值位置（value="…" / data-*="…"）。
-// 与 escHtml 的差别：在文本口径（& < >）和引号口径（" ' `）之上再转义反斜杠为 &#92;
-// （不带引号的属性 / 老解析器上下文里 \ 是转义引导符，属性位不需要反转义字符但按最严口径收）。
+// 与 escHtml 的差别：在文本口径（& < >）和引号口径（" ' `）之上再转义反斜杠为 &#92;。
+// **如实说明效果**：在带引号属性位，实体解码会把 &#92; 还原回 \，所以这一条
+// **不改变** DOM 里最终拿到的值（btn.dataset.* / option.value 仍是原文 \）——
+// 引号由 escHtml 负责，反斜杠转义在这里是**防御性冗余**，不是「更严的安全边界」。
 // 它**不能**救类名 / 样式 / 事件处理器上下文——那里问题不是引号而是 token 本身，
-// 任意字符串必须走 escClass 白名单（见 showExp）或 DOM className/textContent 赋值。
+// 任意字符串必须走固定 token / escClass 白名单（见 verdictChip、showExp）
+// 或 DOM className / textContent 赋值。
 function escAttr(s){ return escHtml(s).replace(/\\/g,'&#92;'); }
 
 function buildMarkedHtml(text, list){
@@ -1352,7 +1355,7 @@ function verdictChip(w){
   const hit = m[w];
   const t = hit ? hit[0] : (w || '—');
   const c = hit ? hit[1] : 'chip';
-  return `<span class="${c}">${esc(t)}</span>`;
+  return `<span class="${c}">${escHtml(t)}</span>`;
 }
 async function loadDoneList(){
   try{

@@ -271,3 +271,44 @@ def test_access_route_reads_real_request(monkeypatch):
     assert seen["route"] == "loopback_direct"
     c.get("/", headers={"CF-Connecting-IP": "203.0.113.9"})
     assert seen["route"] == "untrusted_proxy"
+
+
+# ── 2026-09-27 会审（qwen 席）补钉：strict 与跨族 ────────────────────────
+
+
+def test_host_bits_entry_is_rejected_not_widened(monkeypatch, capsys):
+    """`127.0.0.1/0` 这类「主机位被置位」的条目**必须被判非法**，绝不归一放大。
+
+    会审实测（qwen 席）：旧写法 `ip_network(entry, strict=False)` 会把
+    `127.0.0.1/0` 归一成 `0.0.0.0/0`（匹配**全部 IPv4**），一条手滑的条目就能
+    把整个 v4 空间拉进白名单，与「容错方向只能是更严」的注释自相矛盾。
+    """
+    monkeypatch.setenv(A._TRUSTED_PROXIES_ENV, "127.0.0.1/0")
+    good, bad = A._parse_trusted_proxies()
+    assert good == (), "主机位被置位的条目不得进入白名单"
+    assert len(bad) == 1 and "127.0.0.1/0" in bad[0]
+    # 归一放大若发生，任何 v4 地址都会命中——这里逐点钉死不放行
+    for host in ("127.0.0.1", "10.1.2.3", "203.0.113.9"):
+        assert A.peer_is_trusted_proxy(host) is False
+    # 自检必须点名该条目被忽略（不是静默）
+    A.self_check()
+    out = capsys.readouterr().out
+    assert "127.0.0.1/0" in out
+
+
+@pytest.mark.parametrize("mixed", ["127.0.0.1,::1/128", "::1/128,127.0.0.1"])
+def test_cross_family_whitelist_does_not_raise(monkeypatch, mixed):
+    """白名单混填 v4+v6 时，跨族包含判定不得抛异常（否则中间件对全站 500）。
+
+    会审点名：`IPv4Address in IPv6Network` 的跨族行为需钉一条回归。
+    本 Python 上实测返回 False（不抛），这里把该行为固定下来。
+    """
+    monkeypatch.setenv(A._TRUSTED_PROXIES_ENV, mixed)
+    # 不抛：逐族各查一遍，且只有本族条目命中
+    assert A.peer_is_trusted_proxy("127.0.0.1") is True
+    assert A.peer_is_trusted_proxy("::1") is True
+    # 跨族不得因异常而误判为可信
+    monkeypatch.setenv(A._TRUSTED_PROXIES_ENV, "::1/128")
+    assert A.peer_is_trusted_proxy("127.0.0.1") is False
+    monkeypatch.setenv(A._TRUSTED_PROXIES_ENV, "127.0.0.0/8")
+    assert A.peer_is_trusted_proxy("::1") is False
