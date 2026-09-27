@@ -88,7 +88,7 @@ def freeze_snapshot(engine: Engine, strategy_id: str, strategy_version: int,
                 "created_at": created_at,
             })
             conn.commit()
-        except BaseException:
+        except Exception:
             conn.rollback()
             raise
     return {"snapshot_id": snapshot_id, "strategy_id": strategy_id,
@@ -105,6 +105,10 @@ def verify_current_snapshot(session: Session, snapshot_id: str,
     The caller supplies the *expected* scope claim (current card for K4,
     proposed target for K5); a stored claim cannot authorize itself.
     """
+    # A SQL text query need not flush pending ORM edits. A caller holding
+    # modified evidence must commit it separately before asking for admission.
+    if session.new or session.dirty or session.deleted:
+        raise SnapshotError("snapshot_verify_requires_clean_session")
     require_semantic_schema(session.connection())
     row = session.execute(text(
         "SELECT * FROM semantic_review_snapshots WHERE snapshot_id=:sid"),
@@ -135,8 +139,9 @@ def verify_current_snapshot(session: Session, snapshot_id: str,
     if (row["replicated_audit_id"] != current["replicated_audit_id"] or
             row["content_sha256"] != current["content_sha256"] or
             row["review_input_sha256"] != current["review_input_sha256"] or
-            payload != current["payload"] or
-            review_input != current["review_input"]):
+            row["payload_json"] != canonical_json(current["payload"]) or
+            row["review_input_json"] !=
+            canonical_json(current["review_input"])):
         raise SnapshotError("snapshot_stale")
     if (_utc_time(row["created_at"]) <
             _utc_time(payload["evidence"]["replicated_audit"]["ts"])):

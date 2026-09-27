@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from threading import Event, Thread
 
 import pytest
 from sqlalchemy import create_engine, event, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import knowledge as K
@@ -17,14 +19,17 @@ from app.models import (ExpressionStrategyV2, Segment, StrategyCondition,
 from app.semantic_review import SnapshotError, build_snapshot
 from app.semantic_review_store import freeze_snapshot, verify_current_snapshot
 from app.semantic_receipts import ReceiptSchemaError, ensure_semantic_schema
+import app.semantic_review_store as snapshot_store
 
 TEXT = "夜里起了风，他坐在桌前。"
 CLAIM = {"scope_to": "WORK", "scope_ids": ["WK-A"],
          "scope_basis": "两条已登记证据"}
 
 
-def _seed(reverse=False):
-    engine = create_engine("sqlite://", future=True)
+def _seed(reverse=False, db_path=None):
+    url = "sqlite://" if db_path is None else f"sqlite:///{db_path.as_posix()}"
+    engine = create_engine(url, future=True,
+                           connect_args=({"timeout": 0.2} if db_path else {}))
     @event.listens_for(engine, "connect")
     def _foreign_keys(dbapi_connection, _):
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
@@ -162,6 +167,9 @@ def test_saved_round_rejects_changed_evidence_or_scope():
                                         changed_claim)
             check.get(ExpressionStrategyV2,
                       "ESV2-S").abstract_operation += " 现在改写"
+            with pytest.raises(SnapshotError,
+                               match="snapshot_verify_requires_clean_session"):
+                verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)
             check.flush()
             with pytest.raises(SnapshotError, match="snapshot_stale"):
                 verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)
@@ -169,6 +177,97 @@ def test_saved_round_rejects_changed_evidence_or_scope():
         with Session(engine) as check:
             assert verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)[
                 "snapshot_id"] == frozen["snapshot_id"]
+    finally:
+        seed_session.close(); engine.dispose()
+
+
+def test_recheck_compares_canonical_json_not_python_container_types(monkeypatch):
+    engine, seed_session = _seed()
+    try:
+        seed_session.close()
+        ensure_semantic_schema(engine)
+        frozen = freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        original = snapshot_store.build_snapshot
+
+        def tuple_equivalent(*args):
+            result = original(*args)
+            result["payload"]["scope_claim"]["scope_ids"] = tuple(
+                result["payload"]["scope_claim"]["scope_ids"])
+            return result
+
+        monkeypatch.setattr(snapshot_store, "build_snapshot", tuple_equivalent)
+        with Session(engine) as check:
+            assert verify_current_snapshot(check, frozen["snapshot_id"], CLAIM)[
+                "snapshot_id"] == frozen["snapshot_id"]
+    finally:
+        seed_session.close(); engine.dispose()
+
+
+def test_freeze_holds_file_database_writer_reservation(tmp_path, monkeypatch):
+    engine, seed_session = _seed(db_path=tmp_path / "review.db")
+    entered, release = Event(), Event()
+    results, errors = [], []
+    original = snapshot_store.build_snapshot
+
+    def held_snapshot(*args):
+        entered.set()
+        if not release.wait(5):
+            raise RuntimeError("test_release_timeout")
+        return original(*args)
+
+    try:
+        seed_session.close()
+        ensure_semantic_schema(engine)
+        monkeypatch.setattr(snapshot_store, "build_snapshot", held_snapshot)
+
+        def freeze():
+            try:
+                results.append(freeze_snapshot(engine, "ESV2-S", 1, CLAIM))
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = Thread(target=freeze, daemon=True)
+        worker.start()
+        assert entered.wait(3)
+        with engine.connect() as conn:
+            with pytest.raises(OperationalError, match="locked"):
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+            conn.rollback()
+        release.set()
+        worker.join(10)
+        assert not worker.is_alive()
+        assert not errors
+        assert len(results) == 1
+    finally:
+        release.set()
+        seed_session.close(); engine.dispose()
+
+
+def test_freeze_refuses_future_anchor_or_bad_digest(monkeypatch):
+    engine, seed_session = _seed()
+    try:
+        seed_session.close()
+        ensure_semantic_schema(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "UPDATE promotion_audits SET ts='2099-01-01T00:00:00Z'")
+        with pytest.raises(SnapshotError, match="snapshot_before_replicated_audit"):
+            freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(
+                "UPDATE promotion_audits SET ts='2026-09-27T00:00:00Z'")
+        original = snapshot_store.build_snapshot
+
+        def corrupted(*args):
+            result = original(*args)
+            return {**result, "content_sha256": "0" * 64}
+
+        monkeypatch.setattr(snapshot_store, "build_snapshot", corrupted)
+        with pytest.raises(SnapshotError, match="snapshot_digest_mismatch"):
+            freeze_snapshot(engine, "ESV2-S", 1, CLAIM)
+        with Session(engine) as check:
+            assert check.execute(text(
+                "SELECT COUNT(*) FROM semantic_review_snapshots")).scalar() == 0
     finally:
         seed_session.close(); engine.dispose()
 
