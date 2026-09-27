@@ -27,11 +27,30 @@ AUDIT_IMMUTABLE_DDL = (
 )
 
 
+class PromotionAuditSchemaError(RuntimeError):
+    """Existing audit DDL or immutability trigger has drifted."""
+
+
+def _normalized(sql: str) -> str:
+    # sqlite_master removes IF NOT EXISTS and the final statement semicolon.
+    return " ".join(sql.strip().rstrip(";").replace(
+        " IF NOT EXISTS", "").split()).lower()
+
+
 def ensure_promotion_audit_schema(engine: Engine) -> None:
     """Only create a missing audit table/triggers; never rewrite existing rows."""
     if engine.url.get_backend_name() != "sqlite":
-        raise RuntimeError("promotion_audits_require_sqlite")
+        raise PromotionAuditSchemaError("promotion_audits_require_sqlite")
     with engine.begin() as conn:
         conn.exec_driver_sql(AUDIT_DDL)
         for ddl in AUDIT_IMMUTABLE_DDL:
             conn.exec_driver_sql(ddl)
+        objects = [("table", AUDIT_TABLE, AUDIT_DDL)]
+        objects.extend(("trigger", ddl.split()[5], ddl)
+                       for ddl in AUDIT_IMMUTABLE_DDL)
+        for kind, name, expected in objects:
+            stored = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type=? AND name=?",
+                (kind, name)).scalar()
+            if stored is None or _normalized(stored) != _normalized(expected):
+                raise PromotionAuditSchemaError(f"{kind}_schema_drift:{name}")

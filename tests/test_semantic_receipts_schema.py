@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 from app import db
 from app.db import Base
 from app.models import ExpressionStrategyV2
-from app.promotion_audits import AUDIT_COLUMNS, AUDIT_DDL
+from app.promotion_audits import (AUDIT_COLUMNS, AUDIT_DDL,
+                                  PromotionAuditSchemaError,
+                                  ensure_promotion_audit_schema)
 from app.semantic_receipts import ReceiptSchemaError, ensure_semantic_schema
 
 HASH_A = "a" * 64
@@ -118,6 +120,29 @@ def test_add_only_receipts_keep_old_audits_and_reinitialize_idempotently():
                 "SELECT COUNT(*) FROM semantic_approval_links").scalar() == 1
             assert con.exec_driver_sql(
                 "SELECT * FROM promotion_audits ORDER BY audit_id").all() == before
+    finally:
+        engine.dispose()
+
+
+def test_existing_promotion_audit_rows_survive_reinit_and_weak_trigger_is_rejected():
+    engine = _seed()
+    try:
+        with engine.connect() as con:
+            before = con.exec_driver_sql(
+                "SELECT * FROM promotion_audits ORDER BY audit_id").all()
+        ensure_promotion_audit_schema(engine)
+        ensure_promotion_audit_schema(engine)
+        with engine.connect() as con:
+            assert con.exec_driver_sql(
+                "SELECT * FROM promotion_audits ORDER BY audit_id").all() == before
+        with engine.begin() as con:
+            con.exec_driver_sql("DROP TRIGGER promotion_audits_no_update")
+            con.exec_driver_sql(
+                "CREATE TRIGGER promotion_audits_no_update "
+                "BEFORE UPDATE ON promotion_audits BEGIN SELECT 1; END")
+        with pytest.raises(PromotionAuditSchemaError,
+                           match="trigger_schema_drift:promotion_audits_no_update"):
+            ensure_promotion_audit_schema(engine)
     finally:
         engine.dispose()
 
