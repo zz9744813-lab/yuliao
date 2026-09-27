@@ -44,7 +44,8 @@ def _integrity_value(value: str | None):
 
 def _audit_time(value: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
     except (AttributeError, TypeError, ValueError) as exc:
         raise SnapshotError("replicated_audit_invalid") from exc
     if parsed.tzinfo is None:
@@ -130,8 +131,6 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
                   if i.strategy_version != strategy_version]
     if mismatched:
         raise SnapshotError("strategy_version_mismatch:" + ",".join(mismatched))
-    if not set(anchor_refs) <= {i.id for i in all_instances}:
-        raise SnapshotError("replicated_audit_evidence_missing")
     seg_ids = sorted({i.segment_id for i in all_instances})
     work_ids = sorted({i.work_id for i in all_instances})
     segments = {x.id: x for x in (s.query(Segment)
@@ -160,6 +159,7 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
             "evidence_text_sha256": _text_digest(i.evidence_text),
             "observed_content_sha256": _text_digest(i.observed_content),
             "conditions_observed": i.conditions_observed,
+            # NULL means no effect reference; it must differ from an empty ref.
             "effect_ref_sha256": (None if i.effect_ref is None
                                   else _text_digest(i.effect_ref)),
             "extractor_model": i.extractor_model,
@@ -229,9 +229,15 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         s, strategy_id, query_policy)
     facts = KP.evidence_facts(s, strategy_id, query_policy)
     by_id = {i.id: i for i in all_instances}
+    if not set(anchor_refs) <= set(by_id):
+        raise SnapshotError("replicated_audit_evidence_missing")
     expected_facts = {"evidence_count", "instance_ids", "stripped",
                       "src_ok_ids", "reviewed_ids", "roots", "works"}
     if set(facts) != expected_facts or admitted_count != facts["evidence_count"]:
+        raise SnapshotError("evidence_facts_contract_changed")
+    classified = KP.GE.classify_stripped(stripped)["by_category"]
+    if (not isinstance(facts["stripped"], dict) or
+            facts["stripped"] != classified):
         raise SnapshotError("evidence_facts_contract_changed")
     if (not facts["reviewed_ids"] or
             not set(facts["reviewed_ids"]) <= set(by_id) or
@@ -278,7 +284,7 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         "facts": {
             "evidence_count": facts["evidence_count"],
             "instance_ids": sorted(facts["instance_ids"]),
-            "stripped": facts["stripped"],
+            "stripped": dict(sorted(facts["stripped"].items())),
             "src_ok_ids": sorted(facts["src_ok_ids"]),
             "reviewed_ids": sorted(facts["reviewed_ids"]),
             "roots": sorted(facts["roots"]),

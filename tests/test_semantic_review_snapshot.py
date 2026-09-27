@@ -30,7 +30,8 @@ def _seed(reverse=False):
             "strategy_id TEXT, strategy_version INTEGER, to_status TEXT, "
             "evidence_ref TEXT, ts TEXT)"))
         con.execute(text(
-            "INSERT INTO promotion_audits VALUES "
+            "INSERT INTO promotion_audits "
+            "(audit_id,strategy_id,strategy_version,to_status,evidence_ref,ts) VALUES "
             "('AUD-R', 'ESV2-S', 1, 'replicated', '[\"SI-A\",\"SI-Z\"]', "
             "'2026-09-27T00:00:00Z')"))
     Session = sessionmaker(bind=engine, autoflush=False)
@@ -228,13 +229,15 @@ def test_anchor_uses_chronological_utc_order_not_text_order():
     engine, s = _seed()
     try:
         s.execute(text(
-            "INSERT INTO promotion_audits VALUES "
+            "INSERT INTO promotion_audits "
+            "(audit_id,strategy_id,strategy_version,to_status,evidence_ref,ts) VALUES "
             "('AUD-EARLIER', 'ESV2-S', 1, 'replicated', "
             "'[\"SI-A\"]', '2026-09-27T01:00:00+08:00')"))
         first = build_snapshot(s, "ESV2-S", 1, CLAIM)
         assert first["replicated_audit_id"] == "AUD-R"
         s.execute(text(
-            "INSERT INTO promotion_audits VALUES "
+            "INSERT INTO promotion_audits "
+            "(audit_id,strategy_id,strategy_version,to_status,evidence_ref,ts) VALUES "
             "('AUD-LATER', 'ESV2-S', 1, 'replicated', "
             "'[\"SI-A\"]', '2026-09-27T09:00:00+08:00')"))
         second = build_snapshot(s, "ESV2-S", 1, CLAIM)
@@ -268,5 +271,65 @@ def test_null_and_empty_effect_reference_have_different_digests():
         s.get(StrategyInstance, "SI-A").effect_ref = ""
         s.flush()
         assert build_snapshot(s, "ESV2-S", 1, CLAIM)["content_sha256"] != before
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_missing_anchor_instance_and_unbacked_interval_are_typed_refusals():
+    engine, s = _seed()
+    try:
+        s.execute(text("UPDATE promotion_audits SET evidence_ref='[\"MISSING\"]'"))
+        with pytest.raises(SnapshotError, match="replicated_audit_evidence_missing"):
+            build_snapshot(s, "ESV2-S", 1, CLAIM)
+        s.add(StrategyInstance(
+            id="SI-NEG", strategy_id="ESV2-S", strategy_version=1,
+            work_id="WK-A", segment_id="SEG-A", text_version="corpus-v1",
+            span_start=6, span_end=11, evidence_text=TEXT[6:11],
+            evidence_sha256=K.evidence_sha256(TEXT[6:11]),
+            conditions_observed={}, observed_content="反例",
+            extractor_model="seed", status="rejected"))
+        s.flush()
+        s.execute(text("UPDATE promotion_audits SET evidence_ref='[\"SI-NEG\"]'"))
+        with pytest.raises(SnapshotError, match="replicated_audit_evidence_unbacked"):
+            build_snapshot(s, "ESV2-S", 1, CLAIM)
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_historical_bad_audit_timestamp_blocks_newer_valid_anchor():
+    engine, s = _seed()
+    try:
+        s.execute(text(
+            "INSERT INTO promotion_audits "
+            "(audit_id,strategy_id,strategy_version,to_status,evidence_ref,ts) VALUES "
+            "('AUD-BAD', 'ESV2-S', 1, 'replicated', '[\"SI-A\"]', 'not-a-time')"))
+        with pytest.raises(SnapshotError, match="replicated_audit_invalid"):
+            build_snapshot(s, "ESV2-S", 1, CLAIM)
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_evidence_facts_schema_drift_is_not_silently_hashed(monkeypatch):
+    from scripts import k5_promotion_write as KP
+    engine, s = _seed()
+    original = KP.evidence_facts
+    try:
+        monkeypatch.setattr(KP, "evidence_facts", lambda *args: {
+            **original(*args), "unversioned_new_field": ["x"]})
+        with pytest.raises(SnapshotError, match="evidence_facts_contract_changed"):
+            build_snapshot(s, "ESV2-S", 1, CLAIM)
+    finally:
+        s.close(); engine.dispose()
+
+
+def test_missing_integrity_is_recorded_without_claiming_src_ok():
+    engine, s = _seed()
+    try:
+        s.get(Segment, "SEG-M").integrity = None
+        s.flush()
+        snapshot = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        row = next(x for x in snapshot["payload"]["evidence"]["segments"]
+                   if x["id"] == "SEG-M")
+        assert row["src_ok"] is False
     finally:
         s.close(); engine.dispose()
