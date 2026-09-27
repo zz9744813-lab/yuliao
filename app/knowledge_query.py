@@ -249,13 +249,22 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     并集封底，调用方只可附加）、excluded_uses（并集附加）、
     allowed_text_versions（服务端交集封顶，调用方只可收窄）、
     license 禁用用途；镜像按 canonical 根作品聚合去重
-    ——evidence_count=唯一 (根作品, span) 区间数，重跑不加置信度。"""
+    ——evidence_count=唯一 (根作品, span) 区间数，重跑不加置信度。
+    同 ID 的错版实例只记剔除理由，不得替新版策略作证；按实例 ID 排序后
+    去重，保证镜像代表行和剔除清单不受 SQLite 返回顺序影响。"""
+    card_version = (s.query(ExpressionStrategyV2.version)
+                    .filter(ExpressionStrategyV2.id == strategy_id).scalar())
+    if card_version is None:
+        return [], 0, [f"{strategy_id}:strategy_not_found"]
     instances = (s.query(StrategyInstance)
                  .filter(StrategyInstance.strategy_id == strategy_id,
                          StrategyInstance.status.in_(
-                             ELIGIBLE_INSTANCE_STATUS)).all())
-    seg_ids = {i.segment_id for i in instances}
-    work_ids = {i.work_id for i in instances}
+                             ELIGIBLE_INSTANCE_STATUS))
+                 .order_by(StrategyInstance.id).all())
+    current_instances = [i for i in instances
+                         if i.strategy_version == card_version]
+    seg_ids = {i.segment_id for i in current_instances}
+    work_ids = {i.work_id for i in current_instances}
     seg_role = {sid: role for sid, role in s.query(Segment.id, Segment.role)
                 .filter(Segment.id.in_(seg_ids)).all()} if seg_ids else {}
     reg = {r.work_id: r for r in s.query(WorkSource)
@@ -281,6 +290,10 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
     intervals: set[tuple[str, int, int]] = set()
     refs: list[dict] = []
     for ins in instances:
+        if ins.strategy_version != card_version:
+            stripped.append(f"{ins.id}:strategy_version_mismatch:"
+                            f"{ins.strategy_version}!={card_version}")
+            continue
         r = reg.get(ins.work_id)
         if r is None:
             stripped.append(f"{ins.id}:no_registry"); continue
@@ -369,17 +382,24 @@ def _scope_disclosure(strategy: ExpressionStrategyV2, refs: list[dict],
             "unbacked_ids": unbacked}
 
 
-def _condition_pipeline(s, strategy_id: int, requirements: dict
+def _condition_pipeline(s, strategy_id: str, requirements: dict
                         ) -> tuple[str, dict, list[dict]]:
     """②必需条件/bad_when 排除（固定顺序第二步）。
 
     返回 (拒绝理由|None, 分量, 不确定项)。必需 unknown 不得强行采用
     （excluded_required_unknown）；neutral_when 不计正支持；good_when
-    true 才计分量。分量只有整数计数——没有编造的成功率。"""
+    true 才计分量。仅本策略当前版本的条件可参与判定，按条件 ID 排序以
+    固定不确定项和短路排除顺序。分量只有整数计数——没有编造的成功率。"""
     comps = {"required_matches": 0, "good_when_matches": 0}
     uncertain: list[dict] = []
+    card_version = (s.query(ExpressionStrategyV2.version)
+                    .filter(ExpressionStrategyV2.id == strategy_id).scalar())
+    if card_version is None:
+        return "excluded_strategy_not_found", comps, uncertain
     for c in (s.query(StrategyCondition)
-              .filter_by(strategy_id=strategy_id).all()):
+              .filter_by(strategy_id=strategy_id,
+                         strategy_version=card_version)
+              .order_by(StrategyCondition.id).all()):
         state = evaluate_predicate(c, requirements)
         if c.kind == "bad_when":
             if state == "true":

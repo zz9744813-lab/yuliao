@@ -31,15 +31,16 @@ def _strategy(s, sid, key, version=1, *, status="verified",
                                observation_status=observation, effect_status=effect))
 
 
-def _condition(s, sid, kind, dim, value, required=False, state="unknown"):
-    s.add(StrategyCondition(strategy_id=sid, strategy_version=1, kind=kind,
+def _condition(s, sid, kind, dim, value, required=False, state="unknown",
+               version=1):
+    s.add(StrategyCondition(strategy_id=sid, strategy_version=version, kind=kind,
                             dimension=dim, operator="eq", value={"v": value},
                             required=required, predicate_state=state))
 
 
 def _instance(s, sid, iid, work, seg, span=(0, 10), tv="corpus-v1",
-              status="verified"):
-    s.add(StrategyInstance(id=iid, strategy_id=sid, strategy_version=1,
+              status="verified", version=1):
+    s.add(StrategyInstance(id=iid, strategy_id=sid, strategy_version=version,
                            work_id=work, segment_id=seg, frame_id=None,
                            text_version=tv, span_start=span[0], span_end=span[1],
                            evidence_text=TXT[span[0]:span[1]],
@@ -129,8 +130,8 @@ def seed_knowledge():
         _instance(s, "ESV2-A", "SI-A2", "WK-α", seg_a, (12, 22))
         _strategy(s, "ESV2-A2", "A-短句加速", version=2,
                   scope_ids=["WK-α", "WK-ALPHA"])
-        _condition(s, "ESV2-A2", "good_when", "节奏", "短句")
-        _instance(s, "ESV2-A2", "SI-A3", "WK-α", seg_a, (0, 10))
+        _condition(s, "ESV2-A2", "good_when", "节奏", "短句", version=2)
+        _instance(s, "ESV2-A2", "SI-A3", "WK-α", seg_a, (0, 10), version=2)
         _strategy(s, "ESV2-B", "B-作者习惯", scope="AUTHOR",
                   scope_ids=["AUTH-1"])
         _condition(s, "ESV2-B", "good_when", "节奏", "长句")

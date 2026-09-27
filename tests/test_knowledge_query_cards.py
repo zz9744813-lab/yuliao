@@ -315,7 +315,7 @@ def test_caller_cannot_widen_text_versions_beyond_default(seeded):
     写进 allowed_text_versions 也进不了合格集（交集封顶于服务端默认）。"""
     from app.models import StrategyInstance
     ins = StrategyInstance(
-        id="SI-TV9", strategy_id="ESV2-A", strategy_version=2,
+        id="SI-TV9", strategy_id="ESV2-A", strategy_version=1,
         work_id="WK-α", segment_id="SEG-tv9", frame_id=None,
         text_version="corpus-v9", span_start=30, span_end=40,
         evidence_text="x", evidence_sha256="0" * 64,
@@ -340,6 +340,74 @@ def test_caller_cannot_widen_text_versions_beyond_default(seeded):
             s.query(StrategyInstance).filter_by(id="SI-TV9").delete(
                 synchronize_session=False)
             s.commit()
+
+
+def test_evidence_rejects_instances_from_another_strategy_version(seeded):
+    """旧版实例即使来源、文本版本、状态都合格，也不能为新版卡增证。"""
+    from app.models import StrategyInstance
+    with db.session() as s:
+        sample = s.get(StrategyInstance, "SI-A1")
+        s.add(StrategyInstance(
+            id="SI-A0-WRONG", strategy_id="ESV2-A", strategy_version=2,
+            work_id="WK-α", segment_id=sample.segment_id,
+            text_version="corpus-v1", span_start=30, span_end=40,
+            evidence_text="x", evidence_sha256="0" * 64,
+            conditions_observed={}, observed_content="",
+            extractor_model="test", status="verified"))
+        s.flush()
+        refs, n, stripped = kq._evidence_for(s, "ESV2-A", {})
+        assert n == 2 and len(refs) == 2, (refs, stripped)
+        assert all(r["instance_id"] != "SI-A0-WRONG" for r in refs)
+        assert "SI-A0-WRONG:strategy_version_mismatch:2!=1" in stripped
+        s.rollback()
+
+
+def test_mirror_representative_is_stable_when_insertion_order_reverses(seeded):
+    """同根同区间先插 Z 再插 A，仍由字典序较小的实例代表该证据。"""
+    from app.models import StrategyInstance
+    with db.session() as s:
+        sample = s.get(StrategyInstance, "SI-L1")
+        for instance_id in ("SI-LZ-NEW", "SI-LA-NEW"):
+            s.add(StrategyInstance(
+                id=instance_id, strategy_id="ESV2-L", strategy_version=1,
+                work_id=sample.work_id, segment_id=sample.segment_id,
+                text_version="corpus-v1", span_start=30, span_end=40,
+                evidence_text="x", evidence_sha256="0" * 64,
+                conditions_observed={}, observed_content="",
+                extractor_model="test", status="verified"))
+            s.flush()
+        refs, n, stripped = kq._evidence_for(s, "ESV2-L", {})
+        assert n == 2
+        assert {r["instance_id"] for r in refs} == {"SI-L1", "SI-LA-NEW"}
+        assert "SI-LZ-NEW:mirror_dedup" in stripped
+        s.rollback()
+
+
+def test_conditions_use_current_version_and_stable_order(seeded):
+    """旧版 bad_when 不得锁新版卡；新条件即使逆序插入仍稳定排列。"""
+    from app.models import StrategyCondition
+    with db.session() as s:
+        s.add(StrategyCondition(
+            id="SC-A-WRONG-V", strategy_id="ESV2-A", strategy_version=2,
+            kind="bad_when", dimension="节奏", operator="eq",
+            value={"v": "短句"}, required=False))
+        s.flush()
+        reason, comps, _ = kq._condition_pipeline(
+            s, "ESV2-A", {"节奏": "短句", "视角": "限知"})
+        assert reason is None and comps["good_when_matches"] == 1
+
+        for condition_id, dimension in (("SC-Z-NEW", "新增Z"),
+                                        ("SC-A-NEW", "新增A")):
+            s.add(StrategyCondition(
+                id=condition_id, strategy_id="ESV2-A", strategy_version=1,
+                kind="good_when", dimension=dimension, operator="eq",
+                value={"v": "x"}, required=False))
+            s.flush()
+        reason, _, uncertain = kq._condition_pipeline(
+            s, "ESV2-A", {"视角": "限知"})
+        dimensions = [item["dimension"] for item in uncertain]
+        assert reason is None and dimensions.index("新增A") < dimensions.index("新增Z")
+        s.rollback()
 
 
 def test_excluded_uses_additive_semantics(seeded):
