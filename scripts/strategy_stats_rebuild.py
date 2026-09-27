@@ -25,6 +25,14 @@ strategy_instances 快照**全量重算**——不是第二份真值，重建即
 - extras.benchmark_stripped = 该策略实例中被 K3 以基准段来源
   （:benchmark_source）剔除的实例数——valid 仍按既有式计（含基准段
   实例），usable_evidence 与 valid 的差即两套口径的如实差距；
+- 指纹边界（会审 2026-09-27 指出）：data_fingerprint 只覆盖**实例行**
+  （id:status:span:evidence_sha256），**不含** extras 的任何键——分档键
+  不在指纹内，故指纹相同不代表分档键已写入。当前 run() **无「指纹未变则
+  跳过」短路**（apply=True 一律先 delete 再全量 add），老行不会因指纹而
+  拿不到新键；若将来引入短路，必须同时把 extras 纳入指纹或显式绕过。
+- extras 写入方式：整字典覆盖（重建即替换，与「不是第二份真值」一致）——
+  **不允许**第三方往 extras 手填键：apply=True 会静默丢弃。新增键一律
+  在此函数内追加。
 - extras.k3_eligible_instances / extras.k3_eligible_root_works = K3
   可用证据的**实例级 / 根作品级**分档（分档派工 2026-09-26：审计发现
   82 条 benchmark 实例按观察口径报数，被误读成 K3 可用数）——与
@@ -139,6 +147,8 @@ def run(apply: bool) -> dict:
                "n_strategies": len(stats), "rows": stats}
         if apply:
             s.query(StrategyStats).delete()   # 投影：重建即替换，无第二真值
+            # 注意：extras 为整字典覆盖写，且**无「指纹未变则跳过」短路**
+            # （会审 2026-09-27 要求显式声明）——见模块 docstring 指纹边界。
             now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
             for r in stats:
                 s.add(StrategyStats(

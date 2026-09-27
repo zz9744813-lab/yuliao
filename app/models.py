@@ -527,7 +527,12 @@ class StrategyStats(Base):
       （根作品级）——全部从 knowledge_query._evidence_for 准入判据链的
       返回值直接派生，与 K3 同判据（verified，且剔除基准段/无登记/
       禁用来源类型/禁用用途/不合格文本版本/镜像重复），不本地复刻；
-    · extras.benchmark_stripped = 两口径间的桥（被 K3 以基准段剔除的实例数）。
+    · extras.benchmark_stripped = 两口径间的桥（被 K3 以基准段剔除的实例数，
+      **实例级**；usable_evidence 是**唯一区间级**——两者与 valid 之间
+      不构成恒等式，仅供旁证，勿当加和项读）。
+    · 当前恒等（会审 2026-09-27 要求就地注记）：k3_eligible_instances 与
+      usable_evidence 在当前判据链下数值恒等（refs 与 intervals 在
+      _evidence_for 内一一对应）；判据链若变化，须回归此关系。
     「有证据 N 条」是观察口径，不等于「K3 能用 N 条」——引用须报对应档。"""
     __tablename__ = "strategy_stats"
 

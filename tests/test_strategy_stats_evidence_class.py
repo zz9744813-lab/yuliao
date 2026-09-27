@@ -31,7 +31,7 @@ _spec = _u.spec_from_file_location(
     "ssr_ec", ROOT / "scripts" / "strategy_stats_rebuild.py")
 ssr = _u.module_from_spec(_spec); _spec.loader.exec_module(ssr)
 
-from app import db, knowledge_query as kq               # noqa: E402
+from app import config, db, knowledge_query as kq        # noqa: E402
 from app.models import (ExpressionStrategyV2, Segment,  # noqa: E402
                         StrategyInstance, StrategyStats, Work, WorkSource)
 
@@ -178,19 +178,92 @@ def test_k3_eligible_same_criteria_as_knowledge_query():
     assert bonly["k3_eligible_instances"] == len(refs_b) == 0
     assert bonly["k3_eligible_root_works"] == \
         len({r["canonical_work"] for r in refs_b}) == 0
-    # refs 确实只含非 benchmark、非镜像重复的那条实例
-    assert [r["instance_id"] for r in refs_m] == [f"SI-PLAIN-{key}"]
+    # refs 确实只含非 benchmark、非镜像重复的那一条：镜像与根同
+    # (canonical, span)，_evidence_for 内部按「先到者进 seen_intervals」
+    # 去重，**行序未排序**（判据链无 ORDER BY）——因此本处只钉「恰好一条、
+    # 根作品正确、被剔的那条以 mirror_dedup 命中」，不钉具体是哪条 id
+    # （钉 id 等于钉 DB 行序，换后端会假红；会审 2026-09-27 指出）。
+    assert len(refs_m) == 1
     assert {r["canonical_work"] for r in refs_m} == {ids["plain"]}
+    assert refs_m[0]["instance_id"] in {f"SI-PLAIN-{key}", f"SI-MIRR-{key}"}
+    _deduped = ({f"SI-PLAIN-{key}", f"SI-MIRR-{key}"}
+                - {refs_m[0]["instance_id"]})
+    assert _deduped == {x.split(":")[0] for x in stripped_m
+                        if x.endswith(":mirror_dedup")}
     # 剔除链逐条命中（K3 判据生效的直接证据）
     assert f"SI-BENCH-{key}:benchmark_source" in stripped_m
     assert f"SI-MIRR-{key}:mirror_dedup" in stripped_m
     assert f"SI-BONLY-{key}:benchmark_source" in stripped_b
 
 
+
+def test_excluded_source_type_zeroes_k3_eligible_but_not_valid():
+    """判据链扩展位（会审 2026-09-27 要求）：除 benchmark / mirror_dedup
+    之外，`excluded_source_type`（fixture/synthetic/commentary 冒充）同样
+    在 k3_eligible_* 的归零路径上——补一条样本，防止将来只钉住两道剔除
+    的测试被「判据链已扩展」悄悄骗过。
+
+    构造：登记为 `fixture`（默认排除集内）、段 role 非 benchmark、文本版本
+    合格、status=verified ⇒ 观察口径 valid=1，K3 可用口径 0（且 stripped
+    以 `excluded_source_type:fixture` 命中）。"""
+    _n[0] += 1
+    key = f"ec-fx-{_n[0]}"
+    db.init_db()
+    with db.session() as s:
+        w = Work(title=f"t-ec-fx-{key}", source="test:ec")
+        s.add(w)
+        s.flush()
+        import register_work_sources as REG
+
+        sha, _ = REG._work_sha256(s, w.id)
+        s.add(WorkSource(work_id=w.id, canonical_work_id=w.id,
+                         source_type="fixture", text_version="corpus-v1",
+                         text_sha256=sha, purpose_basis="测试夹具",
+                         identity_purposes=["research"],
+                         license_purposes=[], license_basis="seed",
+                         metadata_status="verified", metadata_basis="seed"))
+        seg = Segment(work_id=w.id, ordinal=0, text=TEXT, text_clean=TEXT,
+                      role=None, n_chars=len(TEXT), n_sentences=1,
+                      integrity='{"src_ok": true}')
+        s.add(seg)
+        s.flush()
+        from registry_anchor import refresh as _refresh
+        _refresh(s, w.id)
+        st = ExpressionStrategyV2(
+            strategy_key=f"{key}-fx", abstract_operation=f"操作-{key}-fx",
+            effect_hypothesis=f"假设-{key}-fx", status="hypothesis",
+            scope="WORK", scope_ids=[w.id])
+        s.add(st)
+        s.flush()
+        ev = TEXT[0:8]
+        s.add(StrategyInstance(
+            id=f"SI-FX-{key}", strategy_id=st.id, strategy_version=st.version,
+            work_id=w.id, segment_id=seg.id, text_version="corpus-v1",
+            span_start=0, span_end=8, evidence_text=ev,
+            evidence_sha256=hashlib.sha256(ev.encode()).hexdigest(),
+            observed_content="x", extractor_model="fx", status="verified"))
+        s.commit()
+        st_id = st.id
+    rep = ssr.run(apply=False)
+    row = [r for r in rep["rows"] if r["strategy_key"] == f"{key}-fx"][0]
+    assert row["valid"] == 1, "观察口径照旧计 verified 实例"
+    assert row["k3_eligible_instances"] == 0
+    assert row["k3_eligible_root_works"] == 0
+    with db.session() as s:
+        refs, ev_count, stripped = kq._evidence_for(s, st_id, {})
+    assert refs == [] and ev_count == 0
+    assert f"SI-FX-{key}:excluded_source_type:fixture" in stripped
+    assert row["k3_eligible_instances"] == len(refs)
+
 def test_existing_field_values_unchanged():
     """既有字段值不变（防悄悄改口径）：既有列与 extras 键按夹具真值钉死；
     --apply 落库后既有列不动、新键只追加进 extras；指纹确定性。"""
     key, ids = _seed()
+    # 写库护栏（会审 2026-09-27 要求）：本用例是全文件唯一 apply=True 的
+    # 不可逆写路径，必须在断言前先证明目标库是 conftest 的临时 SQLite，
+    # 绝不可能是真库 data/language_genome.db。
+    assert config.DATABASE_URL.startswith("sqlite:///"),         f"apply=True 只许打临时 SQLite，实为 {config.DATABASE_URL}"
+    assert "lg_test_" in config.DATABASE_URL,         f"目标库不是 conftest 临时库：{config.DATABASE_URL}"
     rep = ssr.run(apply=False)
     mine, bonly = _rows(rep, key)
     # 观察证据口径（含基准段实例）——与加档前逐字同式

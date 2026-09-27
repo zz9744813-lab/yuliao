@@ -159,15 +159,31 @@ def test_dry_forecast_matches_real_run_rules(capsys):
 
 
 def test_dry_forecast_matches_real_run_polish(capsys):
-    """④' 同口径对 --polish 也成立：would_clean == 真跑的 polished。"""
+    """④' 同口径对 --polish 也成立：would_clean == 真跑的 polished。
+
+    2026-09-27 适配清洗正文保留门（lg-clean-text-preserve-gate）：
+    `--polish` 的落笔对象**恒为非空 text_clean**，加门后默认路径一律
+    拒写（只记待人工裁决）；真跑覆写须显式 `--overwrite-text-clean`。
+    因此本用例真跑段带越门开关，**并补一条默认路径的对照断言**——
+    钉住「门确实在拦」，不是把门关掉换绿（断言只增不减）。
+    """
     ids = _seed([ct.clean_rules(POLISH_DIRTY) + "这是一段足够长的正文补足长度门槛。"] * 2,
                 clean=[POLISH_DIRTY, POLISH_DIRTY])
     ct.main(["--polish", "--dry-run"])
     dry = _last_json(capsys.readouterr().out)
     assert dry["dry_run"] is True
+    before = _raw_text_clean()
+    # 默认路径（无越门开关）：门拦下全部覆写尝试，旧值原地保留
     ct.main(["--polish"])
+    blocked = _last_json(capsys.readouterr().out)
+    assert blocked["polished"] == 0, "默认路径不许覆写非空正文"
+    assert blocked["gate_pending"] == 2, "两条残留段都应记待人工裁决"
+    assert _raw_text_clean() == before, "被拦段旧值必须逐字保留"
+    # 越门路径：显式开关才真覆写，与 dry 预报数值一致
+    ct.main(["--polish", "--overwrite-text-clean"])
     real = _last_json(capsys.readouterr().out)
     assert dry["would_clean"] == real["polished"] >= 2
+    assert real["gate_overwritten"] == real["polished"]
     raw = _raw_text_clean()
     for sid in ids:
         assert raw[sid] is not None and "()" not in raw[sid]
