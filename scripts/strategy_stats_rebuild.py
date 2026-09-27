@@ -24,7 +24,17 @@ strategy_instances 快照**全量重算**——不是第二份真值，重建即
   evidence_count 同口径（非实例数）；
 - extras.benchmark_stripped = 该策略实例中被 K3 以基准段来源
   （:benchmark_source）剔除的实例数——valid 仍按既有式计（含基准段
-  实例），usable_evidence 与 valid 的差即两套口径的如实差距。
+  实例），usable_evidence 与 valid 的差即两套口径的如实差距；
+- extras.k3_eligible_instances / extras.k3_eligible_root_works = K3
+  可用证据的**实例级 / 根作品级**分档（分档派工 2026-09-26：审计发现
+  82 条 benchmark 实例按观察口径报数，被误读成 K3 可用数）——与
+  usable_evidence 取**同一次** kq._evidence_for 调用：前者=len(refs)
+  （K3 实际保留并出具引用的证据条目数，基准段/无登记/来源类型/用途/
+  文本版本/镜像去重全部已生效），后者=refs 中 distinct
+  canonical_work 数。两者从准入判据链的返回值直接派生，**不本地复刻
+  判据**（与 usable_evidence 同一纪律）；既有字段（valid/root_works/
+  unique_source_intervals/by_root_work）保持观察证据口径逐字不动，
+  分档只旁路新增，读表方无静默语义漂移。
 
 用法：
     python scripts/strategy_stats_rebuild.py            # dry-run（零数据写）
@@ -96,8 +106,11 @@ def compute(s) -> list[dict]:
         # （excluded_source_types 并集封底 / allowed_text_versions 交集封顶
         # 全按 kq.DEFAULT_*），调用方收窄不含——这里是统计投影，如实按
         # 封底口径报告。benchmark_stripped 从 stripped 的 :benchmark_source
-        # 后缀条目计数。
-        _, ev_count, stripped = kq._evidence_for(s, st.id, {})
+        # 后缀条目计数。k3_eligible_instances / k3_eligible_root_works 从
+        # **同一次调用**的第 1 返回值 refs（K3 实际保留的证据条目，含
+        # instance_id 与 canonical_work）派生——与准入判据同判据，禁止
+        # 在此另写一套过滤（分档派工 2026-09-26）。
+        refs, ev_count, stripped = kq._evidence_for(s, st.id, {})
         out.append({
             "strategy_id": st.id, "strategy_key": st.strategy_key,
             "strategy_version": st.version,
@@ -110,6 +123,9 @@ def compute(s) -> list[dict]:
             "usable_evidence": ev_count,
             "benchmark_stripped": sum(
                 1 for t in stripped if t.endswith(":benchmark_source")),
+            "k3_eligible_instances": len(refs),
+            "k3_eligible_root_works": len(
+                {ref["canonical_work"] for ref in refs}),
             "data_fingerprint": hashlib.sha256(
                 fp_src.encode("utf-8")).hexdigest(),
         })
@@ -136,7 +152,11 @@ def run(apply: bool) -> dict:
                     missing=r["missing"], counter_examples=0,
                     extras={"by_root_work": r["by_root_work"],
                             "usable_evidence": r["usable_evidence"],
-                            "benchmark_stripped": r["benchmark_stripped"]}))
+                            "benchmark_stripped": r["benchmark_stripped"],
+                            "k3_eligible_instances":
+                                r["k3_eligible_instances"],
+                            "k3_eligible_root_works":
+                                r["k3_eligible_root_works"]}))
             s.commit()
             out["applied"] = len(stats)
         return out
