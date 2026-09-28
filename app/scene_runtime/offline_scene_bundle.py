@@ -129,14 +129,15 @@ def check_offline_scene_bundle(path: str | Path, *,
         final_world = _replay(bundle.world, bundle.plans)
     except SceneBundleError:
         raise
-    except ValidationError as exc:
-        raise SceneBundleError("bundle_schema_invalid") from exc
+    except ValidationError:
+        raise SceneBundleError("bundle_schema_invalid") from None
     except RuntimeFault as exc:
         code = str(exc)
         raise SceneBundleError("bundle_plan_invalid:" +
-                               (code if code in SAFE_PLAN_FAULTS else "unknown")) from exc
-    except (KeyError, TypeError, ValueError, OverflowError) as exc:
-        raise SceneBundleError("bundle_replay_invalid") from exc
+                               (code if code in SAFE_PLAN_FAULTS else "unknown")) from None
+    # Keep SceneBundleError above ValueError; suppress raw input in tracebacks.
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise SceneBundleError("bundle_replay_invalid") from None
     return {
         "structure_pass": True,
         "live_ready": False,

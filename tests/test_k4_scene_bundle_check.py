@@ -143,8 +143,10 @@ def test_duplicate_json_keys_and_oversize_rejected(tmp_path):
 def test_unknown_runtime_fault_never_exposes_story_text(tmp_path, monkeypatch):
     monkeypatch.setattr(bundle_module, "validate_plan", lambda *_: (
         _ for _ in ()).throw(RuntimeFault("private scene description")))
-    with pytest.raises(SceneBundleError, match="^bundle_plan_invalid:unknown$"):
+    with pytest.raises(SceneBundleError, match="^bundle_plan_invalid:unknown$") as caught:
         check_offline_scene_bundle(_save(tmp_path, _bundle()))
+    assert "private scene" not in str(caught.value)
+    assert caught.value.__suppress_context__ is True
 
 
 def test_replay_error_is_stable(tmp_path, monkeypatch):
@@ -174,6 +176,13 @@ def test_cli_requires_expected_digest_and_reports_structural_only(
     assert report["structure_pass"] is True
     assert report["live_ready"] is False
     assert report["source_pack_file_checked"] is False
+    monkeypatch.setattr(sys, "argv", [
+        "check", "--bundle", str(path), "--expected-pack-sha256", "b" * 64,
+    ])
+    assert module.main() == 1
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected == {"structure_pass": False, "live_ready": False,
+                        "reason": "source_pack_digest_mismatch"}
 
 
 def _driver():
