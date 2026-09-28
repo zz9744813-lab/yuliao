@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -194,6 +195,65 @@ def test_untrusted_storage_refuses_before_dispatch(monkeypatch, tmp_path):
         assert _counts(engine) == (0, 0, 0)
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize("exit_code,stdout,expected", [
+    (0, b"", None),
+    (3, b"K2_ACL_DENY:ace\r\n", "k2_storage_acl_untrusted"),
+    (3, b"", "k2_storage_acl_unverifiable"),
+    (1, b"", "k2_storage_acl_unverifiable"),
+])
+def test_windows_acl_probe_isolated_system_module_and_exit_codes(
+        monkeypatch, tmp_path, exit_code, stdout, expected):
+    captured = []
+    monkeypatch.setattr(runner, "os", SimpleNamespace(
+        name="nt", environ={"SystemRoot": str(tmp_path),
+                            "psmodulepath": "contaminated-bundled-modules"}))
+
+    def fake_run(argv, **kwargs):
+        captured.append((argv, kwargs))
+        return SimpleNamespace(returncode=exit_code, stdout=stdout)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    database = tmp_path / "private.db"
+    if expected:
+        with pytest.raises(runner.ReviewPreflightError, match=expected):
+            runner._require_private_storage(database)
+    else:
+        runner._require_private_storage(database)
+    assert len(captured) == 1
+    argv, kwargs = captured[0]
+    assert argv[0] == str(tmp_path / "System32" / "WindowsPowerShell" /
+                          "v1.0" / "powershell.exe")
+    assert "Import-Module Microsoft.PowerShell.Security" in argv[-1]
+    assert "$allowed -notcontains $sid" in argv[-1]
+    assert "$null -eq $raw.DiscretionaryAcl" in argv[-1]
+    assert kwargs["env"]["PSModulePath"] == str(
+        tmp_path / "System32" / "WindowsPowerShell" / "v1.0" /
+        "Modules")
+    assert kwargs["env"]["K2_CHECK_DB"] == str(database)
+    assert "psmodulepath" not in kwargs["env"]
+
+
+def test_windows_acl_probe_fails_closed_on_missing_system_root_or_probe_error(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, "os", SimpleNamespace(name="nt", environ={}))
+    monkeypatch.setattr(runner.subprocess, "run",
+                        lambda *args, **kwargs: pytest.fail("no probe without root"))
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_acl_unverifiable"):
+        runner._require_private_storage(tmp_path / "private.db")
+
+    monkeypatch.setattr(runner, "os", SimpleNamespace(
+        name="nt", environ={"SystemRoot": str(tmp_path)}))
+
+    def fail_probe(*args, **kwargs):
+        raise runner.subprocess.TimeoutExpired("powershell.exe", 15)
+
+    monkeypatch.setattr(runner.subprocess, "run", fail_probe)
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_acl_unverifiable"):
+        runner._require_private_storage(tmp_path / "private.db")
 
 
 def test_case_variant_of_same_model_refuses_before_second_dispatch(monkeypatch, tmp_path):

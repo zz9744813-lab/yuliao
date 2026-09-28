@@ -233,35 +233,62 @@ def _reserve_seat(directory: Path, snapshot_id: str, route: ReviewRoute,
 
 
 def _require_private_storage(database: Path) -> None:
-    """Reject broad local read/write access before storing raw K2 material."""
+    """Require an inspectable, owner/admin/system-only ACL for raw K2 data."""
     if os.name == "nt":
         script = r"""
 $ErrorActionPreference = 'Stop'
-$wide = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545')
+Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
+$allowed = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
+             'S-1-5-18', 'S-1-5-32-544')
 foreach ($p in @($env:K2_CHECK_DB, $env:K2_CHECK_DIR)) {
-    $acl = Get-Acl -LiteralPath $p
+    $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
+    $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new(
+        $acl.GetSecurityDescriptorBinaryForm(), 0)
+    if ($null -eq $raw.DiscretionaryAcl) {
+        Write-Output 'K2_ACL_DENY:null_dacl'; exit 3
+    }
+    $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
+    if ($allowed -notcontains $owner) {
+        Write-Output 'K2_ACL_DENY:owner'; exit 3
+    }
     foreach ($ace in $acl.Access) {
         if ($ace.AccessControlType -ne 'Allow') { continue }
         try {
             $sid = $ace.IdentityReference.Translate(
                 [System.Security.Principal.SecurityIdentifier]).Value
         } catch { $sid = $ace.IdentityReference.Value }
-        if ($wide -contains $sid) { exit 3 }
+        if ($allowed -notcontains $sid) {
+            Write-Output 'K2_ACL_DENY:ace'; exit 3
+        }
     }
 }
 exit 0
 """
-        env = {**os.environ, "K2_CHECK_DB": str(database),
-               "K2_CHECK_DIR": str(database.parent)}
+        system_root = Path(os.environ.get("SystemRoot", ""))
+        if not system_root.is_absolute():
+            raise ReviewPreflightError("k2_storage_acl_unverifiable")
+        system_ps = system_root / "System32" / "WindowsPowerShell" / "v1.0"
+        env = {key: value for key, value in os.environ.items()
+               if key.casefold() != "psmodulepath"}
+        env.update({"K2_CHECK_DB": str(database),
+                    "K2_CHECK_DIR": str(database.parent),
+               # pwsh's bundled modules corrupt Windows PowerShell type data
+               # when inherited through PSModulePath. Load only OS modules.
+                    "PSModulePath": str(system_ps / "Modules")})
         try:
             check = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive",
-                 "-Command", script], env=env, capture_output=True,
+                [str(system_ps / "powershell.exe"), "-NoProfile",
+                 "-NonInteractive", "-Command", script],
+                env=env, capture_output=True,
                 timeout=15, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ReviewPreflightError("k2_storage_acl_unverifiable") from exc
-        if check.returncode != 0:
+        if (check.returncode == 3 and check.stdout.strip() in
+                {b"K2_ACL_DENY:null_dacl", b"K2_ACL_DENY:owner",
+                 b"K2_ACL_DENY:ace"}):
             raise ReviewPreflightError("k2_storage_acl_untrusted")
+        if check.returncode != 0:
+            raise ReviewPreflightError("k2_storage_acl_unverifiable")
     else:
         try:
             if (stat.S_IMODE(database.stat().st_mode) & 0o077 or
