@@ -43,6 +43,7 @@ PROMPT_REGISTRY = {PROMPT_VERSION: SYSTEM_PROMPT}
 MAX_OUTPUT_TOKENS = 4096
 MAX_RESPONSE_BYTES = 512 * 1024
 ATTEMPT_DIRECTORY_NAME = "semantic_review_attempts"
+_ATTESTATION_FIELDS = ("provider", "model", "channel-id", "request-id")
 _PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}\Z")
 _LOG = logging.getLogger(__name__)
@@ -160,8 +161,16 @@ def _post_once(request_json: str, timeout: float) -> httpx.Response:
                     if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
                         raise ReviewResponseError("k2_response_too_large")
                     body.extend(chunk)
+                # Preserve only the attestation used by the receipt parser.
+                # A gateway's Content-Length/Transfer-Encoding describes its
+                # wire response and may contradict this bounded local copy.
+                attestation = {
+                    "x-lg-upstream-" + field: response.headers["x-lg-upstream-" + field]
+                    for field in _ATTESTATION_FIELDS
+                    if "x-lg-upstream-" + field in response.headers
+                }
                 return httpx.Response(response.status_code,
-                                      headers=response.headers,
+                                      headers=attestation,
                                       content=bytes(body),
                                       request=response.request)
     except httpx.HTTPError as exc:
@@ -179,7 +188,7 @@ def _parse_response(response: httpx.Response, route: ReviewRoute,
         if not isinstance(data, dict):
             raise ValueError("response object required")
         headers = {name: response.headers.get("x-lg-upstream-" + name, "")
-                   for name in ("provider", "model", "channel-id", "request-id")}
+                   for name in _ATTESTATION_FIELDS}
         if (headers != {"provider": route.upstream_provider,
                         "model": route.upstream_model,
                         "channel-id": route.upstream_channel_id,

@@ -506,6 +506,30 @@ def test_streamed_http_response_accepts_small_receipt(monkeypatch, tmp_path):
         engine.dispose()
 
 
+def test_streamed_http_response_discards_wire_length_and_untrusted_headers(
+        monkeypatch):
+    real_client = httpx.Client
+
+    def handle(request):
+        return httpx.Response(503, headers={
+            "Content-Length": "9999", "Transfer-Encoding": "chunked",
+            "X-Untrusted": "discard", "X-LG-Upstream-Provider": "provider-a",
+        }, stream=httpx.ByteStream(b"{}"))
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(config, "GATEWAY_BASE_URL", "https://synthetic.example/v1")
+    monkeypatch.setattr(config, "GATEWAY_API_KEY", "synthetic-key")
+    monkeypatch.setattr(runner.httpx, "Client", lambda *args, **kwargs:
+                        real_client(*args, transport=transport, **kwargs))
+    response = runner._post_once("{}", 15)
+    assert response.status_code == 503
+    assert response.content == b"{}"
+    assert response.headers["content-length"] == "2"
+    assert response.headers["x-lg-upstream-provider"] == "provider-a"
+    assert "transfer-encoding" not in response.headers
+    assert "x-untrusted" not in response.headers
+
+
 def test_streamed_http_response_rejects_compression(monkeypatch, tmp_path):
     engine, sid = _ready(monkeypatch, tmp_path)
     real_client = httpx.Client
