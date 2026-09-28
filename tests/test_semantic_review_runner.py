@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -200,6 +202,7 @@ def test_untrusted_storage_refuses_before_dispatch(monkeypatch, tmp_path):
 @pytest.mark.parametrize("exit_code,stdout,expected", [
     (0, b"", None),
     (3, b"K2_ACL_DENY:ace\r\n", "k2_storage_acl_untrusted"),
+    (3, b"K2_ACL_DENY:not_directory\r\n", "k2_storage_acl_untrusted"),
     (3, b"", "k2_storage_acl_unverifiable"),
     (1, b"", "k2_storage_acl_unverifiable"),
 ])
@@ -228,6 +231,14 @@ def test_windows_acl_probe_isolated_system_module_and_exit_codes(
     assert "Import-Module Microsoft.PowerShell.Security" in argv[-1]
     assert "$allowed -notcontains $sid" in argv[-1]
     assert "$null -eq $raw.DiscretionaryAcl" in argv[-1]
+    assert "$env:K2_CHECK_DB + '-wal'" in argv[-1]
+    assert "$env:K2_CHECK_DB + '-shm'" in argv[-1]
+    assert "$env:K2_CHECK_ATTEMPT_DIR" in argv[-1]
+    assert "$ancestor = $ancestor.Parent" in argv[-1]
+    assert "0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000" in argv[-1]
+    assert "[int64]4294967295" in argv[-1]
+    assert kwargs["env"]["K2_CHECK_ATTEMPT_DIR"] == str(
+        database.parent / runner.ATTEMPT_DIRECTORY_NAME)
     assert kwargs["env"]["PSModulePath"] == str(
         tmp_path / "System32" / "WindowsPowerShell" / "v1.0" /
         "Modules")
@@ -254,6 +265,75 @@ def test_windows_acl_probe_fails_closed_on_missing_system_root_or_probe_error(
     with pytest.raises(runner.ReviewPreflightError,
                        match="k2_storage_acl_unverifiable"):
         runner._require_private_storage(tmp_path / "private.db")
+
+
+@pytest.mark.parametrize("mode,file_owner,caller,strict,unsafe", [
+    (0o700, 1001, 1001, True, False),
+    (0o700 | stat.S_ISGID, 1001, 1001, True, False),
+    (0o644, 1001, 1001, True, True),
+    (0o750, 1001, 1001, True, True),
+    (0o770, 1001, 1001, True, True),
+    (0o700, 1002, 1001, True, True),
+    (0o700, 1002, 0, True, True),
+    (0o755, 0, 1001, False, False),
+    (0o775, 0, 1001, False, True),
+    (0o777 | stat.S_ISVTX, 0, 1001, False, False),
+    (0o777 | stat.S_ISVTX, 1002, 1001, False, True),
+])
+def test_posix_storage_mode_checks_owner_and_ancestor_replace_rights(
+        mode, file_owner, caller, strict, unsafe):
+    assert runner._unsafe_posix_storage_mode(
+        mode, file_owner, caller, strict=strict) is unsafe
+
+
+@pytest.mark.parametrize("variant,expected", [
+    ("private", None),
+    ("replaceable_ancestor", "k2_storage_acl_untrusted"),
+    ("loose_wal", "k2_storage_acl_untrusted"),
+    ("symlink_wal", "k2_storage_acl_untrusted"),
+    ("unreadable_ancestor", "k2_storage_acl_unverifiable"),
+    ("unreadable_sidecar", "k2_storage_acl_unverifiable"),
+])
+def test_posix_acl_probe_checks_optional_files_and_entire_path(
+        monkeypatch, tmp_path, variant, expected):
+    database = tmp_path / "private.db"
+    wal = Path(str(database) + "-wal")
+    modes = {
+        str(database): (stat.S_IFREG | 0o600, 1001),
+        str(tmp_path): (stat.S_IFDIR | 0o700, 1001),
+    }
+    modes.update({str(path): (stat.S_IFDIR | 0o755, 0)
+                  for path in tmp_path.parents})
+    if variant == "replaceable_ancestor":
+        modes[str(tmp_path.parent)] = (stat.S_IFDIR | 0o777, 0)
+    elif variant == "loose_wal":
+        modes[str(wal)] = (stat.S_IFREG | 0o644, 1001)
+    elif variant == "symlink_wal":
+        modes[str(wal)] = (stat.S_IFLNK | 0o777, 1001)
+
+    def fake_lstat(path, *args, **kwargs):
+        if variant == "unreadable_sidecar" and str(path) == str(wal):
+            raise PermissionError(str(path))
+        if str(path) not in modes:
+            raise FileNotFoundError(str(path))
+        mode, owner = modes[str(path)]
+        return SimpleNamespace(st_mode=mode, st_uid=owner)
+
+    def fake_stat(path, *args, **kwargs):
+        if variant == "unreadable_ancestor" and path == tmp_path.parent:
+            raise PermissionError(str(path))
+        return fake_lstat(path)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner, "os", SimpleNamespace(
+            name="posix", geteuid=lambda: 1001))
+        patch.setattr(Path, "lstat", fake_lstat)
+        patch.setattr(Path, "stat", fake_stat)
+        if expected:
+            with pytest.raises(runner.ReviewPreflightError, match=expected):
+                runner._require_private_storage(database)
+        else:
+            runner._require_private_storage(database)
 
 
 def test_case_variant_of_same_model_refuses_before_second_dispatch(monkeypatch, tmp_path):

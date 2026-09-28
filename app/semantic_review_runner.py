@@ -42,6 +42,7 @@ SYSTEM_PROMPT = (
 PROMPT_REGISTRY = {PROMPT_VERSION: SYSTEM_PROMPT}
 MAX_OUTPUT_TOKENS = 4096
 MAX_RESPONSE_BYTES = 512 * 1024
+ATTEMPT_DIRECTORY_NAME = "semantic_review_attempts"
 _PROVIDER = re.compile(r"[a-z][a-z0-9_-]{0,63}\Z")
 _MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}\Z")
 _LOG = logging.getLogger(__name__)
@@ -233,14 +234,37 @@ def _reserve_seat(directory: Path, snapshot_id: str, route: ReviewRoute,
 
 
 def _require_private_storage(database: Path) -> None:
-    """Require an inspectable, owner/admin/system-only ACL for raw K2 data."""
+    """Reject writable K2 files and replaceable ancestors before dispatch."""
     if os.name == "nt":
         script = r"""
 $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Security -ErrorAction Stop
 $allowed = @([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value,
              'S-1-5-18', 'S-1-5-32-544')
-foreach ($p in @($env:K2_CHECK_DB, $env:K2_CHECK_DIR)) {
+$strictPaths = @($env:K2_CHECK_DB, $env:K2_CHECK_DIR)
+# A missing sidecar is safe only because the directory itself is checked below;
+# only trusted principals may create one after this probe.
+foreach ($candidate in @($env:K2_CHECK_DB + '-wal',
+                          $env:K2_CHECK_DB + '-shm',
+                          $env:K2_CHECK_ATTEMPT_DIR)) {
+    if (Test-Path -LiteralPath $candidate -ErrorAction Stop) {
+        $strictPaths += $candidate
+    }
+}
+$ancestorPaths = @()
+$directory = Get-Item -LiteralPath $env:K2_CHECK_DIR -ErrorAction Stop
+if (-not $directory.PSIsContainer) {
+    Write-Output 'K2_ACL_DENY:not_directory'; exit 3
+}
+$ancestor = $directory.Parent
+while ($null -ne $ancestor) {
+    $ancestorPaths += $ancestor.FullName
+    $ancestor = $ancestor.Parent
+}
+# An ancestor with DELETE_CHILD/DELETE/WRITE_DAC/WRITE_OWNER can replace
+# the private directory even when that directory has a protected DACL.
+$replaceRights = 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+foreach ($p in ($strictPaths + $ancestorPaths)) {
     $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
     $raw = [System.Security.AccessControl.RawSecurityDescriptor]::new(
         $acl.GetSecurityDescriptorBinaryForm(), 0)
@@ -257,7 +281,11 @@ foreach ($p in @($env:K2_CHECK_DB, $env:K2_CHECK_DIR)) {
             $sid = $ace.IdentityReference.Translate(
                 [System.Security.Principal.SecurityIdentifier]).Value
         } catch { $sid = $ace.IdentityReference.Value }
-        if ($allowed -notcontains $sid) {
+        # FileSystemRights is signed Int32; keep only its 32-bit ACL mask.
+        if ($allowed -notcontains $sid -and
+            ($strictPaths -contains $p -or
+             ((([int64]$ace.FileSystemRights -band [int64]4294967295) -band
+               $replaceRights) -ne 0))) {
             Write-Output 'K2_ACL_DENY:ace'; exit 3
         }
     }
@@ -272,6 +300,8 @@ exit 0
                if key.casefold() != "psmodulepath"}
         env.update({"K2_CHECK_DB": str(database),
                     "K2_CHECK_DIR": str(database.parent),
+                    "K2_CHECK_ATTEMPT_DIR": str(
+                        database.parent / ATTEMPT_DIRECTORY_NAME),
                # pwsh's bundled modules corrupt Windows PowerShell type data
                # when inherited through PSModulePath. Load only OS modules.
                     "PSModulePath": str(system_ps / "Modules")})
@@ -285,17 +315,47 @@ exit 0
             raise ReviewPreflightError("k2_storage_acl_unverifiable") from exc
         if (check.returncode == 3 and check.stdout.strip() in
                 {b"K2_ACL_DENY:null_dacl", b"K2_ACL_DENY:owner",
-                 b"K2_ACL_DENY:ace"}):
+                 b"K2_ACL_DENY:ace", b"K2_ACL_DENY:not_directory"}):
             raise ReviewPreflightError("k2_storage_acl_untrusted")
         if check.returncode != 0:
             raise ReviewPreflightError("k2_storage_acl_unverifiable")
     else:
         try:
-            if (stat.S_IMODE(database.stat().st_mode) & 0o077 or
-                    stat.S_IMODE(database.parent.stat().st_mode) & 0o077):
-                raise ReviewPreflightError("k2_storage_acl_untrusted")
+            owner = os.geteuid()
+            strict_infos = [(database, database.lstat()),
+                            (database.parent, database.parent.lstat())]
+            # Missing sidecars inherit the validated private directory.
+            for path in (Path(str(database) + "-wal"),
+                         Path(str(database) + "-shm"),
+                         database.parent / ATTEMPT_DIRECTORY_NAME):
+                try:
+                    info = path.lstat()
+                except FileNotFoundError:
+                    continue
+                strict_infos.append((path, info))
+            for path, info in strict_infos:
+                if stat.S_ISLNK(info.st_mode) or _unsafe_posix_storage_mode(
+                        info.st_mode, info.st_uid, owner, strict=True):
+                    raise ReviewPreflightError("k2_storage_acl_untrusted")
+            for path in database.parent.parents:
+                info = path.stat()
+                if _unsafe_posix_storage_mode(info.st_mode, info.st_uid,
+                                              owner, strict=False):
+                    raise ReviewPreflightError("k2_storage_acl_untrusted")
         except OSError as exc:
             raise ReviewPreflightError("k2_storage_acl_unverifiable") from exc
+
+
+def _unsafe_posix_storage_mode(mode: int, file_owner: int,
+                               caller: int, *, strict: bool) -> bool:
+    """Only a trusted owner may control the file or a path component."""
+    if file_owner not in (caller, 0):
+        return True
+    if strict:
+        # 0o077 rejects *any* group/other bit, including 0750 or 0770.
+        return bool(stat.S_IMODE(mode) & 0o077)
+    # A trusted sticky parent (for example /tmp) protects its child names.
+    return bool(stat.S_IMODE(mode) & 0o022 and not mode & stat.S_ISVTX)
 
 
 def review_snapshot(engine: Engine, snapshot_id: str, route: ReviewRoute, *,
@@ -357,7 +417,7 @@ def review_snapshot(engine: Engine, snapshot_id: str, route: ReviewRoute, *,
     if len(request_json.encode("utf-8")) > max_request_bytes:
         raise ReviewPreflightError("k2_request_exceeds_budget")
     attempt_id = "K2A-" + uuid.uuid4().hex
-    attempt_dir = database.parent / "semantic_review_attempts"
+    attempt_dir = database.parent / ATTEMPT_DIRECTORY_NAME
     _reserve_seat(attempt_dir, snapshot_id, route, attempt_id)
     _attempt_event(attempt_dir, attempt_id, "reserved", {
         "snapshot_id": snapshot_id, "requested_model": route.requested_model,
