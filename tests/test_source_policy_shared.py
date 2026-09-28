@@ -11,7 +11,8 @@ from scripts import k2_extract_backfill as K2
 @pytest.mark.parametrize("source_type,admitted", [
     ("human_fiction", True),
     ("production_nonbenchmark_k2v2", True),
-    ("production_nonbenchmark_", True),
+    ("production_nonbenchmark_", False),
+    (" production_nonbenchmark_ ", False),
     ("unverified_corpus", False),
     ("fixture", False),
     ("synthetic", False),
@@ -19,6 +20,7 @@ from scripts import k2_extract_backfill as K2
     (None, False),
 ])
 def test_k2_k3_share_explicit_human_source_floor(source_type, admitted):
+    assert KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX is True
     assert compliant_human_source(source_type) is admitted
     assert KQ.compliant_human_source(source_type) is admitted
     assert K2.nonbenchmark_compliant_source(source_type) is admitted

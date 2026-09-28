@@ -253,7 +253,7 @@ def test_scope_and_source_type_predicates_are_explicit():
     """判定支笔的单元测试：白名单精确值/前缀，与「role 为 null」的模糊口径划清。"""
     assert k2b.nonbenchmark_compliant_source("human_fiction") is True
     assert k2b.nonbenchmark_compliant_source("production_nonbenchmark_k2v2") is True
-    assert k2b.nonbenchmark_compliant_source("production_nonbenchmark_") is True
+    assert k2b.nonbenchmark_compliant_source("production_nonbenchmark_") is False
     assert k2b.nonbenchmark_compliant_source(" human_fiction ") is True  # 去空白后判型
     for bad in ("fixture", "synthetic", "commentary", "benchmark_source",
                 "train_corpus", "", None, "   ", " fixture ", "HUMAN_FICTION",

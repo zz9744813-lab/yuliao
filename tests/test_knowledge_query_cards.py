@@ -257,6 +257,13 @@ def test_excluded_source_types_union_adds_caller_items(seeded):
             assert n0 == 0 and not refs0
             assert "SI-OT1:source_type_not_compliant:other" in st0
             s.query(WorkSource).filter_by(work_id="WK-OT").one().source_type = \
+                "production_nonbenchmark_"
+            s.commit()
+            refs0, n0, st0 = kq._evidence_for(s, "ESV2-OT", {})
+            assert n0 == 0 and not refs0
+            assert ("SI-OT1:source_type_not_compliant:production_nonbenchmark_"
+                    in st0), st0
+            s.query(WorkSource).filter_by(work_id="WK-OT").one().source_type = \
                 "production_nonbenchmark_other"
             s.commit()
             refs0, n0, _ = kq._evidence_for(s, "ESV2-OT", {})
@@ -445,7 +452,10 @@ def test_capabilities_reports_source_policy_floor(seeded):
         sorted(kq.DEFAULT_EXCLUDED_SOURCE_TYPES)
     assert floor["allowed_source_types"] == ["human_fiction"]
     assert floor["allowed_source_type_prefix"] == "production_nonbenchmark_"
+    assert floor["allowed_source_type_prefix_requires_suffix"] is True
     assert floor["allowed_text_versions"] == \
         sorted(kq.DEFAULT_ALLOWED_TEXT_VERSIONS)
     assert "union" in floor["semantics"]["excluded_source_types"]
+    assert "不能放宽" in floor["semantics"]["allowed_source_types"]
+    assert "非空后缀" in floor["semantics"]["allowed_source_type_prefix"]
     assert "intersection" in floor["semantics"]["allowed_text_versions"]

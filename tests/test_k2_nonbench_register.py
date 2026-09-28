@@ -250,6 +250,16 @@ def test_source_type_is_prefix_family_and_single_sourced(tmp_path,
     assert _main(db, c) == k2nr.EXIT_OK                    # 恢复后照常
 
 
+def test_empty_nonbenchmark_tag_is_refused_before_any_write(tmp_path):
+    """A bare prefix is not a named, reviewable human source type."""
+    db, corpus = _seed(tmp_path), _corpus(tmp_path)
+    before, mt = _digest(db), _mt(db)
+    for tag in ("", "   "):
+        assert k2nr.main(["--db", str(db), "--corpus", str(corpus),
+                          "--tag", tag]) == k2nr.EXIT_REFUSED
+    assert _digest(db) == before and _mt(db) == mt
+
+
 def test_role_benchmark_or_empty_refused(tmp_path, capsys):
     """契约 C2：role 显式非空且 != benchmark，否则拒登记且零写入。"""
     db, c = _seed(tmp_path), _corpus(tmp_path)

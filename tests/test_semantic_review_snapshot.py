@@ -378,6 +378,14 @@ def test_default_source_policy_is_enforced_and_frozen_in_review_input(monkeypatc
     engine, s = _seed()
     try:
         before = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        assert before["payload"]["policy"]["source_policy"][
+            "allowed_source_type_prefix_requires_suffix"] is True
+        with monkeypatch.context() as patch:
+            patch.setattr(KQ, "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX",
+                          False)
+            old_prefix_rule = build_snapshot(s, "ESV2-S", 1, CLAIM)
+        assert old_prefix_rule["content_sha256"] != before["content_sha256"]
+        assert old_prefix_rule["evidence_sha256"] == before["evidence_sha256"]
         monkeypatch.setattr(
             KQ, "DEFAULT_EXCLUDED_SOURCE_TYPES",
             KQ.DEFAULT_EXCLUDED_SOURCE_TYPES | frozenset({"new_excluded_type"}))

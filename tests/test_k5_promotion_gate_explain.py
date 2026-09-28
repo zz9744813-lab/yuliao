@@ -159,6 +159,8 @@ def test_criteria_single_sourced_from_knowledge_query(tmp_path):
         sorted(KQ.DEFAULT_ALLOWED_SOURCE_TYPES)
     assert rep["constants_as_read"]["DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX"] == \
         KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX
+    assert rep["constants_as_read"][
+        "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX"] is True
     assert rep["single_source"]["local_criteria_written"].startswith("none")
     assert rep["discipline"]["criteria_single_sourced_from"] == \
         "app/knowledge_query.py"
@@ -482,6 +484,12 @@ def test_closure_criteria_are_mechanical(tmp_path):
     for v in KQ.ELIGIBLE_INSTANCE_STATUS:
         assert f"'{v}'" in sql
     with sqlite3.connect(db) as con:
+        assert con.execute(sql, {"strategy_id": "ESV2-OK"}).fetchone()[0] == 1
+        con.execute("UPDATE work_sources SET source_type=? WHERE work_id='WK-A'",
+                    (KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,))
+        assert con.execute(sql, {"strategy_id": "ESV2-OK"}).fetchone()[0] == 0
+        con.execute("UPDATE work_sources SET source_type=? WHERE work_id='WK-A'",
+                    (KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX + "valid",))
         assert con.execute(sql, {"strategy_id": "ESV2-OK"}).fetchone()[0] == 1
     assert rep["closure_criteria_note"]
 

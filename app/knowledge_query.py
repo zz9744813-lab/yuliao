@@ -33,6 +33,7 @@ from .models import (ExpressionStrategyV2, Segment, StrategyCondition,
                       StrategyInstance, WorkSource)
 from .source_policy import (HUMAN_SOURCE_TYPES,
                             PRODUCTION_NONBENCHMARK_PREFIX,
+                            PRODUCTION_NONBENCHMARK_REQUIRES_SUFFIX,
                             compliant_human_source)
 
 # 查询默认只出**合格**知识（方案 §4.4：hypothesis 不自动作为 v2 已验证
@@ -88,6 +89,8 @@ DEFAULT_EXCLUDED_SOURCE_TYPES = frozenset(
 # this explicit human-source allowlist; K3 and K5 must apply the same floor.
 DEFAULT_ALLOWED_SOURCE_TYPES = HUMAN_SOURCE_TYPES
 DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX = PRODUCTION_NONBENCHMARK_PREFIX
+DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX = (
+    PRODUCTION_NONBENCHMARK_REQUIRES_SUFFIX)
 DEFAULT_ALLOWED_TEXT_VERSIONS = frozenset(
     {"corpus-v1", "corpus-v2-mirror"})
 # 调用方附加禁用用途（服务端无默认项；语义=并集附加，见 _evidence_for——
@@ -599,6 +602,8 @@ def capabilities(s) -> dict:
                     DEFAULT_EXCLUDED_SOURCE_TYPES),
                 "allowed_source_types": sorted(DEFAULT_ALLOWED_SOURCE_TYPES),
                 "allowed_source_type_prefix": DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
+                "allowed_source_type_prefix_requires_suffix":
+                    DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX,
                 "allowed_text_versions": sorted(
                     DEFAULT_ALLOWED_TEXT_VERSIONS),
                 "semantics": {
@@ -606,6 +611,10 @@ def capabilities(s) -> dict:
                         "union：实际生效=服务端默认∪调用方集，只可附加不可替换",
                     "excluded_uses":
                         "union：调用方附加禁用用途",
+                    "allowed_source_types":
+                        "服务端固定的人类来源白名单；调用方不能放宽",
+                    "allowed_source_type_prefix":
+                        "服务端固定的前缀族；必须有非空后缀，调用方不能放宽",
                     "allowed_text_versions":
                         "intersection：实际生效=服务端默认∩调用方集，只可收窄；空/不传=用默认集",
                 }},

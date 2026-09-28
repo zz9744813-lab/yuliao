@@ -223,10 +223,15 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         "evidence_refs": c.evidence_refs, "version": c.version,
     } for c in conditions]
 
+    # Freeze the source predicate's contract, including the nonempty suffix
+    # rule. Enforcement remains in KQ._evidence_for; these fields make a
+    # later predicate change invalidate old review rounds.
     source_policy = {
         "excluded_source_types": sorted(KQ.DEFAULT_EXCLUDED_SOURCE_TYPES),
         "allowed_source_types": sorted(KQ.DEFAULT_ALLOWED_SOURCE_TYPES),
         "allowed_source_type_prefix": KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
+        "allowed_source_type_prefix_requires_suffix":
+            KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX,
         "excluded_uses": sorted(KQ.DEFAULT_EXCLUDED_USES),
         "allowed_text_versions": sorted(KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
     }
@@ -279,6 +284,8 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
         "excluded_source_types": sorted(KQ.DEFAULT_EXCLUDED_SOURCE_TYPES),
         "allowed_source_types": sorted(KQ.DEFAULT_ALLOWED_SOURCE_TYPES),
         "allowed_source_type_prefix": KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
+        "allowed_source_type_prefix_requires_suffix":
+            KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX,
         "excluded_uses": sorted(KQ.DEFAULT_EXCLUDED_USES),
         "allowed_text_versions": sorted(KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
         "eligible_instance_status": sorted(KQ.ELIGIBLE_INSTANCE_STATUS),

@@ -489,6 +489,11 @@ def closure_criteria(explained: list[dict]) -> list[dict]:
             "target_note": "存在性下界 1（或 2）为占位阈值——真实阈值属策略"
                            "审查席裁定范围，本报告只给机械读数，不代裁"}
            for cid, stmt, target, current, sql, note in items]
+    source_prefix = KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX
+    prefix_sql = (f"substr(trim(ws.source_type), 1, {len(source_prefix)}) "
+                  f"= '{source_prefix}'")
+    if KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX:
+        prefix_sql += f" AND length(trim(ws.source_type)) > {len(source_prefix)}"
     out.append({
         "id": "G5-SQL",
         "statement": "只读 SQL：非 benchmark、status∈ELIGIBLE_INSTANCE_STATUS、"
@@ -505,8 +510,7 @@ def closure_criteria(explained: list[dict]) -> list[dict]:
             f"{_sql_in('ws.source_type', KQ.DEFAULT_EXCLUDED_SOURCE_TYPES)} "
             "AND (trim(ws.source_type) "
             f"{_sql_in('trim(ws.source_type)', KQ.DEFAULT_ALLOWED_SOURCE_TYPES)} OR "
-            f"(substr(trim(ws.source_type), 1, {len(KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX)}) "
-            f"= '{KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX}')) "
+            f"({prefix_sql})) "
             "AND si.text_version "
             f"{_sql_in('si.text_version', KQ.DEFAULT_ALLOWED_TEXT_VERSIONS)} "
             "AND si.strategy_id = :strategy_id"),
@@ -543,6 +547,9 @@ def single_source_manifest() -> dict:
              "kind": "constant", "used_as": "人类来源类型白名单（对账用）"},
             {"gate": "evidence_side", "symbol": "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX",
              "kind": "constant", "used_as": "人类来源类型前缀（对账用）"},
+            {"gate": "evidence_side",
+             "symbol": "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX",
+             "kind": "constant", "used_as": "前缀类型必须有非空后缀（对账用）"},
             {"gate": "evidence_side", "symbol": "DEFAULT_ALLOWED_TEXT_VERSIONS",
              "kind": "constant", "used_as": "文本版本允许集（对账用）"},
             {"gate": "crosscheck", "symbol": "query_knowledge(policy, s)",
@@ -611,6 +618,8 @@ def build_report(repo_root: Path, db_path: Path, policy: dict) -> dict:
                 KQ.DEFAULT_ALLOWED_SOURCE_TYPES),
             "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX":
                 KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
+            "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX":
+                KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX_REQUIRES_SUFFIX,
             "DEFAULT_ALLOWED_TEXT_VERSIONS": sorted(
                 KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
         },
