@@ -455,6 +455,74 @@ def test_http_failure_records_response_status_without_vote(monkeypatch, tmp_path
         engine.dispose()
 
 
+def test_streamed_http_response_is_bounded_before_receipt_parse(monkeypatch,
+                                                                 tmp_path):
+    engine, sid = _ready(monkeypatch, tmp_path)
+    received_chunks = []
+    real_client = httpx.Client
+
+    class OversizedStream(httpx.SyncByteStream):
+        def __iter__(self):
+            for index in range(10):
+                received_chunks.append(index)
+                yield b"x" * (64 * 1024)
+
+    def handle(request):
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, stream=OversizedStream())
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(runner.httpx, "Client", lambda *args, **kwargs:
+                        real_client(*args, transport=transport, **kwargs))
+    try:
+        with pytest.raises(runner.ReviewResponseError,
+                           match="k2_response_too_large"):
+            _run(engine, sid, tmp_path)
+        # The tenth network chunk must never be consumed.
+        assert received_chunks == list(range(9))
+        assert _counts(engine) == (0, 0, 0)
+        assert len(list((tmp_path / "semantic_review_attempts").glob(
+            "*.uncommitted.json"))) == 1
+    finally:
+        engine.dispose()
+
+
+def test_streamed_http_response_accepts_small_receipt(monkeypatch, tmp_path):
+    engine, sid = _ready(monkeypatch, tmp_path)
+    real_client = httpx.Client
+
+    def handle(request):
+        source = _response()
+        return httpx.Response(source.status_code, headers=source.headers,
+                              stream=httpx.ByteStream(source.content))
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(runner.httpx, "Client", lambda *args, **kwargs:
+                        real_client(*args, transport=transport, **kwargs))
+    try:
+        assert _run(engine, sid, tmp_path)["verdict"] == "PASS"
+        assert _counts(engine) == (1, 1, 0)
+    finally:
+        engine.dispose()
+
+
+def test_streamed_http_response_rejects_compression(monkeypatch, tmp_path):
+    engine, sid = _ready(monkeypatch, tmp_path)
+    real_client = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, headers={"Content-Encoding": "gzip"},
+        stream=httpx.ByteStream(b"compressed")))
+    monkeypatch.setattr(runner.httpx, "Client", lambda *args, **kwargs:
+                        real_client(*args, transport=transport, **kwargs))
+    try:
+        with pytest.raises(runner.ReviewResponseError,
+                           match="k2_response_encoding_unsupported"):
+            _run(engine, sid, tmp_path)
+        assert _counts(engine) == (0, 0, 0)
+    finally:
+        engine.dispose()
+
+
 def test_evidence_change_during_call_keeps_receipts_empty(monkeypatch, tmp_path):
     engine, sid = _ready(monkeypatch, tmp_path)
 

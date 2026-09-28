@@ -143,11 +143,27 @@ def _post_once(request_json: str, timeout: float) -> httpx.Response:
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(20.0, timeout)),
                           follow_redirects=False) as client:
-            return client.post(
+            with client.stream(
+                "POST",
                 config.GATEWAY_BASE_URL.rstrip("/") + "/chat/completions",
                 headers={"Authorization": f"Bearer {config.GATEWAY_API_KEY}",
-                         "Content-Type": "application/json"},
-                content=request_json.encode("utf-8"))
+                         "Content-Type": "application/json",
+                         "Accept-Encoding": "identity"},
+                content=request_json.encode("utf-8")) as response:
+                # A normal .post() buffers the whole body before the size
+                # check in _parse_response. Read raw, uncompressed bytes with
+                # a fixed cap so a gateway cannot exhaust memory first.
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                    raise ReviewResponseError("k2_response_encoding_unsupported")
+                body = bytearray()
+                for chunk in response.iter_raw(chunk_size=64 * 1024):
+                    if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
+                        raise ReviewResponseError("k2_response_too_large")
+                    body.extend(chunk)
+                return httpx.Response(response.status_code,
+                                      headers=response.headers,
+                                      content=bytes(body),
+                                      request=response.request)
     except httpx.HTTPError as exc:
         raise ReviewOutcomeUnknown("k2_gateway_outcome_unknown") from exc
 
@@ -455,6 +471,8 @@ def review_snapshot(engine: Engine, snapshot_id: str, route: ReviewRoute, *,
         try:
             response = _post_once(request_json, timeout_seconds)
         except ReviewOutcomeUnknown:
+            raise
+        except ReviewResponseError:
             raise
         except Exception as exc:
             raise ReviewOutcomeUnknown("k2_gateway_outcome_unknown") from exc
