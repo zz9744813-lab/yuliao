@@ -74,6 +74,8 @@ from app.scene_runtime.contracts import (Budget, Change, Fact,  # noqa: E402
                                           KnowledgePackage, PlannedEvent,
                                           ScenePlan, World)
 from app.scene_runtime.knowledge_v2 import frozen_package_for_scene  # noqa: E402
+from app.scene_runtime.offline_scene_bundle import (  # noqa: E402
+    SceneBundleError, check_offline_scene_bundle)
 from app.scene_runtime.pipeline import SceneRunner     # noqa: E402
 from app.scene_runtime.store import Store              # noqa: E402
 
@@ -489,6 +491,11 @@ def main() -> None:
     ap.add_argument("--book-id", default="WK-K4",
                     help="世界 id（默认 WK-K4，行为逐字不变）；须为有登记、"
                          "可匹配的真实试点世界（如 production_nonbenchmark_* 源）")
+    ap.add_argument("--scene-bundle", default="",
+                    help="候选真实作品场景 JSON；仅 --preflight 检查结构，"
+                         "不绑定当前合成 run_paired，也不放行 --live")
+    ap.add_argument("--expected-pack-sha256", default="",
+                    help="独立校验的作品包 SHA-256；使用 --scene-bundle 时必填")
     ap.add_argument("--writer-model", default="")
     ap.add_argument("--verifier-model", default="")
     ap.add_argument("--channel-changed", action="store_true",
@@ -510,10 +517,28 @@ def main() -> None:
     if a.out and Path(a.out).exists():
         raise SystemExit(f"--out 已存在：{a.out}——不静默覆盖上次实验产物，"
                          "换新目录（方案「新实验目录」纪律）")
+    bundle_report = None
+    if a.scene_bundle:
+        if not a.expected_pack_sha256:
+            raise SystemExit("--scene-bundle 需要 --expected-pack-sha256")
+        if not a.preflight:
+            raise SystemExit("--scene-bundle 仅供 --preflight；当前运行器仍用"
+                             "合成世界，不能把候选包当作真实运行输入")
+        try:
+            bundle_report = check_offline_scene_bundle(
+                a.scene_bundle,
+                expected_pack_sha256=a.expected_pack_sha256)
+        except SceneBundleError as exc:
+            raise SystemExit("[scene-bundle] 拒绝：" + str(exc)) from exc
+        if (bundle_report["book_id"] != a.book_id or
+                bundle_report["scene_count"] != a.scenes):
+            raise SystemExit("[scene-bundle] book_id 或场数与 CLI 不一致")
     # === 只读预检（独立模式）：零生成调用、零库写，打印可核对 JSON ===
     if a.preflight:
         with db.session() as s:
             pre = preflight_world(a.book_id, s)
+        if bundle_report is not None:
+            pre["scene_bundle"] = bundle_report
         print(json.dumps(pre, ensure_ascii=False, indent=1))
         if not pre["ready"]:
             raise SystemExit(
