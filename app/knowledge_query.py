@@ -31,6 +31,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from . import knowledge as K
 from .models import (ExpressionStrategyV2, Segment, StrategyCondition,
                       StrategyInstance, WorkSource)
+from .source_policy import (HUMAN_SOURCE_TYPES,
+                            PRODUCTION_NONBENCHMARK_PREFIX,
+                            compliant_human_source)
 
 # 查询默认只出**合格**知识（方案 §4.4：hypothesis 不自动作为 v2 已验证
 # 查询结果；K3 行「K1/K2 合格知识可用」）
@@ -81,6 +84,10 @@ ELIGIBLE_INSTANCE_STATUS = frozenset({"verified"})
 # K1-A 契约：fixture 只验契约）与合格文本版本
 DEFAULT_EXCLUDED_SOURCE_TYPES = frozenset(
     {"fixture", "synthetic", "commentary"})
+# A blacklist alone admits every new/unknown source_type. K2 extraction uses
+# this explicit human-source allowlist; K3 and K5 must apply the same floor.
+DEFAULT_ALLOWED_SOURCE_TYPES = HUMAN_SOURCE_TYPES
+DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX = PRODUCTION_NONBENCHMARK_PREFIX
 DEFAULT_ALLOWED_TEXT_VERSIONS = frozenset(
     {"corpus-v1", "corpus-v2-mirror"})
 # 调用方附加禁用用途（服务端无默认项；语义=并集附加，见 _evidence_for——
@@ -246,7 +253,7 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
 
     硬拦（K1-A 契约复用）：基准段实例剔除（基准上下文泄漏）、
     excluded_source_types（fixture/synthetic/commentary 冒充；服务端
-    并集封底，调用方只可附加）、excluded_uses（并集附加）、
+    并集封底，调用方只可附加）、固定人类来源白名单、excluded_uses（并集附加）、
     allowed_text_versions（服务端交集封顶，调用方只可收窄）、
     license 禁用用途；镜像按 canonical 根作品聚合去重
     ——evidence_count=唯一 (根作品, span) 区间数，重跑不加置信度。
@@ -301,6 +308,9 @@ def _evidence_for(s, strategy_id: str, policy: dict) -> tuple[list[dict], int, l
             stripped.append(f"{ins.id}:benchmark_source"); continue
         if r.source_type in excluded_types:
             stripped.append(f"{ins.id}:excluded_source_type:{r.source_type}"); continue
+        if not compliant_human_source(r.source_type):
+            stripped.append(f"{ins.id}:source_type_not_compliant:{r.source_type}")
+            continue
         if set(r.license_purposes or []) & excluded_uses:
             stripped.append(f"{ins.id}:excluded_use"); continue
         if ins.text_version not in allowed_tv:
@@ -587,6 +597,8 @@ def capabilities(s) -> dict:
             "source_policy_floor": {
                 "excluded_source_types": sorted(
                     DEFAULT_EXCLUDED_SOURCE_TYPES),
+                "allowed_source_types": sorted(DEFAULT_ALLOWED_SOURCE_TYPES),
+                "allowed_source_type_prefix": DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
                 "allowed_text_versions": sorted(
                     DEFAULT_ALLOWED_TEXT_VERSIONS),
                 "semantics": {

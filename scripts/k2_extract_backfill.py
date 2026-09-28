@@ -71,6 +71,9 @@ from app import db, knowledge_extract as KE                    # noqa: E402
 from app.config import LLM_MODE                                # noqa: E402
 from app.models import (ExpressionStrategyV2, Segment, Work,   # noqa: E402
                         StrategyInstance, WorkSource)
+from app.source_policy import (HUMAN_SOURCE_TYPES,  # noqa: E402
+                               PRODUCTION_NONBENCHMARK_PREFIX,
+                               compliant_human_source)
 
 DEFAULT_LIMIT = 48
 
@@ -80,24 +83,19 @@ DEFAULT_LIMIT = 48
 SOURCE_SCOPES = ("benchmark", "nonbenchmark")
 DEFAULT_SOURCE_SCOPE = "benchmark"
 BENCHMARK_ROLE = "benchmark"
-# 合规非 benchmark 人类语料的**显式白名单**（K3 侧 DEFAULT_EXCLUDED_SOURCE_TYPES
-# 的 fixture/synthetic/commentary 天然不在这里——抽取侧只加严，不与之竞争）：
+# 合规非 benchmark 人类语料的**显式白名单**，K2/K3/K5 共用：
 # · 精确值：human_fiction（K1-A 登记的根/镜像人类源）
 # · 前缀：  production_nonbenchmark_*（真库试点源，如 production_nonbenchmark_k2v2）
-NONBENCHMARK_SOURCE_TYPES = frozenset({"human_fiction"})
-NONBENCHMARK_SOURCE_TYPE_PREFIX = "production_nonbenchmark_"
+NONBENCHMARK_SOURCE_TYPES = HUMAN_SOURCE_TYPES
+NONBENCHMARK_SOURCE_TYPE_PREFIX = PRODUCTION_NONBENCHMARK_PREFIX
 
 MAX_TRACE_SOURCES = 500       # 排除/合格来源明细上限（真库来源数十级，防刷屏；
                               # 超出部分计入 *_truncated，局部核对用 work_filter）
 
 
 def nonbenchmark_compliant_source(source_type) -> bool:
-    """来源类型是否属合规非 benchmark 人类语料（唯一判定入口，留痕用）。"""
-    st = (source_type or "").strip()
-    if not st:
-        return False
-    return st in NONBENCHMARK_SOURCE_TYPES or st.startswith(
-        NONBENCHMARK_SOURCE_TYPE_PREFIX)
+    """Compatibility name for the shared K2/K3/K5 source-type floor."""
+    return compliant_human_source(source_type)
 
 
 def integrity_dict(seg_or_value) -> dict:
@@ -387,6 +385,8 @@ def _k3_source_gate(segment, text_version, *, work_source=None) -> str | None:
         return "benchmark_source"
     if ws.source_type in KQ.DEFAULT_EXCLUDED_SOURCE_TYPES:
         return f"excluded_source_type:{ws.source_type}"
+    if not compliant_human_source(ws.source_type):
+        return f"source_type_not_compliant:{ws.source_type}"
     if set(ws.license_purposes or []) & KQ.DEFAULT_EXCLUDED_USES:
         return "excluded_use"
     if text_version not in KQ.DEFAULT_ALLOWED_TEXT_VERSIONS:

@@ -225,6 +225,8 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
 
     source_policy = {
         "excluded_source_types": sorted(KQ.DEFAULT_EXCLUDED_SOURCE_TYPES),
+        "allowed_source_types": sorted(KQ.DEFAULT_ALLOWED_SOURCE_TYPES),
+        "allowed_source_type_prefix": KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
         "excluded_uses": sorted(KQ.DEFAULT_EXCLUDED_USES),
         "allowed_text_versions": sorted(KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
     }
@@ -275,6 +277,8 @@ def build_snapshot(s, strategy_id: str, strategy_version: int,
     policy = {
         "source_policy": source_policy,
         "excluded_source_types": sorted(KQ.DEFAULT_EXCLUDED_SOURCE_TYPES),
+        "allowed_source_types": sorted(KQ.DEFAULT_ALLOWED_SOURCE_TYPES),
+        "allowed_source_type_prefix": KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
         "excluded_uses": sorted(KQ.DEFAULT_EXCLUDED_USES),
         "allowed_text_versions": sorted(KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
         "eligible_instance_status": sorted(KQ.ELIGIBLE_INSTANCE_STATUS),

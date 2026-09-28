@@ -204,17 +204,17 @@ def test_parse_work_ids_repeatable_and_comma():
 # ── ③ 合规来源判据单源漂移即红 ────────────────────────────────────────
 
 def test_nonbench_compliance_single_source_no_drift():
-    """直读 scripts/k2_extract_backfill.py 源码字面量比对（照抄
+    """直读 app/source_policy.py 源码字面量比对（照抄
     tests/test_k2_pairs_gen.py 的漂移断言写法）：改一边不改另一边即红。"""
-    src = (ROOT / "scripts" / "k2_extract_backfill.py").read_text(
+    src = (ROOT / "app" / "source_policy.py").read_text(
         encoding="utf-8")
     m_t = re.search(
-        r"^NONBENCHMARK_SOURCE_TYPES\s*=\s*frozenset\((\{[^}]*\})\)",
+        r"^HUMAN_SOURCE_TYPES\s*=\s*frozenset\((\{[^}]*\})\)",
         src, re.M)
     m_p = re.search(
-        r'^NONBENCHMARK_SOURCE_TYPE_PREFIX\s*=\s*["\']([^"\']*)["\']',
+        r'^PRODUCTION_NONBENCHMARK_PREFIX\s*=\s*["\']([^"\']*)["\']',
         src, re.M)
-    assert m_t and m_p, "k2_extract_backfill 常量声明形态变了——两边同步核查"
+    assert m_t and m_p, "source_policy 常量声明形态变了——各调用方同步核查"
     # 源码字面量 ↔ 运行时常量（同一来源的两种读法，改任何一边即红）
     assert set(ast.literal_eval(m_t.group(1))) == \
         set(sc.k2b.NONBENCHMARK_SOURCE_TYPES), "来源类型白名单漂移"

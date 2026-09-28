@@ -252,13 +252,21 @@ def test_excluded_source_types_union_adds_caller_items(seeded):
                 conditions_observed={}, observed_content="",
                 extractor_model="t", status="verified"))
             s.commit()
-            # 不加附加排除：other 来源计入合格证据（证明附加项真的生效）
+            # 未知类型即使已登记也不得进证据；白名单类型才用于证明附加排除。
+            refs0, n0, st0 = kq._evidence_for(s, "ESV2-OT", {})
+            assert n0 == 0 and not refs0
+            assert "SI-OT1:source_type_not_compliant:other" in st0
+            s.query(WorkSource).filter_by(work_id="WK-OT").one().source_type = \
+                "production_nonbenchmark_other"
+            s.commit()
             refs0, n0, _ = kq._evidence_for(s, "ESV2-OT", {})
             assert n0 == 1 and refs0, (refs0, n0)
-            pol = {"source_policy": {"excluded_source_types": ["other"]}}
+            pol = {"source_policy": {"excluded_source_types": [
+                "production_nonbenchmark_other"]}}
             refs1, n1, st1 = kq._evidence_for(s, "ESV2-OT", pol)
             assert n1 == 0 and not refs1, (refs1, n1)
-            assert "SI-OT1:excluded_source_type:other" in st1, st1
+            assert ("SI-OT1:excluded_source_type:production_nonbenchmark_other"
+                    in st1), st1
             # 默认集不被调用方集合替换：fixture 冒充路径仍拦
             refs2, n2, st2 = kq._evidence_for(s, "ESV2-J", pol)
             assert n2 == 0 and not refs2, (refs2, n2)
@@ -435,6 +443,8 @@ def test_capabilities_reports_source_policy_floor(seeded):
     floor = resp.json()["source_policy_floor"]
     assert floor["excluded_source_types"] == \
         sorted(kq.DEFAULT_EXCLUDED_SOURCE_TYPES)
+    assert floor["allowed_source_types"] == ["human_fiction"]
+    assert floor["allowed_source_type_prefix"] == "production_nonbenchmark_"
     assert floor["allowed_text_versions"] == \
         sorted(kq.DEFAULT_ALLOWED_TEXT_VERSIONS)
     assert "union" in floor["semantics"]["excluded_source_types"]

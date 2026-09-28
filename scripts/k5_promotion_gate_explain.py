@@ -96,6 +96,8 @@ STRIP_CATEGORY = {
     "excluded_source_type": ("excluded_source_type",
                              "来源类型被排除（fixture/synthetic/commentary 等，"
                              "附具体类型）"),
+    "source_type_not_compliant": ("source_type_not_compliant",
+                                  "来源类型不在人类证据白名单"),
     "excluded_use": ("excluded_use", "license 禁用用途（license_purposes 撞 "
                                      "excluded_uses）"),
     "text_version": ("text_version", "文本版本不在允许集（附具体版本）"),
@@ -490,7 +492,7 @@ def closure_criteria(explained: list[dict]) -> list[dict]:
     out.append({
         "id": "G5-SQL",
         "statement": "只读 SQL：非 benchmark、status∈ELIGIBLE_INSTANCE_STATUS、"
-                     "来源类型不在排除集、文本版本在允许集的实例行数"
+                     "来源类型在白名单且不在排除集、文本版本在允许集的实例行数"
                      "（按策略参数化 strategy_id）",
         "target": None, "current": None, "satisfied": None,
         "executable": (
@@ -501,6 +503,10 @@ def closure_criteria(explained: list[dict]) -> list[dict]:
             "AND (sg.role IS NULL OR sg.role <> 'benchmark') "
             "AND ws.source_type NOT "
             f"{_sql_in('ws.source_type', KQ.DEFAULT_EXCLUDED_SOURCE_TYPES)} "
+            "AND (trim(ws.source_type) "
+            f"{_sql_in('trim(ws.source_type)', KQ.DEFAULT_ALLOWED_SOURCE_TYPES)} OR "
+            f"(substr(trim(ws.source_type), 1, {len(KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX)}) "
+            f"= '{KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX}')) "
             "AND si.text_version "
             f"{_sql_in('si.text_version', KQ.DEFAULT_ALLOWED_TEXT_VERSIONS)} "
             "AND si.strategy_id = :strategy_id"),
@@ -533,6 +539,10 @@ def single_source_manifest() -> dict:
              "kind": "constant", "used_as": "证据侧 status 口径（对账用）"},
             {"gate": "evidence_side", "symbol": "DEFAULT_EXCLUDED_SOURCE_TYPES",
              "kind": "constant", "used_as": "来源类型排除集（对账用）"},
+            {"gate": "evidence_side", "symbol": "DEFAULT_ALLOWED_SOURCE_TYPES",
+             "kind": "constant", "used_as": "人类来源类型白名单（对账用）"},
+            {"gate": "evidence_side", "symbol": "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX",
+             "kind": "constant", "used_as": "人类来源类型前缀（对账用）"},
             {"gate": "evidence_side", "symbol": "DEFAULT_ALLOWED_TEXT_VERSIONS",
              "kind": "constant", "used_as": "文本版本允许集（对账用）"},
             {"gate": "crosscheck", "symbol": "query_knowledge(policy, s)",
@@ -597,6 +607,10 @@ def build_report(repo_root: Path, db_path: Path, policy: dict) -> dict:
             "ELIGIBLE_INSTANCE_STATUS": sorted(KQ.ELIGIBLE_INSTANCE_STATUS),
             "DEFAULT_EXCLUDED_SOURCE_TYPES": sorted(
                 KQ.DEFAULT_EXCLUDED_SOURCE_TYPES),
+            "DEFAULT_ALLOWED_SOURCE_TYPES": sorted(
+                KQ.DEFAULT_ALLOWED_SOURCE_TYPES),
+            "DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX":
+                KQ.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX,
             "DEFAULT_ALLOWED_TEXT_VERSIONS": sorted(
                 KQ.DEFAULT_ALLOWED_TEXT_VERSIONS),
         },

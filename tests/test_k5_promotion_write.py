@@ -707,6 +707,19 @@ def test_audit_row_fields_and_readonly_verification(tmp_path):
     assert out["ok"] is True and out["db_mode"] == "ro" and out["n_audits"] == 1
 
 
+def test_audit_verifier_flags_source_that_loses_human_status(tmp_path):
+    """A recorded audit cannot stay valid after its source becomes quarantined."""
+    db = _promotable(tmp_path)
+    assert _commit(db) == k5w.EXIT_OK
+    with sqlite3.connect(db.as_posix()) as con:
+        con.execute("UPDATE work_sources SET source_type='unverified_corpus' "
+                    "WHERE work_id='WK-A'")
+    out = k5w.verify_promotion_audits(db)
+    assert out["ok"] is False
+    assert any("evidence_source_type_not_compliant:SI-1" in row["kinds"]
+               for row in out["violations"])
+
+
 def test_audit_table_blocks_update_and_delete(tmp_path):
     """契约 5：append-only 在 **DB 层**成立（触发器），不靠自觉。"""
     db = _promotable(tmp_path)
@@ -834,6 +847,16 @@ def test_excluded_source_type_never_counts(tmp_path):
     v = _verdict(db)
     assert v["evidence"]["evidence_count"] == 0
     assert v["evidence"]["stripped"] == {"excluded_source_type": 2}
+
+
+def test_registered_unknown_source_type_never_counts(tmp_path):
+    """Registration alone must not turn a quarantined source into K3 evidence."""
+    db = _promotable(tmp_path,
+                     works=[_work("WK-A", source_type="unverified_corpus"),
+                            _work("WK-B", source_type="human_fiction")])
+    v = _verdict(db)
+    assert v["evidence"]["evidence_count"] == 1
+    assert v["evidence"]["stripped"] == {"source_type_not_compliant": 1}
 
 
 # ============================================== scope 推导（带规则版本）

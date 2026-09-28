@@ -629,6 +629,8 @@ def verify_promotion_audits(db_path: Path) -> dict:
                 v.append(f"evidence_benchmark:{iid}")
             if stype in tuple(KQ.DEFAULT_EXCLUDED_SOURCE_TYPES):
                 v.append(f"evidence_excluded_source_type:{iid}")
+            elif not KQ.compliant_human_source(stype):
+                v.append(f"evidence_source_type_not_compliant:{iid}")
             if ist not in tuple(KQ.ELIGIBLE_INSTANCE_STATUS):
                 v.append(f"evidence_instance_status:{iid}")
             if iver != KE.REVIEW_MARKER_NEW_DEF:

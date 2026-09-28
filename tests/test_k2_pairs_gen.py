@@ -345,20 +345,20 @@ def test_source_gate_text_version_whitelist(tmp_path):
 
 def test_source_constants_single_source_no_drift():
     """⑨ 常量单源漂移即红：本模块的合规口径必须逐字等于
-    scripts/k2_extract_backfill.py 源码里的字面量（直接读文件比对，
+    app/source_policy.py 源码里的字面量（直接读文件比对，
     不 import 后自比自），且判定入口就是 backfill 的那个函数；
     text_version 白名单就是 K3 的 DEFAULT_ALLOWED_TEXT_VERSIONS。"""
     import re
     import ast
-    src = (ROOT / "scripts" / "k2_extract_backfill.py").read_text(
+    src = (ROOT / "app" / "source_policy.py").read_text(
         encoding="utf-8")
     m_t = re.search(
-        r"^NONBENCHMARK_SOURCE_TYPES\s*=\s*frozenset\((\{[^}]*\})\)",
+        r"^HUMAN_SOURCE_TYPES\s*=\s*frozenset\((\{[^}]*\})\)",
         src, re.M)
     m_p = re.search(
-        r'^NONBENCHMARK_SOURCE_TYPE_PREFIX\s*=\s*["\']([^"\']*)["\']',
+        r'^PRODUCTION_NONBENCHMARK_PREFIX\s*=\s*["\']([^"\']*)["\']',
         src, re.M)
-    assert m_t and m_p, "k2_extract_backfill 常量声明形态变了——两边同步核查"
+    assert m_t and m_p, "source_policy 常量声明形态变了——各调用方同步核查"
     assert set(ast.literal_eval(m_t.group(1))) == \
         set(k2g.NONBENCHMARK_SOURCE_TYPES), "来源类型白名单漂移"
     assert m_p.group(1) == k2g.NONBENCHMARK_SOURCE_TYPE_PREFIX, \
@@ -372,6 +372,9 @@ def test_source_constants_single_source_no_drift():
         "production_nonbenchmark_x") is True
     # text_version 白名单与 K3 证据侧同一对象（同源，不复制字面量）
     from app import knowledge_query as kq
+    assert k2g.NONBENCHMARK_SOURCE_TYPES is kq.DEFAULT_ALLOWED_SOURCE_TYPES
+    assert k2g.NONBENCHMARK_SOURCE_TYPE_PREFIX == \
+        kq.DEFAULT_ALLOWED_SOURCE_TYPE_PREFIX
     assert k2g.ALLOWED_TEXT_VERSIONS is kq.DEFAULT_ALLOWED_TEXT_VERSIONS
 
 
