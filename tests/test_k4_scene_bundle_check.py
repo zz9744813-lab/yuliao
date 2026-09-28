@@ -11,6 +11,8 @@ import pytest
 
 from app.scene_runtime.offline_scene_bundle import (
     SceneBundleError, check_offline_scene_bundle)
+from app.scene_runtime import offline_scene_bundle as bundle_module
+from app.scene_runtime.contracts import RuntimeFault
 
 
 def _bundle() -> dict:
@@ -83,11 +85,15 @@ def test_two_arm_scene_structure_pass_is_never_live_ready(tmp_path):
         _save(tmp_path, _bundle()), expected_pack_sha256="a" * 64)
     assert report["structure_pass"] is True
     assert report["live_ready"] is False
+    assert report["offline_replay_count"] == 1
+    assert report["paired_generated_arms_checked"] is False
     assert report["scene_ids"] == ["scene-1", "scene-2"]
     assert report["declared_pack_digest_matched_expected"] is True
     assert report["source_pack_file_checked"] is False
     assert report["db_registration_checked"] is False
     assert report["model_calls"] == 0
+    assert report["route_and_price_verified_declared"] is False
+    assert report["monetary_cap_approved_declared"] is False
     assert len(report["initial_world_sha256"]) == 64
     assert len(report["final_world_sha256"]) == 64
 
@@ -107,6 +113,8 @@ def test_declared_pack_hash_needs_independent_expected_hash(tmp_path):
      .update(before=0), "bundle_plan_invalid:plan_precondition_conflict"),
     (lambda b: b["plans"][1].update(scene_id="scene-1"),
      "bundle_scene_identity_duplicate"),
+    (lambda b: b["plans"][1].update(book_id="another-book"),
+     "bundle_plan_invalid:world_revision_conflict"),
     (lambda b: b["plans"][1].update(idempotency_key="scene-1-v1"),
      "bundle_scene_identity_duplicate"),
     (lambda b: b["plans"][0]["events"][0]["changes"][0]
@@ -130,6 +138,42 @@ def test_duplicate_json_keys_and_oversize_rejected(tmp_path):
     path.write_bytes(b" " * (1024 * 1024 + 1))
     with pytest.raises(SceneBundleError, match="bundle_size_invalid"):
         check_offline_scene_bundle(path)
+
+
+def test_unknown_runtime_fault_never_exposes_story_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(bundle_module, "validate_plan", lambda *_: (
+        _ for _ in ()).throw(RuntimeFault("private scene description")))
+    with pytest.raises(SceneBundleError, match="^bundle_plan_invalid:unknown$"):
+        check_offline_scene_bundle(_save(tmp_path, _bundle()))
+
+
+def test_replay_error_is_stable(tmp_path, monkeypatch):
+    monkeypatch.setattr(bundle_module, "validate_plan", lambda *_: None)
+    bundle = _bundle()
+    bundle["plans"][0]["events"][0]["changes"][0]["fact"] = "missing_fact"
+    with pytest.raises(SceneBundleError, match="^bundle_replay_invalid$"):
+        check_offline_scene_bundle(_save(tmp_path, bundle))
+
+
+def test_cli_requires_expected_digest_and_reports_structural_only(
+        tmp_path, monkeypatch, capsys):
+    script = Path(__file__).resolve().parents[1] / "scripts" / "k4_scene_bundle_check.py"
+    spec = spec_from_file_location("k4_scene_bundle_cli_test", script)
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    path = _save(tmp_path, _bundle())
+    monkeypatch.setattr(sys, "argv", ["check", "--bundle", str(path)])
+    with pytest.raises(SystemExit) as exc:
+        module.main()
+    assert exc.value.code == 2
+    monkeypatch.setattr(sys, "argv", [
+        "check", "--bundle", str(path), "--expected-pack-sha256", "a" * 64,
+    ])
+    assert module.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["structure_pass"] is True
+    assert report["live_ready"] is False
+    assert report["source_pack_file_checked"] is False
 
 
 def _driver():

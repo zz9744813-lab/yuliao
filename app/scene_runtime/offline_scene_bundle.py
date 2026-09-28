@@ -1,7 +1,7 @@
-"""Validate a proposed story scene bundle without database or model access.
+"""Validate one proposed scene sequence without database or model access.
 
-Passing this check proves only that the frozen scene contracts can advance two
-identical worlds. It never authorizes a K4/K5 live run or a K3 package.
+Passing proves only that the scene contracts can advance one offline world.
+It does not compare generated A/B arms or authorize a K4/K5 live run.
 """
 from __future__ import annotations
 
@@ -16,6 +16,12 @@ from .contracts import (Budget, KnowledgePackage, RuntimeFault, ScenePlan,
                         World, digest, validate_plan)
 
 MAX_BUNDLE_BYTES = 1024 * 1024
+SAFE_PLAN_FAULTS = frozenset({
+    "world_revision_conflict", "knowledge_scope_conflict", "unknown_pov",
+    "unknown_or_immutable_fact", "plan_precondition_conflict",
+    "fact_type_change_not_supported", "empty_state_change",
+    "planned_fact_outside_pov",
+})
 
 
 class SceneBundleError(ValueError):
@@ -120,17 +126,22 @@ def check_offline_scene_bundle(path: str | Path, *,
                                   .per_scene_per_arm_max_output_tokens_per_call),
                max_elapsed_seconds=(bundle.runtime_budget_draft
                                     .per_scene_per_arm_max_elapsed_seconds))
-        first = _replay(bundle.world, bundle.plans)
-        second = _replay(bundle.world, bundle.plans)
+        final_world = _replay(bundle.world, bundle.plans)
+    except SceneBundleError:
+        raise
     except ValidationError as exc:
         raise SceneBundleError("bundle_schema_invalid") from exc
     except RuntimeFault as exc:
-        raise SceneBundleError("bundle_plan_invalid:" + str(exc)) from exc
-    if first != second:
-        raise SceneBundleError("bundle_paired_replay_mismatch")
+        code = str(exc)
+        raise SceneBundleError("bundle_plan_invalid:" +
+                               (code if code in SAFE_PLAN_FAULTS else "unknown")) from exc
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise SceneBundleError("bundle_replay_invalid") from exc
     return {
         "structure_pass": True,
         "live_ready": False,
+        "offline_replay_count": 1,
+        "paired_generated_arms_checked": False,
         "book_id": bundle.world.book_id,
         "branch_id": bundle.world.branch_id,
         "scene_ids": ids,
@@ -138,12 +149,14 @@ def check_offline_scene_bundle(path: str | Path, *,
         "initial_world_sha256": digest(bundle.world),
         "plans_sha256": digest([plan.model_dump(mode="json")
                                 for plan in bundle.plans]),
-        "final_world_sha256": first,
+        "final_world_sha256": final_world,
         "artifact_sha256": hashlib.sha256(raw).hexdigest(),
         "source_pack_sha256_declared": bundle.source.production_pack_sha256,
         "declared_pack_digest_matched_expected": expected_pack_sha256 is not None,
         "source_pack_file_checked": False,
         "db_registration_checked": False,
+        "route_and_price_verified_declared": bundle.runtime_budget_draft.route_and_price_verified,
+        "monetary_cap_approved_declared": bundle.runtime_budget_draft.monetary_cap_approved,
         "model_calls": 0,
         "reason": "canon_rights_budget_k2_and_live_entry_not_approved",
     }

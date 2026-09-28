@@ -18,7 +18,8 @@ from app.scene_runtime.offline_scene_bundle import (  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", required=True)
-    parser.add_argument("--expected-pack-sha256", default=None)
+    parser.add_argument("--expected-pack-sha256", required=True,
+                        help="从作品包独立核验得到的 SHA-256；只比较声明，不读取作品包")
     args = parser.parse_args()
     try:
         report = check_offline_scene_bundle(
