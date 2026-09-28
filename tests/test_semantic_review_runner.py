@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import URL
 
 from app import config
 from app.models import ExpressionStrategyV2
@@ -195,6 +196,87 @@ def test_untrusted_storage_refuses_before_dispatch(monkeypatch, tmp_path):
                            match="k2_storage_acl_untrusted"):
             _run(engine, sid, tmp_path)
         assert _counts(engine) == (0, 0, 0)
+    finally:
+        engine.dispose()
+
+
+def test_k2_database_path_must_be_existing_absolute_canonical(tmp_path):
+    database = tmp_path / "private.db"
+    database.touch()
+    assert runner._canonical_database_path(str(database)) == database
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_untrusted"):
+        runner._canonical_database_path("private.db")
+    child = tmp_path / "alias"
+    child.mkdir()
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_untrusted"):
+        runner._canonical_database_path(str(child / ".." / "private.db"))
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_unverifiable"):
+        runner._canonical_database_path(str(tmp_path / "missing.db"))
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_unverifiable"):
+        runner._canonical_database_path(str(database) + "\x00")
+    directory = tmp_path / "directory-instead-of-db"
+    directory.mkdir()
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_untrusted"):
+        runner._canonical_database_path(str(directory))
+
+
+def test_k2_database_path_rejects_symlink_alias_when_supported(tmp_path):
+    database = tmp_path / "private.db"
+    database.touch()
+    alias = tmp_path / "alias.db"
+    try:
+        alias.symlink_to(database)
+    except OSError:
+        pytest.skip("symlink creation unavailable on this host")
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_untrusted"):
+        runner._canonical_database_path(str(alias))
+
+
+def test_noncanonical_database_refuses_before_storage_probe_or_dispatch(
+        monkeypatch, tmp_path):
+    database = tmp_path / "private.db"
+    database.touch()
+    child = tmp_path / "alias"
+    child.mkdir()
+    alias = str(child / ".." / "private.db")
+    engine = SimpleNamespace(url=URL.create("sqlite", database=alias))
+    monkeypatch.setattr(config, "LLM_MODE", "real")
+    monkeypatch.setattr(config, "GATEWAY_BASE_URL", "https://synthetic.example/v1")
+    monkeypatch.setattr(config, "GATEWAY_API_KEY", "synthetic-key")
+    monkeypatch.setattr(runner, "_require_private_storage",
+                        lambda path: pytest.fail("storage ACL probe must not run"))
+    monkeypatch.setattr(runner, "_post_once",
+                        lambda *args: pytest.fail("model must not dispatch"))
+    with pytest.raises(runner.ReviewPreflightError,
+                       match="k2_storage_path_untrusted"):
+        _run(engine, "SS-synthetic", tmp_path)
+    assert not (tmp_path / runner.ATTEMPT_DIRECTORY_NAME).exists()
+
+
+def test_canonical_database_is_the_storage_probe_target(monkeypatch, tmp_path):
+    engine, sid = _ready(monkeypatch, tmp_path)
+    probed = []
+
+    def stop_after_probe(database):
+        probed.append(database)
+        raise runner.ReviewPreflightError("synthetic_probe_stop")
+
+    monkeypatch.setattr(runner, "_require_private_storage", stop_after_probe)
+    monkeypatch.setattr(runner, "_post_once",
+                        lambda *args: pytest.fail("model must not dispatch"))
+    try:
+        with pytest.raises(runner.ReviewPreflightError,
+                           match="synthetic_probe_stop"):
+            _run(engine, sid, tmp_path)
+        assert probed == [(tmp_path / "synthetic.db").resolve(strict=True)]
+        assert _counts(engine) == (0, 0, 0)
+        assert not (tmp_path / runner.ATTEMPT_DIRECTORY_NAME).exists()
     finally:
         engine.dispose()
 

@@ -358,6 +358,28 @@ def _unsafe_posix_storage_mode(mode: int, file_owner: int,
     return bool(stat.S_IMODE(mode) & 0o022 and not mode & stat.S_ISVTX)
 
 
+def _canonical_database_path(database: str) -> Path:
+    """Reject aliases that could change between ACL inspection and SQLite use."""
+    try:
+        path = Path(database)
+    except (TypeError, ValueError) as exc:
+        raise ReviewPreflightError("k2_storage_path_unverifiable") from exc
+    if not path.is_absolute():
+        raise ReviewPreflightError("k2_storage_path_untrusted")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReviewPreflightError("k2_storage_path_unverifiable") from exc
+    if path != resolved:
+        raise ReviewPreflightError("k2_storage_path_untrusted")
+    try:
+        if not stat.S_ISREG(resolved.stat().st_mode):
+            raise ReviewPreflightError("k2_storage_path_untrusted")
+    except OSError as exc:
+        raise ReviewPreflightError("k2_storage_path_unverifiable") from exc
+    return resolved
+
+
 def review_snapshot(engine: Engine, snapshot_id: str, route: ReviewRoute, *,
                     max_output_tokens: int, max_request_bytes: int,
                     timeout_seconds: float) -> dict:
@@ -390,7 +412,7 @@ def review_snapshot(engine: Engine, snapshot_id: str, route: ReviewRoute, *,
     if (engine.url.get_backend_name() != "sqlite" or
             not engine.url.database or engine.url.database == ":memory:"):
         raise ReviewPreflightError("k2_durable_sqlite_required")
-    database = Path(engine.url.database).resolve()
+    database = _canonical_database_path(engine.url.database)
     _require_private_storage(database)
     with engine.connect() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
