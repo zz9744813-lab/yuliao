@@ -530,6 +530,64 @@ def test_streamed_http_response_discards_wire_length_and_untrusted_headers(
     assert "x-untrusted" not in response.headers
 
 
+def test_streamed_slow_drip_expires_without_vote(monkeypatch, tmp_path):
+    engine, sid = _ready(monkeypatch, tmp_path)
+    real_client = httpx.Client
+    clock = [0.0]
+    received_chunks = []
+
+    class SlowStream(httpx.SyncByteStream):
+        def __iter__(self):
+            for index in range(3):
+                clock[0] += 6.0
+                received_chunks.append(index)
+                yield b"x"
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(
+        200, stream=SlowStream()))
+    monkeypatch.setattr(runner.httpx, "Client", lambda *args, **kwargs:
+                        real_client(*args, transport=transport, **kwargs))
+    monkeypatch.setattr(runner, "time", SimpleNamespace(
+        monotonic=lambda: clock[0]))
+    try:
+        with pytest.raises(runner.ReviewOutcomeUnknown,
+                           match="k2_gateway_deadline_exceeded"):
+            _run(engine, sid, tmp_path, timeout_seconds=10)
+        assert received_chunks == [0, 1]
+        assert _counts(engine) == (0, 0, 0)
+        assert len(list((tmp_path / "semantic_review_attempts").glob(
+            "*.outcome_unknown.json"))) == 1
+    finally:
+        engine.dispose()
+
+
+def test_streamed_headers_after_deadline_refuse_before_body(monkeypatch):
+    real_client = httpx.Client
+    clock = [0.0]
+    body_read = []
+
+    class UnreadStream(httpx.SyncByteStream):
+        def __iter__(self):
+            body_read.append(True)
+            yield b"{}"
+
+    def handle(request):
+        clock[0] = 11.0
+        return httpx.Response(200, stream=UnreadStream())
+
+    transport = httpx.MockTransport(handle)
+    monkeypatch.setattr(config, "GATEWAY_BASE_URL", "https://synthetic.example/v1")
+    monkeypatch.setattr(config, "GATEWAY_API_KEY", "synthetic-key")
+    monkeypatch.setattr(runner.httpx, "Client", lambda *args, **kwargs:
+                        real_client(*args, transport=transport, **kwargs))
+    monkeypatch.setattr(runner, "time", SimpleNamespace(
+        monotonic=lambda: clock[0]))
+    with pytest.raises(runner.ReviewOutcomeUnknown,
+                       match="k2_gateway_deadline_exceeded"):
+        runner._post_once("{}", 10)
+    assert body_read == []
+
+
 def test_streamed_http_response_rejects_compression(monkeypatch, tmp_path):
     engine, sid = _ready(monkeypatch, tmp_path)
     real_client = httpx.Client

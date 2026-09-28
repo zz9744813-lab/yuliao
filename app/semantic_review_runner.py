@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -141,6 +142,7 @@ def _load_round(conn, snapshot_id: str) -> dict:
 
 
 def _post_once(request_json: str, timeout: float) -> httpx.Response:
+    deadline = time.monotonic() + timeout
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout, connect=min(20.0, timeout)),
                           follow_redirects=False) as client:
@@ -151,13 +153,20 @@ def _post_once(request_json: str, timeout: float) -> httpx.Response:
                          "Content-Type": "application/json",
                          "Accept-Encoding": "identity"},
                 content=request_json.encode("utf-8")) as response:
+                if time.monotonic() >= deadline:
+                    raise ReviewOutcomeUnknown("k2_gateway_deadline_exceeded")
                 # A normal .post() buffers the whole body before the size
                 # check in _parse_response. Read raw, uncompressed bytes with
                 # a fixed cap so a gateway cannot exhaust memory first.
                 if response.headers.get("content-encoding", "identity").lower() != "identity":
                     raise ReviewResponseError("k2_response_encoding_unsupported")
                 body = bytearray()
-                for chunk in response.iter_raw(chunk_size=64 * 1024):
+                # Unchunked iteration exposes every network read, including
+                # tiny drips. The socket read timeout still applies while a
+                # read is blocked; elapsed time is checked after each read.
+                for chunk in response.iter_raw():
+                    if time.monotonic() >= deadline:
+                        raise ReviewOutcomeUnknown("k2_gateway_deadline_exceeded")
                     if len(body) + len(chunk) > MAX_RESPONSE_BYTES:
                         raise ReviewResponseError("k2_response_too_large")
                     body.extend(chunk)
