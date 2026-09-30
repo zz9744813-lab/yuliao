@@ -150,9 +150,14 @@ class Segment(Base):
     """Human Anchor 的最小实验单位：1~10 句，句末/段末切分，不截断句中。"""
 
     __tablename__ = "segments"
+    # 索引名与真库现状对齐（2026-09-30 D 盘实测：真库手工建的索引叫
+    # idx_segments_work_id）。若沿用 SQLAlchemy 默认的 ix_segments_work_id，
+    # 任何 create_all / autogenerate 对账都会在 45 GB 库上再建一个 ~1.5 GiB 的
+    # 重复索引。改名声明即收敛，真库无需任何动作。
+    __table_args__ = (Index("idx_segments_work_id", "work_id"),)
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("SEG"))
-    work_id: Mapped[str] = mapped_column(ForeignKey("works.id"), index=True)
+    work_id: Mapped[str] = mapped_column(ForeignKey("works.id"))
     chapter: Mapped[str | None] = mapped_column(String(200), nullable=True)
     ordinal: Mapped[int] = mapped_column(Integer)
     text: Mapped[str] = mapped_column(Text)
