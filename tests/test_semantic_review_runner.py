@@ -317,6 +317,10 @@ def test_windows_acl_probe_isolated_system_module_and_exit_codes(
     assert "$env:K2_CHECK_DB + '-shm'" in argv[-1]
     assert "$env:K2_CHECK_ATTEMPT_DIR" in argv[-1]
     assert "$ancestor = $ancestor.Parent" in argv[-1]
+    # 祖先遍历必须止于卷根（2026-09-30 修正）：卷根 ACE 是机器级策略（F:\ 带
+    # Everyone:(OI)(CI)(F)），纳入判据 ⇒ 这道闸在任何盘上都不可满足 ⇒ K2 链零派发。
+    assert "while ($null -ne $ancestor -and $null -ne $ancestor.Parent)" in argv[-1]
+    assert "while ($null -ne $ancestor) {" not in argv[-1]
     assert "0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000" in argv[-1]
     assert "[int64]4294967295" in argv[-1]
     assert kwargs["env"]["K2_CHECK_ATTEMPT_DIR"] == str(

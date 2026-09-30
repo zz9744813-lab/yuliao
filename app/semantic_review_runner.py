@@ -291,7 +291,12 @@ if (-not $directory.PSIsContainer) {
     Write-Output 'K2_ACL_DENY:not_directory'; exit 3
 }
 $ancestor = $directory.Parent
-while ($null -ne $ancestor) {
+# 止于卷根：卷根（如 F:\）的 ACE 是机器级策略（实测 F:\ 带 Everyone:(OI)(CI)(F)），
+# 且任何卷的根都带 Windows 默认继承 ACE —— 若把卷根纳入判据，这道闸在所有盘上都
+# 不可满足（09-28 实测 K2_ACL_DENY:ace 就是撞在盘根上，代价是整条语义审查链零派发）。
+# 真正护住私有目录的是**卷根以下**那些上级目录的替换权（DELETE_CHILD/WRITE_DAC/
+# WRITE_OWNER）；卷根不在本进程可收紧范围内，故不纳入判据（2026-09-30 修正）。
+while ($null -ne $ancestor -and $null -ne $ancestor.Parent) {
     $ancestorPaths += $ancestor.FullName
     $ancestor = $ancestor.Parent
 }
