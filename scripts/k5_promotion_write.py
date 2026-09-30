@@ -100,6 +100,7 @@ import k5_promotion_gate_explain as GE                 # noqa: E402  判词单�
 import source_check as sc                              # noqa: E402  parse_src_ok
 from app import knowledge_extract as KE                # noqa: E402  REVIEW_MARKER
 from app import knowledge_query as KQ                  # noqa: E402
+from app import segment_integrity as si                 # noqa: E402  integrity 紧凑编码
 from app.models import (ExpressionStrategyV2, Segment,  # noqa: E402
                         StrategyInstance, WorkSource)
 from app.promotion_audits import (AUDIT_TABLE, AUDIT_COLUMNS,
@@ -167,9 +168,13 @@ def ensure_audit_schema(con: sqlite3.Connection) -> None:
 
 # ------------------------------------------------- 证据事实（单源求值）
 def _src_ok_true(integrity) -> bool:
-    """`segments.integrity` → 严格布尔 `src_ok is True`（判定调 source_check 唯一支笔）。"""
+    """`segments.integrity` → 严格布尔 `src_ok is True`（判定调 source_check 唯一支笔）。
+
+    入参是**裸 SQL 取出的列值**（`SELECT sg.integrity`），故必须先过
+    `segment_integrity.loads_any()` 还原（紧凑编码/`j` 前缀/旧 JSON 三态通吃）。
+    """
     try:
-        d = json.loads(integrity)
+        d = si.loads_any(integrity)
     except (TypeError, ValueError):
         return False
     if not isinstance(d, dict):

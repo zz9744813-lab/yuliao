@@ -21,7 +21,9 @@ import json
 import re
 from collections import Counter
 
-from . import config, db
+from sqlalchemy import or_
+
+from . import config, db, segment_integrity as si
 from .models import Segment, exclude_corpus_v2_segments
 
 _NGRAM = 6
@@ -157,5 +159,9 @@ def train_sampling_pool(s, work_ids: list[str] | None = None,
     if seg_version is not None:
         q = q.filter(Segment.seg_version == seg_version)
     if eligible_only:
-        q = q.filter(Segment.integrity.like('%"eligible": true%'))
+        # 双口径：库里同时存在历史原始 JSON 行与紧凑编码行（2026-09-30 起）。
+        # 只挂一个 `LIKE` 会静默漏段——采样域悄悄变小比报错更难发现。
+        legacy, packed = si.eligible_like_patterns()
+        q = q.filter(or_(Segment.integrity.like(legacy),
+                         Segment.integrity.like(packed)))
     return q.all()

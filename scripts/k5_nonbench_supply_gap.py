@@ -59,6 +59,8 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from app import segment_integrity as si                # noqa: E402  integrity 紧凑编码
+
 # ── 单源复用既有口径（import 不到即 fail-closed 退出，绝不另写一套）──────
 try:
     import k2_extract_backfill as k2b                       # noqa: E402
@@ -139,7 +141,7 @@ def src_state(integrity) -> str:
     非严格布尔必须重查，存量脏值不允许被幂等永久留存）。
     """
     try:
-        d = json.loads(integrity)
+        d = si.loads_any(integrity)
     except (TypeError, ValueError):
         return "nojson"
     if not isinstance(d, dict):
