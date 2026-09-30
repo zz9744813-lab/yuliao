@@ -2,7 +2,7 @@
 
 工作目录：`F:\agi\_scratch\worktrees\lg-k45-acceptance-chain`（分支 `task/k45-acceptance-chain`）
 交付：**K4/K5 效果门缺的那条「可核质量验收签认链」**——产物字节 → 逐臂正文哈希 →
-评审输入五键哈希 → 证明网关签发 → append-only 调用收据 → 两席异模型判词 → 确定性
+评审输入六键（含正文全文）哈希 → 证明网关签发 → append-only 调用收据 → 两席异模型判词 → 确定性
 重算的 `decision`。判词可回推到签发，**自填文本不构成通过**。
 
 ## 1. 变更路径（全部在白名单内；只新增，未改动任何既有文件）
@@ -115,7 +115,7 @@ tmpdir (outside tree): C:\Users\6\AppData\Local\Temp\opencode\k45-inline-irjjawy
   `mint_acceptance()` L310-311。
 - 逐臂 `prose_sha256 = sha256(text)`、只取 `status=="committed"`、同臂重复即拒：
   `committed_arms()` L119-145。
-- 评审输入五键 + 完全确定的请求体（无 uuid/时间戳、`temperature=0`、`stream=false`、
+- 评审输入六键 + 完全确定的请求体（无 uuid/时间戳、`temperature=0`、`stream=false`、
   `canonical_bytes` 排序键紧凑分隔符）——核验侧才能原样重算 `input_sha256`：
   `REVIEW_INPUT_KEYS` L57、`canonical_bytes()` L96-99、`review_input_for()` L148-151、
   `request_bytes_for()` L154-160。

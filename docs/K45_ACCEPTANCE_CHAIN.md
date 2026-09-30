@@ -20,8 +20,8 @@
    └─ receipt_sha256 = sha256(产物字节)
 逐臂（status=="committed"）
    └─ prose_sha256 = sha256(text)
-评审输入（五键，全部确定）
-   {scene, arm, prose_sha256, rubric, receipt_sha256}
+评审输入（六键，全部确定）
+   {scene, arm, prose_sha256, prose, rubric, receipt_sha256}
    └─ input_sha256 = sha256(canonical(request_bytes))
 两席独立派发（每席一个进程内证明网关 tools/attestation_gateway.py）
    └─ 网关签发 x-lg-upstream-{provider,model,channel-id,request-id} + 账本一行 issued
@@ -54,15 +54,30 @@
 
 ## 2. 字段口径（逐条钉死）
 
-### 2.1 评审输入五键（`REVIEW_INPUT_KEYS`）
+### 2.1 评审输入六键（`REVIEW_INPUT_KEYS`）
 
 | 键 | 口径 |
 |---|---|
 | `scene` | 产物 `artifacts.prose[i].scene` 原文 |
 | `arm` | 产物 `artifacts.prose[i].arm` 原文 |
 | `prose_sha256` | `sha256(text.encode("utf-8"))`，`text` 取产物里的**原样字符串** |
+| `prose` | **该臂正文全文**（`text` 原样，不截断不改写）——席据此按 rubric 判词 |
 | `rubric` | 调用方传入的验收标准原文（空串即在 mint 阶段被拒） |
 | `receipt_sha256` | `sha256(产物文件原始字节)`——注意是**文件字节**，不是重新序列化后的 JSON |
+
+**为什么必须有 `prose`（2026-09-30 修，结构性缺口）**：原设计只给五键（只有
+`prose_sha256`，没有正文），理由是「席不得据自填内容签发」。实测拿真产物、真两席
+模型跑时，**任何诚实的席都只能判 `ABSTAIN`**——输入里没有任何可据以判断的证据
+（席看不到正文，也不许凭空签名）。而 `effect_gate_snapshot._k4_gate/_k5_gate` 的
+唯一 PASS 入口要求 `decision == ACCEPT`，`recompute_decision` 又是
+「两票全 ACCEPT 才 ACCEPT」⇒ **K4/K5 两门结构性不可翻**（与 K2/K3 那两处
+「写死 FAIL」同类，见任务书 §现状）。
+
+补 `prose` **不放宽任何判据**：正文来源只有产物（`committed_arms` 从产物读出，
+artifact 里始终只有哈希、没有正文）；`prose_sha256` 由正文逐字算出；verify 侧用
+产物里的正文**原样重算整个 `input_sha256`**（`_check_row_self_consistent`），改一个
+字即 `k45_input_sha_mismatch`；`_check_arms` 仍逐臂核 `prose_sha256` 与当前产物相符。
+即：席能读到正文，但正文与链的绑定强度一字不减。
 
 请求体完全确定（无 uuid、无时间戳、`temperature=0`、`stream=false`），序列化口径
 是 `canonical_bytes()` = `json.dumps(..., ensure_ascii=False, sort_keys=True,
@@ -143,7 +158,7 @@ ACCEPT ⇒ 必拒；反过来把 ACCEPT 改成 BLOCK 也拒——链上说的是
 | 7 | 每臂两票、席位集与 artifact 一致、`model_identity` 非空且互异 | `k45_arm_votes_require_2` / `k45_vote_model_identity_empty` / `k45_vote_model_identity_not_distinct` / `k45_vote_seat_set_mismatch` |
 | 8 | 每票在收据里**恰有一行**对应（无行=漏投，多行=重放/覆盖） | `k45_call_receipt_row_missing` / `k45_call_receipt_row_duplicated` |
 | 9 | artifact 判词与收据行逐字段一致 | `k45_vote_ledger_mismatch` |
-| 10 | 收据行自洽：`provider`/`model_id` 与该席身份一致、`model_identity` 拼法一致、`upstream_request_id` 非空、`verdict` 合法、`reason` 非空、`prose_sha256`/`receipt_sha256` 绑定、**`input_sha256` 按五键原样重算相符** | `k45_seat_identity_mismatch` / `k45_model_identity_mismatch` / `k45_upstream_request_id_empty` / `k45_verdict_not_allowed` / `k45_reason_empty` / `k45_prose_sha_mismatch` / `k45_call_receipt_sha_mismatch` / `k45_input_sha_mismatch` |
+| 10 | 收据行自洽：`provider`/`model_id` 与该席身份一致、`model_identity` 拼法一致、`upstream_request_id` 非空、`verdict` 合法、`reason` 非空、`prose_sha256`/`receipt_sha256` 绑定、**`input_sha256` 按六键原样重算相符**（六键含正文 `prose`，正文取自产物） | `k45_seat_identity_mismatch` / `k45_model_identity_mismatch` / `k45_upstream_request_id_empty` / `k45_verdict_not_allowed` / `k45_reason_empty` / `k45_prose_sha_mismatch` / `k45_call_receipt_sha_mismatch` / `k45_input_sha_mismatch` |
 | 11 | **三方对账**：收据行能在该席网关账本里找到同一次 `issued`（`request_sha256`/`response_sha256`/`upstream_id`/路由身份四者齐等），且一次签发不得复用到多票 | `k45_gateway_audit_no_issuance` / `k45_gateway_audit_replay` / `k45_gateway_audit_seq_missing` |
 | 12 | `decision` 重算相符 | `k45_decision_mismatch` |
 
@@ -210,7 +225,7 @@ print(ok, why)          # 判据口径见 §4/§5
 1. **本件不判正文好坏**。它保证的是「两席独立模型确实各自签过这份哈希」，
    rubric 的执行质量仍属模型/人审范畴。链解决的是**身份与可核**，不是品味。
 2. **收据与网关账本的写保护是残余信任锚**。伪造者要同时做到：复现
-   `input_sha256`（五键 + 确定序列化）**并且**在该席网关账本里放得进一条
+   `input_sha256`（六键 + 确定序列化）**并且**在该席网关账本里放得进一条
    `issued` 行（`request_sha256`/`response_sha256`/`upstream_id` 与路由身份四者
    齐等）**并且**该签发不被复用。因此**这两个文件必须落在只有签发方写得了的位置**
    （与 K2 消费侧 `_require_private_storage` 同一思路）。若攻击者对收据/账本目录有
