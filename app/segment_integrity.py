@@ -17,6 +17,7 @@ is_naturalness_eligible()：自然度校准只允许自足性强的段参与，
 from __future__ import annotations
 
 import json
+import math
 import re
 
 # 引号对（开, 闭）
@@ -220,7 +221,15 @@ def _encode_base(d: dict) -> str | None:
     ratio = d["dialogue_ratio"]
     if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
         return None
-    q = int(round(float(ratio) * _RATIO_SCALE))
+    # NaN/±inf/超范围：**落回原始 JSON，绝不抛**（pack_raw 在 ORM 写侧被调用，
+    # 抛异常会把整本入册打断；`int(round(nan))` 会 ValueError，`round(inf)` 会
+    # OverflowError —— 会审 2026-09-30 点名）。
+    try:
+        if not math.isfinite(float(ratio)):
+            return None
+        q = int(round(float(ratio) * _RATIO_SCALE))
+    except (OverflowError, ValueError, TypeError):
+        return None
     if not 0 <= q <= _RATIO_MAX:
         return None
     n = (n << _ratio_bits()) | q
@@ -286,6 +295,8 @@ def unpack(raw: str | None) -> dict:
             if idx >= len(vals):
                 return {}
             out[name] = vals[idx]
+        if n:
+            return {}                              # 高位还有残bit ⇒ 畸形/截断码，判非法
         return {"quote_integrity": out["quote_integrity"],
                 "antecedent_integrity": out["antecedent_integrity"],
                 "dialogue_integrity": out["dialogue_integrity"],
@@ -302,17 +313,44 @@ def unpack(raw: str | None) -> dict:
 
 
 def canonical_json(raw: str | None) -> str | None:
-    """读侧还原成旧口径 JSON 文本（紧凑串解码；非紧凑串逐字节不动）。"""
+    """读侧还原成旧口径 JSON 文本（紧凑串解码；非紧凑串逐字节不动）。
+
+    **解不开的紧凑串原样返回**（不是 `"{}"`）：旧行为下坏 JSON 会在读者的
+    `json.loads` 处炸出来，糊成空字典会把「坏数据」变成「合法但全空」，
+    与 `loads_any` 特意保留的 nojson 区分口径相悖（会审 2026-09-30 点名）。
+    """
     if raw is None:
         return None
     s = str(raw)
     if not s.startswith(_CODEC_PREFIX):
         return s                                   # 历史/附加键行：逐字节不动
-    return json.dumps(unpack(s), ensure_ascii=False)
+    d = unpack(s)
+    if not d:
+        return s                                   # 畸形紧凑串：让下游炸，不糊成 {}
+    return json.dumps(d, ensure_ascii=False)
 
 
 def is_packed(raw: str | None) -> bool:
     return bool(raw) and str(raw).startswith(_CODEC_PREFIX)
+
+
+def unpack_or_none(raw: str | None) -> dict | None:
+    """「空值 = {}、合法（紧凑或 JSON）= dict、解不出 = None」三态。
+
+    `scripts/clean_text.py::_integrity_flags` 的既有口径就是这三态（None ⇒
+    调用侧**不得重写** integrity，因为那是别的工序的留痕）；把它单点导出，
+    免得每个裸 SQL 读点各写一份 json.loads（漏了紧凑形态就静默丢标记）。
+    """
+    if not (raw or "").strip():
+        return {}
+    if str(raw).startswith(_CODEC_PREFIX):
+        d = unpack(raw)
+        return d or None
+    try:
+        d = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
 
 
 def is_eligible(raw: str | None) -> bool:

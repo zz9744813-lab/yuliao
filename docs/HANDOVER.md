@@ -1139,6 +1139,7 @@ h30 判完后据此打印「✓ 框一致，可继续」——**放过了真问�
 | `scripts/controlled_corruption.py` | 工作流 B：18 类单变量劣化 + 控制臂；`--report` 出可判别性标尺 | 单变量硬约束、病句硬拒、源文本必须 `src_ok` |
 | `scripts/clean_text.py` | 文本清洗：规则删水印 → LLM 还原拼音 → `--polish` 再扫 | **原文不动**，写 `segments.text_clean`；下游优先读它 |
 | `scripts/source_check.py` | 源完整性校勘（缺字/截断/人名不一致）→ `segments.integrity.src_ok` | **没查过 = 不可用**；`KNOWN_TYPOS` 是频次自洽确认过的错字表 |
+| `app/segment_integrity.py` | `segments.integrity` 的**紧凑编码**（2026-09-30 容量阻断）：8 基键压 10 字符（`i1:<eligible><22bit hex>`），读侧还原成原 JSON；裸 SQL 一律走 `unpack/loads_any/unpack_or_none`，`LIKE` 过滤走 `eligible_like_patterns()` 双口径 | 带附加键（`src_ok` 等）的行**永不压缩**；口径、收益与迁移见 `docs/integrity紧凑编码_20260930.md` |
 | `scripts/scale_corpus.py` | 语料扩产：挑新段 → 源校勘 → 抽 L 帧 | 不需要人工；SFT 的目标就是人类原文 |
 | `scripts/benchmark_build.py` / `benchmark_run.py` | §14 基准：建集（冻结文本）/ 跑分 / 排行榜 / 回归对比 | 基准段 `role='benchmark'` **不进训练导出** |
 | `scripts/flavor_span.py` | **片段级 AI 味检测**（`--train`/`--eval-pairs`/`--text`） | 适用边界见 §0.5④，别当稳定仪器 |

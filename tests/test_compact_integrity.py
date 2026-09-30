@@ -194,8 +194,18 @@ def test_eligible_like_patterns_cover_both_storage_forms():
     assert legacy == si.LEGACY_ELIGIBLE_TRUE_LIKE
     assert packed == si.ELIGIBLE_TRUE_LIKE == si._CODEC_PREFIX + "1%"
     raw = json.dumps(si.analyze("翌日清晨，城门大开。"), ensure_ascii=False)
-    assert legacy in raw or legacy == '%"eligible": true%'
-    assert si.pack_raw(raw).startswith(packed[:-1])
+    # 历史行的 JSON 文本必须真的含 legacy 子串（`json.dumps` 默认分隔符带空格），
+    # 且**不含**紧凑前缀 —— 两侧互斥，漏一个就是漏一类行
+    # （`LEGACY_ELIGIBLE_TRUE_LIKE` 是带 `%` 通配的 LIKE 模式 ⇒ 比对时剥掉通配符）
+    assert si.LEGACY_ELIGIBLE_TRUE_LIKE.strip("%") in raw, raw
+    assert not raw.startswith(si._CODEC_PREFIX)
+    stored = si.pack_raw(raw)
+    assert stored.startswith(si.ELIGIBLE_TRUE_LIKE[:-1]), stored
+    assert si.LEGACY_ELIGIBLE_TRUE_LIKE not in stored
+    # 不合格段：两种形态都不该被筛到
+    bad_raw = json.dumps(si.analyze("」他抬头看了看天。"), ensure_ascii=False)
+    assert si.LEGACY_ELIGIBLE_TRUE_LIKE.strip("%") not in bad_raw
+    assert not si.pack_raw(bad_raw).startswith(si.ELIGIBLE_TRUE_LIKE[:-1])
 
 
 def test_near_dup_eligible_only_sees_both_forms():
@@ -225,13 +235,142 @@ def test_near_dup_eligible_only_sees_both_forms():
                       integrity=bad_raw))                      # 不合格段
         s.commit()
         packed_id, legacy_id = packed_seg.id, legacy_seg.id
-        # 把其中一行改回历史 JSON 形态（模拟 2026-09-30 前入库的行）
+        # 把其中一行改回历史 JSON 形态（模拟 2026-09-30 前入库的行）——
+        # 必须走裸 SQL：ORM 写路径会把基键行压成紧凑串
         s.connection().exec_driver_sql(
             "UPDATE segments SET integrity=? WHERE id=?", (ok_raw, legacy_id))
         s.commit()
-        assert si.is_packed(s.connection().exec_driver_sql(
-            "SELECT integrity FROM segments WHERE id=?", (packed_id,)).fetchone()[0])
+        rows = dict(s.connection().exec_driver_sql(
+            "SELECT id, integrity FROM segments WHERE id IN (?,?)",
+            (packed_id, legacy_id)).fetchall())
+        assert si.is_packed(rows[packed_id])                       # 新行=紧凑形态
+        assert rows[legacy_id] == ok_raw                           # 历史行=原始 JSON
+        # 负向：单挂紧凑口径会漏掉历史行，单挂历史口径会漏掉紧凑行
+        assert not rows[legacy_id].startswith(si.ELIGIBLE_TRUE_LIKE[:-1])
+        assert si.LEGACY_ELIGIBLE_TRUE_LIKE.strip("%") not in rows[packed_id]
     with _db.session() as s2:
         pool = near_dup.train_sampling_pool(s2, work_ids=[w.id], eligible_only=True)
         got = sorted(x.id for x in pool)
     assert got == sorted([packed_id, legacy_id]), got
+
+
+# ── 会审（2026-09-30，glm-5.3 + qwen3.8-flash）点名的缺口 ──────────────────
+
+@pytest.mark.parametrize("bad_ratio", [float("nan"), float("inf"), float("-inf"),
+                                       "0.5", None, True, 10 ** 9 + 0.0])
+def test_ratio_not_encodable_falls_back_without_raising(bad_ratio):
+    """NaN/±inf/字符串/越界 ratio ⇒ 原样保留 JSON，**绝不抛**。
+
+    pack_raw 挂在 ORM 写侧：抛异常会把整本入册打断（`int(round(nan))` 是
+    ValueError、`round(inf)` 是 OverflowError）。
+    """
+    d = si.analyze("翌日清晨，城门大开。")
+    d["dialogue_ratio"] = bad_ratio
+    raw = json.dumps(d, ensure_ascii=False, allow_nan=True)
+    packed = si.pack_raw(raw)                      # 不抛
+    assert packed == raw and not si.is_packed(packed)
+
+
+def test_unpack_rejects_leftover_bits_and_malformed_bodies():
+    """畸形/截断紧凑串必须判非法，不能「成功」解成错误值。"""
+    good = si.pack_raw(json.dumps(si.analyze("翌日清晨，城门大开。"), ensure_ascii=False))
+    assert si.unpack(good)
+    for bad in (good + "0",            # 尾部多一位 hex ⇒ 高位残 bit
+                good + "ffff",
+                si._CODEC_PREFIX,      # 只有前缀
+                si._CODEC_PREFIX + "1",        # 缺 hex 体
+                si._CODEC_PREFIX + "9abc",     # eligible 位非法
+                si._CODEC_PREFIX + "1zzz"):
+        assert si.unpack(bad) == {}, bad
+        # 解不开的紧凑串**原样返回**（不糊成 "{}"）：坏数据要在下游炸出来
+        assert si.canonical_json(bad) == bad
+
+
+def test_zero_value_row_roundtrips():
+    """全 0 行（n=0 ⇒ `format(0,"x")=="0"`）前导零丢失后仍要能解回全 0。"""
+    d = {k: 0.0 for k in ("quote_integrity", "antecedent_integrity",
+                          "dialogue_integrity", "scene_boundary",
+                          "context_dependency", "truncation_risk")}
+    d.update({"dialogue_ratio": 0.0, "eligible": False})
+    raw = json.dumps(d, ensure_ascii=False)
+    packed = si.pack_raw(raw)
+    assert packed == si._CODEC_PREFIX + "00", packed
+    assert si.canonical_json(packed) == raw
+
+
+def test_unpack_or_none_three_states():
+    """空={} / 合法=dict / 解不出=None（clean_text 的 `_integrity_flags` 口径）。"""
+    assert si.unpack_or_none(None) == {}
+    assert si.unpack_or_none("") == {}
+    assert si.unpack_or_none("   ") == {}
+    raw = json.dumps(si.analyze("翌日清晨，城门大开。"), ensure_ascii=False)
+    assert si.unpack_or_none(raw)["eligible"] is True
+    assert si.unpack_or_none(si.pack_raw(raw))["eligible"] is True
+    for bad in ("not json", si._CODEC_PREFIX + "zzz", "[1,2]", "42"):
+        assert si.unpack_or_none(bad) is None, bad
+
+
+def test_integrity_column_ddl_affinity_unchanged():
+    """紧凑化只改**值**，不改列 DDL/affinity（裸 SQL 读者与索引不受影响）。"""
+    from app import db as _db
+    from app.models import Segment
+
+    _db.init_db()
+    with _db.session() as s:
+        cols = {r[1]: r[2] for r in s.connection().exec_driver_sql(
+            "PRAGMA table_info(segments)").fetchall()}
+    assert cols["integrity"] == "TEXT", cols
+    assert Segment.__table__.c.integrity.type.impl.__class__.__name__ == "Text"
+    assert not Segment.__table__.c.integrity.nullable is False or True   # 可空性未改
+    assert Segment.__table__.c.integrity.nullable is True
+
+
+def test_field_value_sets_cover_real_analyze_output():
+    """`_FIELD_VALUES` 必须穷举 `analyze()` 的真实浮点连加结果。
+
+    漂移的后果是**静默**的：该行落回原始 JSON，压缩收益归零而无人察觉。
+    这里用真语料样本把每个指标的取值逐一钉在集合里。
+    """
+    texts = SAMPLES + [
+        "「你来做什么？」他问。「我等你。」她答。",
+        "但是，他还是走了。",
+        "她笑了，然后又哭了，最后什么也没说。",
+        "，半句开场。",
+        "」孤悬闭引号开场。",
+        "半晌，他才开口。",
+    ]
+    for i, t in enumerate(texts):
+        d = si.analyze(t, ordinal=i)
+        for name, allowed in si._FIELD_VALUES.items():
+            assert d[name] in allowed, (name, d[name], allowed)
+        assert isinstance(d["dialogue_ratio"], float)
+        assert 0.0 <= d["dialogue_ratio"] <= 1.0
+        assert isinstance(d["eligible"], bool)
+        assert si.is_packed(si.pack_raw(json.dumps(d, ensure_ascii=False))), d
+
+
+def test_k2_integrity_dict_reads_packed_rows():
+    """`scripts/k2_extract_backfill.integrity_dict`（读取侧唯一解析层）吃紧凑行。"""
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for p in (str(root), str(root / "scripts")):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    try:
+        from k2_extract_backfill import integrity_dict, integrity_flag_state
+    except ImportError as exc:                                # 环境缺依赖：跳过而非假绿
+        pytest.skip(f"k2_extract_backfill 不可导入: {exc}")
+
+    d = si.analyze("翌日清晨，城门大开。")
+    packed = si.pack_raw(json.dumps(d, ensure_ascii=False))
+    assert integrity_dict(packed)["eligible"] is True          # 裸列值（紧凑形态）
+    assert integrity_dict(packed)["scene_boundary"] == d["scene_boundary"]
+    # 带 src_ok 的行永不压缩 ⇒ 解析层行为与压缩前逐字一致
+    with_src = {**d, "src_ok": True}
+    raw_src = json.dumps(with_src, ensure_ascii=False)
+    assert integrity_dict(raw_src)["src_ok"] is True
+    assert integrity_flag_state(raw_src, "src_ok") is True
+    # 紧凑基键行没有 src_ok 键 ⇒ 三态是「未校验」（None），不是「坏 JSON」
+    assert integrity_flag_state(packed, "src_ok") is None
