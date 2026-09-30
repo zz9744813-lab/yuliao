@@ -209,12 +209,25 @@ def test_mint_then_verify_passes_over_the_full_chain(tmp_path):
                  for line in path.read_text(encoding="utf-8").splitlines()
                  if line.strip() and json.loads(line)["decision"] == "issued")
     assert issued == 6
-    # 打出去的评审输入形状 = 任务书五键口径。
+    # 打出去的评审输入形状 = `REVIEW_INPUT_KEYS` 契约，**且含正文全文**。
     assert len(chain["requests"]) == 6
     sent = json.loads(chain["requests"][0]["messages"][1]["content"])
     assert set(sent) == set(k45.REVIEW_INPUT_KEYS)
     assert sent["rubric"] == RUBRIC
     assert sent["receipt_sha256"] == artifact["receipt_sha256"]
+    # 2026-09-30 修：输入里必须有正文全文，否则任何诚实的席都只能 ABSTAIN
+    # （席看不到正文、也不许据自填内容签发）⇒ decision 永远到不了 ACCEPT ⇒ 门结构性不可翻。
+    sent_by_key = {}
+    for request in chain["requests"]:
+        payload = json.loads(request["messages"][1]["content"])
+        sent_by_key[(payload["scene"], payload["arm"])] = payload
+    assert len(sent_by_key) == 3
+    assert sent_by_key[("s1", "A")]["prose"] == TEXT_A
+    assert sent_by_key[("s1", "B")]["prose"] == TEXT_B
+    assert sent_by_key[("s2", "A")]["prose"] == TEXT_C
+    # 正文进输入不等于信自填：哈希仍是逐字算出来的。
+    assert sent_by_key[("s1", "A")]["prose_sha256"] == hashlib.sha256(
+        TEXT_A.encode("utf-8")).hexdigest()
 
 
 # ── 负例 ①：产物字节变了但 artifact 未更新（倒签） ────────────────────────────
@@ -396,6 +409,8 @@ def test_hand_written_self_declared_pass_is_rejected(tmp_path):
     write_json(receipt_path, receipt_document())
     receipt_sha = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
     artifact_file = directory / "acceptance.json"
+    TEXT_BY_KEY = {(p["scene"], p["arm"]): p.get("text", "")
+                   for p in receipt_document()["artifacts"]["prose"]}
 
     # ① 一份自称「人工复核：同意通过」的 JSON：字段都齐不了。
     write_json(artifact_file, {"artifact_version": k45.ARTIFACT_VERSION,
@@ -483,7 +498,9 @@ def test_hand_written_self_declared_pass_is_rejected(tmp_path):
                        (arm["scene"], arm["arm"], seat["seat"]))
             row["input_sha256"] = hashlib.sha256(k45.request_bytes_for(
                 k45.review_input_for({"scene": arm["scene"], "arm": arm["arm"],
-                                      "prose_sha256": arm["prose_sha256"]},
+                                      "prose_sha256": arm["prose_sha256"],
+                                      "text": TEXT_BY_KEY[(arm["scene"],
+                                                           arm["arm"])]},
                                      RUBRIC, receipt_sha),
                 seat["requested_model"])).hexdigest()
             row["response_sha256"] = hashlib.sha256(b"fabricated").hexdigest()
