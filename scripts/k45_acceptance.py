@@ -53,8 +53,16 @@ HEADER_PREFIX = "x-lg-upstream-"
 ATTESTATION_HEADERS = (HEADER_PREFIX + "provider", HEADER_PREFIX + "model",
                        HEADER_PREFIX + "channel-id", HEADER_PREFIX + "request-id")
 
-# 评审输入的五键契约（任务书口径）：改任何一键都会改 input_sha256。
-REVIEW_INPUT_KEYS = ("scene", "arm", "prose_sha256", "rubric", "receipt_sha256")
+# 评审输入契约：改任何一键都会改 input_sha256。
+# **2026-09-30 修（结构性缺口）**：原为五键（只有 `prose_sha256`，没有正文）。实测
+# 用真模型两席跑真实产物时，**任何诚实的席都只能判 ABSTAIN**——输入里没有任何可据以
+# 判断的证据（席看不到正文，也不许据自填内容签发）⇒ `decision` 永远到不了 ACCEPT，
+# 而 `effect_gate_snapshot._k4_gate/_k5_gate` 的唯一 PASS 入口要求
+# `decision == ACCEPT` ⇒ **K4/K5 两门结构性不可翻**（与 K2/K3 那两处「写死 FAIL」同类）。
+# 现加入 `prose`（正文全文，取自产物、哈希链不变）：席据此按 rubric 判词，
+# `input_sha256` 仍可由产物逐字重算（`_check_row_self_consistent`）。
+REVIEW_INPUT_KEYS = ("scene", "arm", "prose_sha256", "prose", "rubric",
+                     "receipt_sha256")
 # 调用收据行的必备字段（JSONL 每行）。
 LEDGER_FIELDS = ("seat", "provider", "model_id", "model_identity",
                  "upstream_request_id", "input_sha256", "response_sha256",
@@ -62,9 +70,11 @@ LEDGER_FIELDS = ("seat", "provider", "model_id", "model_identity",
                  "verdict", "reason")
 
 SYSTEM_PROMPT = (
-    "你是 K4/K5 正文质量验收席，只依据给定 rubric 评审单臂正文。"
+    "你是 K4/K5 正文质量验收席，依据给定 rubric 评审单臂正文。"
+    "输入里 `prose` 是该臂正文全文（其哈希与产物绑定由外部链核验）。"
     "只输出一个 JSON 对象，键必须是 verdict 与 reason："
-    "verdict 只能取 ACCEPT / BLOCK / ABSTAIN 之一；reason 为简短中文依据。"
+    "verdict 只能取 ACCEPT / BLOCK / ABSTAIN 之一；reason 为简短中文依据，"
+    "须引用正文中的具体证据。"
     "正文哈希与 receipt_sha256 由外部链上核验，你无法也不得据自填内容签发。")
 
 PROTECTED_ROOTS_ENV = "LG_K45_PROTECTED_ROOTS"
@@ -117,8 +127,10 @@ def read_receipt(receipt_path: str | Path) -> tuple[bytes, dict]:
 
 
 def committed_arms(receipt: dict) -> list[dict]:
-    """产物里全部 `status=="committed"` 的臂：{scene, arm, prose_sha256}。
+    """产物里全部 `status=="committed"` 的臂：{scene, arm, prose_sha256, text}。
 
+    `text`（正文全文）**只在本模块内传递**：它进评审输入（席据此判词）、进
+    `input_sha256` 重算，**不进 artifact**（artifact 只留哈希，产物是正文的唯一出处）。
     同 (scene, arm) 出现两行即拒——验收链不接受"同一臂两份正文，任选一份签"。
     """
     prose = ((receipt.get("artifacts") or {}).get("prose")) or []
@@ -139,16 +151,24 @@ def committed_arms(receipt: dict) -> list[dict]:
         if key in seen:
             raise AcceptanceMintError(f"k45_arm_duplicated:{scene}/{arm}")
         seen.add(key)
-        arms.append({"scene": scene, "arm": arm, "prose_sha256": _sha_text(text)})
+        arms.append({"scene": scene, "arm": arm, "prose_sha256": _sha_text(text),
+                     "text": text})
     if not arms:
         raise AcceptanceMintError("k45_no_committed_arms")
     return arms
 
 
 def review_input_for(arm: dict, rubric: str, receipt_sha256: str) -> dict:
+    """评审输入：`REVIEW_INPUT_KEYS` 六键，**含正文全文 `prose`**。
+
+    `arm` 须带 `text`（正文，来自产物；`committed_arms` 已备）。正文进输入不等于
+    "信自填"：`prose_sha256` 由正文逐字算出、artifact 只留哈希、verify 侧从产物重算
+    整个 input_sha256（`_check_row_self_consistent`），改一个字即
+    `k45_input_sha_mismatch`。
+    """
     return {"scene": arm["scene"], "arm": arm["arm"],
-            "prose_sha256": arm["prose_sha256"], "rubric": rubric,
-            "receipt_sha256": receipt_sha256}
+            "prose_sha256": arm["prose_sha256"], "prose": arm["text"],
+            "rubric": rubric, "receipt_sha256": receipt_sha256}
 
 
 def request_bytes_for(review_input: dict, requested_model: str) -> bytes:
@@ -464,6 +484,8 @@ def _verify(receipt_path: str | Path, raw: bytes, artifact_path: str | Path, *,
             raise _Rejected("k45_receipt_not_object")
         arms = committed_arms(parsed)
         _check_arms(artifact, arms)
+        # 评审输入的正文来源**只有产物**：artifact 里没有正文，只有哈希。
+        receipt_arm = {(a["scene"], a["arm"]): a for a in arms}
 
         ledger = _read_ledger(Path(artifact["call_receipt_path"]))
         seats = {s["seat"]: s for s in artifact["seats"]}
@@ -479,7 +501,9 @@ def _verify(receipt_path: str | Path, raw: bytes, artifact_path: str | Path, *,
                 _check_vote_matches_row(arm, vote, row)
                 _check_row_self_consistent(row, seats[vote["seat"]],
                                            artifact["rubric"],
-                                           artifact["receipt_sha256"], arm)
+                                           artifact["receipt_sha256"],
+                                           receipt_arm[(arm["scene"],
+                                                        arm["arm"])])
                 _check_audit_row(audits[vote["seat"]], row, vote["seat"], arm,
                                  used_seqs)
                 verdicts.append(row["verdict"])
@@ -621,9 +645,7 @@ def _check_row_self_consistent(row: dict, seat: dict, rubric: str,
             f"k45_call_receipt_sha_mismatch:{row['seat']}:调用收据绑的产物哈希与 "
             "artifact/当前产物不一致")
     expected_input = _sha_bytes(request_bytes_for(
-        review_input_for({"scene": row["scene"], "arm": row["arm"],
-                          "prose_sha256": row["prose_sha256"]}, rubric,
-                         receipt_sha256), seat["requested_model"]))
+        review_input_for(arm, rubric, receipt_sha256), seat["requested_model"]))
     if row["input_sha256"] != expected_input:
         raise _Rejected(
             f"k45_input_sha_mismatch:{row['scene']}/{row['arm']}/{row['seat']}"
