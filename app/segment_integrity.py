@@ -16,6 +16,8 @@ is_naturalness_eligible()：自然度校准只允许自足性强的段参与，
 """
 from __future__ import annotations
 
+import json
+import math
 import re
 
 # 引号对（开, 闭）
@@ -150,3 +152,233 @@ def analyze(text: str, *, ordinal: int = 0) -> dict:
 def is_naturalness_eligible(integrity: dict | None) -> bool:
     """报告/校准抽样用它过滤；未回填的旧数据按不合格处理（宁缺毋滥）。"""
     return bool(integrity and integrity.get("eligible"))
+
+
+# ── 存储紧凑编码（2026-09-30，语料容量）────────────────────────────────────
+# 背景：`segments.integrity` 每段一份 195 字节 JSON，5300 万段 = 9.4 GB；
+# 目标 3605 本要 1.1 亿段 ⇒ 光这一列就要 21 GB，是「库吃不下全量语料」的最大单项。
+#
+# 口径（逐位无损，不做有损量化）：
+#   * 只压缩**恰好 8 个基键**的段（analyze() 的原始输出）。任何带附加键的
+#     （`src_ok`/`severity`/`defects`/`clean_pending_llm`/`truncated`/…）**原样保留**
+#     原始 JSON 文本，前缀 `j` 标记 ⇒ 库里靠 SQLite JSON1 读 `$.src_ok` 的存量脚本
+#     （k5_supply_recount / k5_sourcecheck_coverage）行为完全不变。
+#   * 六个指标各自是**有限取值集**（见 _FIELD_VALUES，由 analyze() 的加减组合穷举），
+#     取集合下标存 2/1/2/1/3/3 bit；`dialogue_ratio` 是 round(x,3) ⇒ 千分位整数 10 bit。
+#     合计 22 bit ⇒ 6 位十六进制。**`eligible` 单独放在前缀后的第 1 个字符**
+#     （`i1:1…` / `i1:0…`，共 10 字符）：这一位是 SQL 侧唯一要过滤的语义
+#     （`app/near_dup.train_sampling_pool(eligible_only=True)` 走 `LIKE`），
+#     放进 hex 里就没法在 SQL 里筛了。
+#   * 任何**不在取值集内**的值（例如以后改了 analyze 的口径）一律回退原始 JSON，
+#     不猜、不截断 —— 解码端永远能还原出与写入时逐字节相同的字典。
+#
+# 读侧：`unpack()` 同时吃紧凑串、历史原始 JSON；`canonical_json()`
+# 把两种形态统一还原成**与旧口径一致**的 JSON 文本，因此 ORM 读者（app/models.py
+# 的 CompactIntegrity 装饰器）拿到的字符串与压缩前完全一样。
+_CODEC_PREFIX = "i1:"
+# 紧凑行判 eligible 的 SQL `LIKE` 口径（首位字符）。历史 JSON 行的口径是
+# `LEGACY_ELIGIBLE_TRUE_LIKE`——**两个都要挂**，库里两种形态长期并存。
+ELIGIBLE_TRUE_LIKE = _CODEC_PREFIX + "1%"
+LEGACY_ELIGIBLE_TRUE_LIKE = '%"eligible": true%'
+_BASE_KEYS = ("quote_integrity", "antecedent_integrity", "dialogue_integrity",
+              "scene_boundary", "context_dependency", "truncation_risk",
+              "dialogue_ratio", "eligible")
+# 取值集按 analyze() 的实际输出穷举；顺序即编码下标，**改动会让旧码解错**，
+# 故只允许在尾部追加（追加不改已有下标）。
+_FIELD_VALUES: dict[str, tuple[float, ...]] = {
+    "quote_integrity": (0.0, 0.5, 1.0),                                    # 2 bit
+    "antecedent_integrity": (0.0, 1.0),                                    # 1 bit
+    "dialogue_integrity": (0.0, 0.5, 1.0),                                 # 2 bit
+    "scene_boundary": (0.0, 1.0),                                          # 1 bit
+    # 0.4 连接词 / 0.3 裸代词 / 0.5 半句或孤悬闭引号，任意组合后 min(1.0, ·)
+    "context_dependency": (0.0, 0.3, 0.4, 0.5, 0.7, 0.8, 0.9, 1.0),        # 3 bit
+    # 0.5/0.3 收尾标点 + 0.2 末句过短 + 0.3 末句远短于中位
+    "truncation_risk": (0.0, 0.2, 0.3, 0.5, 0.6, 0.7, 0.8, 1.0),           # 3 bit
+}
+_RATIO_SCALE = 1000            # dialogue_ratio = round(x, 3) ⇒ 千分位整数
+_RATIO_MAX = 1000
+_CODEC_FIELDS = ("quote_integrity", "antecedent_integrity", "dialogue_integrity",
+                 "scene_boundary", "context_dependency", "truncation_risk")
+
+
+def _field_bits(name: str) -> int:
+    return max(1, (len(_FIELD_VALUES[name]) - 1).bit_length())
+
+
+def _ratio_bits() -> int:
+    return max(1, _RATIO_MAX.bit_length())
+
+
+def _encode_base(d: dict) -> str | None:
+    """8 基键且取值全在集合内 ⇒ 紧凑串；否则 None（调用方回退原始 JSON）。"""
+    n = 0
+    for name in _CODEC_FIELDS:
+        try:
+            idx = _FIELD_VALUES[name].index(d[name])
+        except ValueError:
+            return None
+        n = (n << _field_bits(name)) | idx
+    ratio = d["dialogue_ratio"]
+    if isinstance(ratio, bool) or not isinstance(ratio, (int, float)):
+        return None
+    # NaN/±inf/超范围：**落回原始 JSON，绝不抛**（pack_raw 在 ORM 写侧被调用，
+    # 抛异常会把整本入册打断；`int(round(nan))` 会 ValueError，`round(inf)` 会
+    # OverflowError —— 会审 2026-09-30 点名）。
+    try:
+        if not math.isfinite(float(ratio)):
+            return None
+        q = int(round(float(ratio) * _RATIO_SCALE))
+    except (OverflowError, ValueError, TypeError):
+        return None
+    if not 0 <= q <= _RATIO_MAX:
+        return None
+    n = (n << _ratio_bits()) | q
+    eligible = d["eligible"]
+    if not isinstance(eligible, bool):
+        return None
+    return _CODEC_PREFIX + ("1" if eligible else "0") + format(n, "x")
+
+
+def pack_raw(raw: str | dict | None) -> str | None:
+    """把 integrity（JSON 文本或 dict）压成紧凑串；不满足紧凑条件时**原样返回**。
+
+    幂等：紧凑串再喂进来原样返回，重复压缩不会套娃。
+    不满足条件的三类（带附加键 / 取值超出集合 / 非法 JSON）**一个字节都不改**：
+    库里那些裸 SQL 读法（`json_extract(integrity,'$.src_ok')`、直接 `json.loads`）
+    对它们的行为与压缩前完全一致 —— 这也是「读侧无感」的一半。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        raw = json.dumps(raw, ensure_ascii=False)
+    s = str(raw)
+    if s.startswith(_CODEC_PREFIX):
+        return s                                   # 已是紧凑形态
+    stripped = s.strip()
+    if not stripped:
+        return s
+    try:
+        d = json.loads(stripped)
+    except (TypeError, ValueError):
+        return s                                   # 非法 JSON：一个字节都不动
+    if not isinstance(d, dict) or set(d) != set(_BASE_KEYS):
+        return s                                   # 带附加键：原样
+    packed = _encode_base(d)
+    return packed if packed is not None else s
+
+
+def unpack(raw: str | None) -> dict:
+    """紧凑串 / 历史原始 JSON ⇒ 字典；解不出来返回 {}（与旧 `or "{}"` 同口径）。"""
+    if raw is None:
+        return {}
+    s = str(raw)
+    if not s:
+        return {}
+    if s.startswith(_CODEC_PREFIX):
+        body = s[len(_CODEC_PREFIX):]
+        if len(body) < 2 or body[0] not in ("0", "1"):
+            return {}                              # 缺 eligible 位/非法形态
+        try:
+            n = int(body[1:], 16)
+        except ValueError:
+            return {}
+        eligible = body[0] == "1"
+        ratio_mask = (1 << _ratio_bits()) - 1
+        q = n & ratio_mask
+        n >>= _ratio_bits()
+        out: dict = {}
+        for name in reversed(_CODEC_FIELDS):
+            bits = _field_bits(name)
+            idx = n & ((1 << bits) - 1)
+            n >>= bits
+            vals = _FIELD_VALUES[name]
+            if idx >= len(vals):
+                return {}
+            out[name] = vals[idx]
+        if n:
+            return {}                              # 高位还有残bit ⇒ 畸形/截断码，判非法
+        return {"quote_integrity": out["quote_integrity"],
+                "antecedent_integrity": out["antecedent_integrity"],
+                "dialogue_integrity": out["dialogue_integrity"],
+                "scene_boundary": out["scene_boundary"],
+                "context_dependency": out["context_dependency"],
+                "truncation_risk": out["truncation_risk"],
+                "dialogue_ratio": q / _RATIO_SCALE,
+                "eligible": eligible}
+    try:
+        d = json.loads(s)
+    except (TypeError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def canonical_json(raw: str | None) -> str | None:
+    """读侧还原成旧口径 JSON 文本（紧凑串解码；非紧凑串逐字节不动）。
+
+    **解不开的紧凑串原样返回**（不是 `"{}"`）：旧行为下坏 JSON 会在读者的
+    `json.loads` 处炸出来，糊成空字典会把「坏数据」变成「合法但全空」，
+    与 `loads_any` 特意保留的 nojson 区分口径相悖（会审 2026-09-30 点名）。
+    """
+    if raw is None:
+        return None
+    s = str(raw)
+    if not s.startswith(_CODEC_PREFIX):
+        return s                                   # 历史/附加键行：逐字节不动
+    d = unpack(s)
+    if not d:
+        return s                                   # 畸形紧凑串：让下游炸，不糊成 {}
+    return json.dumps(d, ensure_ascii=False)
+
+
+def is_packed(raw: str | None) -> bool:
+    return bool(raw) and str(raw).startswith(_CODEC_PREFIX)
+
+
+def unpack_or_none(raw: str | None) -> dict | None:
+    """「空值 = {}、合法（紧凑或 JSON）= dict、解不出 = None」三态。
+
+    `scripts/clean_text.py::_integrity_flags` 的既有口径就是这三态（None ⇒
+    调用侧**不得重写** integrity，因为那是别的工序的留痕）；把它单点导出，
+    免得每个裸 SQL 读点各写一份 json.loads（漏了紧凑形态就静默丢标记）。
+    """
+    if not (raw or "").strip():
+        return {}
+    if str(raw).startswith(_CODEC_PREFIX):
+        d = unpack(raw)
+        return d or None
+    try:
+        d = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def is_eligible(raw: str | None) -> bool:
+    """任何形态的 integrity ⇒ `eligible` 布尔（Python 侧口径，与 SQL `LIKE` 同义）。"""
+    return bool(unpack(raw).get("eligible"))
+
+
+def eligible_like_patterns() -> tuple[str, str]:
+    """SQL `LIKE` 双口径：历史 JSON 行 + 紧凑行。**漏一个就是静默漏段**。"""
+    return (LEGACY_ELIGIBLE_TRUE_LIKE, ELIGIBLE_TRUE_LIKE)
+
+
+def loads_any(raw: str | None) -> dict:
+    """紧凑串 / 历史原始 JSON ⇒ dict；**非法一律抛**（保留调用方 nojson 语义）。
+
+    与 `unpack()` 的区别：`unpack` 解不出来给 `{}`（旧 `or "{}"` 口径，读值用），
+    本函数给异常（旧 `json.loads(...)` 口径，审计/分桶用——「非法 JSON」和
+    「合法但缺键」必须能分开）。
+    """
+    if raw is None:
+        raise ValueError("integrity_null")
+    s = str(raw)
+    if s.startswith(_CODEC_PREFIX):
+        d = unpack(s)
+        if not d:
+            raise ValueError("integrity_codec_undecodable")
+        return d
+    d = json.loads(s)
+    if not isinstance(d, dict):
+        raise ValueError("integrity_not_object")
+    return d

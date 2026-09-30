@@ -68,6 +68,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from sqlalchemy import func, or_                         # noqa: E402
 
 from app import db, knowledge_extract as KE                    # noqa: E402
+from app import segment_integrity as si                        # noqa: E402  integrity 紧凑编码
 from app.config import LLM_MODE                                # noqa: E402
 from app.models import (ExpressionStrategyV2, Segment, Work,   # noqa: E402
                         StrategyInstance, WorkSource)
@@ -104,12 +105,19 @@ def integrity_dict(seg_or_value) -> dict:
     带 .integrity 属性的对象取其属性；已是 dict 直接用；解析失败、空值、
     **合法 JSON 但非字典**（[1,2]/"ok"/42/null）一律 → {}。
     旧写法 `json.loads(raw).get(...)` 对非字典 JSON 抛 AttributeError——
-    读取侧崩溃点的根因，本函数即其收口。"""
+    读取侧崩溃点的根因，本函数即其收口。
+
+    2026-09-30 起库里还有**紧凑编码**行（`i1:…`，见 app/segment_integrity）：
+    裸 SQL 取出的列值必须先过 `si.unpack` 再当 JSON 解析——否则紧凑行会被
+    判成「解析失败」，`src_ok` 三态从「缺键=None」悄悄变成「坏 JSON=None」
+    （结果同为 None 但理由不同，且自然度键全丢）。"""
     raw = seg_or_value.integrity if hasattr(seg_or_value, "integrity") else seg_or_value
     if isinstance(raw, dict):
         return raw
     if not isinstance(raw, str) or not raw.strip():
         return {}
+    if si.is_packed(raw):
+        return si.unpack(raw) or {}
     try:
         parsed = json.loads(raw)
     except Exception:                                      # noqa: BLE001

@@ -11,7 +11,9 @@ from typing import Any
 from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text, or_, select
 from sqlalchemy.dialects.sqlite import JSON  # SQLite/Postgres 均可用 JSON 普通列
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
+from . import segment_integrity as _si
 from .db import Base
 from .ids import new_id
 from .typo_map import V2_TITLE_SUFFIX
@@ -19,6 +21,33 @@ from .typo_map import V2_TITLE_SUFFIX
 
 def _now() -> str:
     return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+class CompactIntegrity(TypeDecorator):
+    """`segments.integrity` 的存储紧凑编码（2026-09-30 语料容量）。
+
+    写侧：JSON 文本/dict ⇒ `segment_integrity.pack_raw()`（8 基键压成 10 字符；带附加键或
+    异常取值原样保留，逐位无损）。
+    读侧：任何形态 ⇒ `canonical_json()` 还原成**与压缩前完全一致**的 JSON 文本，
+    所以 `json.loads(seg.integrity)` 这类既有读者一个字都不用改。
+
+    为什么放在 ORM 而不是改所有读者：读者分散在 app/ 与 scripts/ 二十多处，
+    漏一处就是静默取空值；装饰器让 ORM 路径整体无感，只剩**绕过 ORM 的裸 SQL**
+    需要显式改（那些地方本来就用 `si.unpack()` 更清楚）。
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return _si.pack_raw(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return _si.canonical_json(value)
 
 
 class Work(Base):
@@ -132,7 +161,7 @@ class Segment(Base):
     text_clean: Mapped[str | None] = mapped_column(Text, nullable=True)
     n_sentences: Mapped[int] = mapped_column(Integer, default=0)
     n_chars: Mapped[int] = mapped_column(Integer, default=0)
-    integrity: Mapped[str | None] = mapped_column(Text, nullable=True)  # T1 六指标 JSON
+    integrity: Mapped[str | None] = mapped_column(CompactIntegrity, nullable=True)  # T1 六指标 JSON（存储为紧凑编码，读侧还原）
     role: Mapped[str | None] = mapped_column(String(20), nullable=True)  # train/benchmark/None
     seg_version: Mapped[int] = mapped_column(Integer, default=1)  # 切分器版本（v2=Phase 1.5）
     created_at: Mapped[str] = mapped_column(String(32), default=_now)
