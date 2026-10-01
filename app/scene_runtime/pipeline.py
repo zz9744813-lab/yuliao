@@ -44,6 +44,15 @@ CONTRACT_RETRY_INSTRUCTION = (
     "且只输出符合系统要求的完整 JSON：不加代码围栏、不加外层包装对象、不截断，"
     "必填字段齐全。previous_reply 是你上一次的原文，修复它，不引入新内容。")
 
+# 网关**结果无效**的唯一失败原因名。判据在 app/scene_runtime/client.py：
+# 空 content / finish_reason != 'stop' / 响应解析异常——本文件一个字都不改，
+# 这里只引用它的字面量。写手侧（_call_writer）与校验席侧（_call_verified）
+# 的可恢复重试共用这一个字面量 + 「精确相等」判定：**只有这一类**才重试；
+# 带后缀的其它 RuntimeFault（invalid_model_contract:Draft /
+# model_identity_mismatch:req->actual / call_budget_exhausted …）不等值
+# ⇒ 原样抛，绝不混为一谈。
+INVALID_RESULT_FAULT = "gateway_invalid_or_partial_result"
+
 
 def _parse_attempt(text, contract):
     """(parsed | None, error_text)。真 json.loads + 真 contract.model_validate，
@@ -170,11 +179,40 @@ class SceneRunner:
             return self._call(job_id, stage, "verifier", VERIFIER_SYSTEM,
                               verify_input, budget), stage
         except RuntimeFault as e:
-            if str(e) != "gateway_invalid_or_partial_result":
+            if str(e) != INVALID_RESULT_FAULT:
                 raise
             retry_stage = stage + ".retry"
             return self._call(job_id, retry_stage, "verifier",
                               VERIFIER_SYSTEM, verify_input, budget), retry_stage
+
+    def _call_writer(self, job_id, stage, writer_input, budget):
+        """writer 主调用（任务 2026-10-01 C）：网关**结果无效**（判据见
+        INVALID_RESULT_FAULT）在写手角色上此前**当场炸臂**——旧实现直接
+        `_call` 上抛、零重试，一条早场空响应就吃掉该臂本场景剩余全部场
+        （K5 实测该类占真实臂失败 4/46，r32/r35/r38 各 1）。现按校验席
+        同一口径做**同角色可恢复重试**：
+
+        · 触发条件与 _call_verified 逐字相同（同一字面量 + 精确相等），且
+          **只**这一类：model_identity_mismatch / call_budget_exhausted /
+          invalid_model_contract / 其它 RuntimeFault 一律原样抛；
+        · 同一 role（模型由 client.models[role] 唯一决定 ⇒ **结构性禁止
+          换模型**，保住「一臂一模型对唯一」门禁前提），输入逐字不变；
+        · 重试经 _call 正常 reserve_call ⇒ 计入 calls 表与 usage.calls，
+          同样过 call_budget_exhausted 闸（不白嫖预算、不静默放宽）；
+        · 次数上限 1 次，无 .retry.retry；仍无效 ⇒ 原样抛同一失败原因名
+          gateway_invalid_or_partial_result（失败原因名一字不变、fail-closed）。
+        返回 (reply, 实际落账 stage)：后续契约重试基于最终 stage 续名，
+        与 verifier 侧 _call_verified→_verified_answer_or_retry 同一约定
+        （两口径叠加时不撞 stage 名）。"""
+        try:
+            return self._call(job_id, stage, "writer", WRITER_SYSTEM,
+                              writer_input, budget), stage
+        except RuntimeFault as e:
+            if str(e) != INVALID_RESULT_FAULT:
+                raise
+            retry_stage = stage + ".retry"
+            return self._call(job_id, retry_stage, "writer", WRITER_SYSTEM,
+                              writer_input, budget), retry_stage
 
     def run(self, plan: ScenePlan, knowledge: KnowledgePackage, budget: Budget, *, stop_after_verified=False):
         from .. import config
@@ -229,7 +267,8 @@ class SceneRunner:
                                          "mechanical_errors": errors,
                                          "instruction": "只修复问题；计划及允许变化保持不变。"})
                 writer_stage = f"writer.{round_index}"
-                reply = self._call(job_id, writer_stage, "writer", WRITER_SYSTEM, writer_input, budget)
+                reply, writer_stage = self._call_writer(job_id, writer_stage,
+                                                        writer_input, budget)
                 draft = self._parse_or_retry(job_id, writer_stage, "writer", WRITER_SYSTEM,
                                              writer_input, budget, reply["text"], Draft)
                 # Verifier sees the authoritative snapshot; Writer sees only compiled POV.
