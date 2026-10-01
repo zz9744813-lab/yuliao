@@ -29,12 +29,36 @@ FAIL，注释给的理由是「同目录任意 JSON 自称人工 PASS **没有�
   的核准路由发 HTTP 请求，不内置任何真上游默认值。
 - 两席必须**不同 `model_identity`**：同模型两票在 `mint` 阶段就被拒
   （`k45_seats_model_not_distinct`），`verify` 再核一遍。
+
+## 同席同输入可恢复重试（2026-10-01 派工 lg-k45-seat-retry）
+
+24 次（臂 × 2 席）派发里任意一次失败 ⇒ 整个 mint 抛错、不产 artifact（fail-closed
+粒度是**整批**）。实测失败**全部**是传输/解析层（HTTP 502、超时、响应体解析不出判词），
+不是判词本身；单次调用可靠度 ~90% ⇒ 24 连成功概率只有 4–13%，白跑很多轮。
+
+`mint_acceptance` 把「派发 + 解析」包成**同一 seat、同一 payload 字节、同一 model**
+的重试（额外次数由 `LG_K45_SEAT_RETRY_EXTRA` 给定，默认 1；置 0 ⇒ 与旧行为逐字一致）。
+
+**只救没有产生任何判词的故障，这不是放宽判据**：
+- 重试：`_dispatch` 抛连接/超时错、网关 5xx（`k45_gateway_denied:*:http_5xx`）、
+  证明头缺失（`k45_attestation_headers_missing`）；响应体解析不出判词对象
+  （今天记 `malformed_review_response:*` 的那些）。
+- **不**重试：拿到可读判词（含 BLOCK、ABSTAIN）、身份不符
+  （`k45_attestation_*_mismatch`）、配置/鉴权类 4xx（重试无意义）、未知错误码（默认不重试）。
+- 账本每 (臂, 席)**恰好一行**：重试只发生在 `_append_ledger` **之前**，最终只落
+  **最后一次**尝试的行（核验器对同一 (scene, arm, seat) 多行判
+  `k45_call_receipt_row_duplicated`）。
+- 解析不出来的响应**不许**被"修正/猜测"成判词：重试用尽仍按今天口径记
+  ABSTAIN + `malformed_review_response:*` 原文，绝不变成 ACCEPT。
+- 只有发生过重试的行才带可选字段 `attempts`（>1 时写入）；旧产物无此键 ⇒ 旧行/旧
+  artifact 一律不因此变红，`verify_acceptance` 的判据一字未减。
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +92,9 @@ LEDGER_FIELDS = ("seat", "provider", "model_id", "model_identity",
                  "upstream_request_id", "input_sha256", "response_sha256",
                  "receipt_sha256", "scene", "arm", "prose_sha256",
                  "verdict", "reason")
+# 同席同输入重试的尝试次数（>1 才写）：**可选**诊断字段，不参与任何判据；
+# 不进 LEDGER_FIELDS ⇒ 旧产物/旧行缺它照样核验为 True。
+OPTIONAL_LEDGER_FIELDS = ("attempts",)
 
 SYSTEM_PROMPT = (
     "你是 K4/K5 正文质量验收席，依据给定 rubric 评审单臂正文。"
@@ -80,6 +107,18 @@ SYSTEM_PROMPT = (
 PROTECTED_ROOTS_ENV = "LG_K45_PROTECTED_ROOTS"
 DEFAULT_PROTECTED_ROOTS = (r"F:\agi\language-genome\data",
                            r"D:\language-genome-data")
+
+# 同席同输入的**额外**重试次数（0 ⇒ 单次，即 2026-10-01 之前的行为）。默认写死为 1：
+# 不显式配置时也会救传输/解析故障，但救的只是「一次判词都没产生」的调用。
+SEAT_RETRY_EXTRA_ENV = "LG_K45_SEAT_RETRY_EXTRA"
+DEFAULT_SEAT_RETRY_EXTRA = 1
+# 可重试的派发故障前缀：连接/超时（k45_dispatch_failed）与证明头缺失。
+RETRYABLE_DISPATCH_PREFIXES = ("k45_dispatch_failed:",
+                               "k45_attestation_headers_missing:")
+_GATEWAY_DENIED_RE = re.compile(r"^k45_gateway_denied:[^:]*:http_(\d{3})$")
+# 响应体里连判词对象都解析不出来（_parse_verdict 的 fail-closed 分支之一）。
+# verdict_not_allowed / reason_missing 不在此列：那是席**已经**给出的可读判词。
+MALFORMED_VERDICT_PREFIX = "malformed_review_response:"
 
 
 class AcceptanceMintError(RuntimeError):
@@ -313,6 +352,64 @@ def _dispatch(seat: dict, api_key: str, payload: bytes,
             "body": response.content}
 
 
+def _seat_retry_extra(environ: dict | None = None) -> int:
+    """读 `LG_K45_SEAT_RETRY_EXTRA`：只接受非负整数，别的值一律前置拒（不猜）。"""
+    env = os.environ if environ is None else environ
+    raw = env.get(SEAT_RETRY_EXTRA_ENV)
+    if raw is None or not str(raw).strip():
+        return DEFAULT_SEAT_RETRY_EXTRA
+    text = str(raw).strip()
+    try:
+        value = int(text)
+    except ValueError:
+        raise AcceptanceMintError(
+            f"k45_seat_retry_extra_invalid:{text[:32]!r}") from None
+    if value < 0:
+        raise AcceptanceMintError(f"k45_seat_retry_extra_negative:{value}")
+    return value
+
+
+def _retryable_dispatch_error(message: str) -> bool:
+    """派发抛错里哪些是「没产生任何判词」的传输故障 ⇒ 可重试；其余一律不重试。
+
+    5xx 之外的网关拒（4xx＝配置/鉴权）与 `k45_attestation_*_mismatch`（身份不符＝
+    真问题）重试无意义；未知错误码按**不重试**处理（fail-closed，绝不多打）。
+    """
+    if message.startswith(RETRYABLE_DISPATCH_PREFIXES):
+        return True
+    denied = _GATEWAY_DENIED_RE.match(message)
+    return bool(denied) and 500 <= int(denied.group(1)) < 600
+
+
+def _unparseable_verdict(verdict: str, reason: str) -> bool:
+    """响应体连判词对象都没解析出来（可重试）；可读判词一律不重试。"""
+    return verdict == "ABSTAIN" and reason.startswith(MALFORMED_VERDICT_PREFIX)
+
+
+def _dispatch_and_parse(seat: dict, api_key: str, payload: bytes,
+                        timeout_seconds: float,
+                        max_attempts: int) -> tuple[dict, str, str, int]:
+    """同席同输入重试「派发 + 解析」，返回 (outcome, verdict, reason, 实际尝试次数)。
+
+    payload 是**同一个字节对象**逐次重发：model 与评审输入一个字都不变，重试前后
+    `input_sha256` 必然相同。重试用尽仍失败时：派发错原样上抛（异常类型/消息不变），
+    解析不出判词则按 `_parse_verdict` 的 fail-closed 原文返回。
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        exhausted = attempts >= max_attempts
+        try:
+            outcome = _dispatch(seat, api_key, payload, timeout_seconds)
+        except AcceptanceMintError as exc:
+            if exhausted or not _retryable_dispatch_error(str(exc)):
+                raise
+            continue
+        verdict, reason = _parse_verdict(outcome["body"])
+        if exhausted or not _unparseable_verdict(verdict, reason):
+            return outcome, verdict, reason, attempts
+
+
 def mint_acceptance(receipt_path: str | Path, rubric: str, seats: list, *,
                     timeout_seconds: float, artifact_path: str | Path | None = None,
                     call_receipt_path: str | Path | None = None,
@@ -321,11 +418,15 @@ def mint_acceptance(receipt_path: str | Path, rubric: str, seats: list, *,
 
     任一 (臂, 席) 没拿到「网关签发 + 证明头齐」的响应 ⇒ 整体拒绝，不落 artifact：
     半截收据不许冒充一次验收。收据是 append-only，逐条即时落盘，失败也留痕。
+
+    每次派发按 `_dispatch_and_parse` 做同席同输入重试（见模块头「可恢复重试」）；
+    每 (臂, 席) 仍**只落一行**，且只落最后一次尝试的行。
     """
     if not isinstance(rubric, str) or not rubric.strip():
         raise AcceptanceMintError("k45_rubric_missing")
     if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
         raise AcceptanceMintError("k45_timeout_seconds_invalid")
+    extra_attempts = _seat_retry_extra(environ)
     receipt = Path(receipt_path)
     raw, parsed = read_receipt(receipt)
     receipt_sha256 = _sha_bytes(raw)
@@ -346,21 +447,25 @@ def mint_acceptance(receipt_path: str | Path, rubric: str, seats: list, *,
         review_input = review_input_for(arm, rubric, receipt_sha256)
         for seat, source in zip(entries, seats):
             payload = request_bytes_for(review_input, seat["requested_model"])
-            outcome = _dispatch(seat, str(source.api_key), payload,
-                                float(timeout_seconds))
-            verdict, reason = _parse_verdict(outcome["body"])
-            rows.append({"at": _now(), "seat": seat["seat"],
-                         "provider": outcome["provider"],
-                         "model_id": outcome["model_id"],
-                         "model_identity": f"{outcome['provider']}/{outcome['model_id']}",
-                         "upstream_request_id": outcome["upstream_request_id"],
-                         "input_sha256": _sha_bytes(payload),
-                         "response_sha256": _sha_bytes(outcome["body"]),
-                         "receipt_sha256": receipt_sha256,
-                         "scene": arm["scene"], "arm": arm["arm"],
-                         "prose_sha256": arm["prose_sha256"],
-                         "verdict": verdict, "reason": reason})
-            _append_ledger(ledger_target, rows[-1])
+            outcome, verdict, reason, attempts = _dispatch_and_parse(
+                seat, str(source.api_key), payload, float(timeout_seconds),
+                1 + extra_attempts)
+            row = {"at": _now(), "seat": seat["seat"],
+                   "provider": outcome["provider"],
+                   "model_id": outcome["model_id"],
+                   "model_identity": f"{outcome['provider']}/{outcome['model_id']}",
+                   "upstream_request_id": outcome["upstream_request_id"],
+                   "input_sha256": _sha_bytes(payload),
+                   "response_sha256": _sha_bytes(outcome["body"]),
+                   "receipt_sha256": receipt_sha256,
+                   "scene": arm["scene"], "arm": arm["arm"],
+                   "prose_sha256": arm["prose_sha256"],
+                   "verdict": verdict, "reason": reason}
+            # 可选字段：只有真发生过重试才写，旧产物/关闭重试时逐字保持原形状。
+            if attempts > 1:
+                row["attempts"] = attempts
+            rows.append(row)
+            _append_ledger(ledger_target, row)
 
     artifact = {
         "artifact_version": ARTIFACT_VERSION,
@@ -612,7 +717,9 @@ def _match_ledger(ledger: list[dict], arm: dict, vote: dict) -> dict:
 
 
 def _check_vote_matches_row(arm: dict, vote: dict, row: dict) -> None:
-    differ = [key for key in LEDGER_FIELDS
+    # `OPTIONAL_LEDGER_FIELDS` 只对**写了该键的新产物**生效：旧产物两处都缺 ⇒ 逐字
+    # 保持原判定（绝不让已铸成的现网产物变红）。
+    differ = [key for key in LEDGER_FIELDS + OPTIONAL_LEDGER_FIELDS
               if key in vote and vote.get(key) != row.get(key)]
     if differ:
         raise _Rejected(
