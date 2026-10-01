@@ -12,7 +12,7 @@ import time
 from pydantic import ValidationError
 
 from ..style_contract import STYLE_CONTRACT, issues as style_issues, probe as style_probe
-from .client import OutcomeUnknown
+from .client import ModelIdentityMismatch, OutcomeUnknown, model_substitution_allowed
 from .contracts import (Budget, Draft, KnowledgePackage, Review, RuntimeFault,
                         ScenePlan, canonical, digest, validate_review)
 from .store import Store
@@ -39,16 +39,32 @@ issues 没有问题时为空数组。quote 必须是完整连续原文，可用�
 只输出 JSON，不输出评分、自我认可、推理或代码围栏。
 """
 
+CONTRACT_RETRY_INSTRUCTION = (
+    "你上一次的回复不符合输出契约（原因见 contract_error 原文）。重新输出一次，"
+    "且只输出符合系统要求的完整 JSON：不加代码围栏、不加外层包装对象、不截断，"
+    "必填字段齐全。previous_reply 是你上一次的原文，修复它，不引入新内容。")
+
+
+def _parse_attempt(text, contract):
+    """(parsed | None, error_text)。真 json.loads + 真 contract.model_validate，
+    只接受一层代码围栏；不抛异常。error_text 是给同模型重试看的校验错误原文
+    （截 4000 字，防撑爆输入预算）。"""
+    stripped = text
+    wrapped = re.fullmatch(r"\s*```(?:json)?\s*\n(.*?)\n```\s*", text, re.S)
+    if wrapped:
+        stripped = wrapped.group(1)
+    try:
+        return contract.model_validate(json.loads(stripped)), None
+    except (ValueError, ValidationError) as exc:
+        return None, f"invalid_model_contract:{contract.__name__}: {str(exc)[:4000]}"
+
 
 def parse_result(text, contract):
     # Accept one transport wrapper, never arbitrary prose around the JSON.
-    wrapped = re.fullmatch(r"\s*```(?:json)?\s*\n(.*?)\n```\s*", text, re.S)
-    if wrapped:
-        text = wrapped.group(1)
-    try:
-        return contract.model_validate(json.loads(text))
-    except (ValueError, ValidationError) as exc:
-        raise RuntimeFault("invalid_model_contract:" + contract.__name__) from exc
+    value, error = _parse_attempt(text, contract)
+    if value is None:
+        raise RuntimeFault("invalid_model_contract:" + contract.__name__)
+    return value
 
 
 def align_quotes(text: str, review: Review) -> Review:
@@ -86,16 +102,60 @@ class SceneRunner:
         try:
             reply = self.client.invoke(role=role, system=system, payload=payload,
                                        max_tokens=budget.max_output_tokens, timeout=max(0.1, remaining))
+            if isinstance(reply, dict) and reply.get("substituted") \
+                    and not model_substitution_allowed():
+                # A2 fail-closed（live 通道执行）：请求模型≠实际服务模型 ⇒ 抛。
+                # 抛进下面的 except ⇒ 已收到的回复连同 requested/actual 一起
+                # 落 calls 台账，两种模式都必须落账真相，不许静默。
+                raise ModelIdentityMismatch(
+                    "model_identity_mismatch:%s->%s" % (
+                        reply.get("requested_model"), reply.get("actual_model") or "unreported"),
+                    reply)
         except Exception as exc:
             # Durable safe code only; never record raw upstream response/credentials.
             unknown = isinstance(exc, OutcomeUnknown)
             code = str(exc) if isinstance(exc, RuntimeFault) else "client_failure:" + type(exc).__name__
-            self.store.finish_call(job_id, stage, error=code, unknown=unknown,
+            # 模型身份不实也必须落真账：fail-closed 抛错时把已收到的回复一并
+            # 记账（requested/actual 进 calls 表），收据与审计看不到被吞掉的真相。
+            ledger_reply = exc.reply if isinstance(exc, ModelIdentityMismatch) else None
+            self.store.finish_call(job_id, stage, response=ledger_reply, error=code, unknown=unknown,
                                    duration_ms=round((time.monotonic()-started)*1000))
             raise RuntimeFault(code) from exc
         self.store.finish_call(job_id, stage, response=reply,
                                duration_ms=round((time.monotonic()-started)*1000))
         return reply
+
+    def _parse_or_retry(self, job_id, stage, role, system, payload, budget, text, contract):
+        """Draft 契约失败的同模型可恢复重试（任务 2026-10-01 B）。
+
+        _parse_attempt 失败 ⇒ 同一 role（模型由 client.models[role] 唯一决定，
+        **结构性禁止换模型重试**，保住「一臂一模型对唯一」门禁前提）在
+        stage+'.retry' 再调一次，输入附上一次原文与校验错误原文；重试经
+        _call 正常 reserve_call ⇒ 计入 calls 表与 usage.calls，不白嫖预算，
+        也不进改写轮（不改写判据）。仍不合契约 ⇒ 照旧 raise
+        invalid_model_contract——契约一字不放宽。"""
+        value, error = _parse_attempt(text, contract)
+        if value is not None:
+            return value
+        retry_input = {**payload, "previous_reply": text, "contract_error": error,
+                       "repair_instruction": CONTRACT_RETRY_INSTRUCTION}
+        reply = self._call(job_id, stage + ".retry", role, system, retry_input, budget)
+        return parse_result(reply["text"], contract)
+
+    def _verified_answer_or_retry(self, job_id, review_stage, verify_input, answer, budget):
+        """verifier 判定文本的契约重试：返回 (review, 最终 answer, 最终 stage)。
+        stage 跟随最终回复落账处，供 apply_review_decisions/驳回链对齐
+        （与 _call_verified 的 verifier.retry 口径同一约定）。"""
+        value, error = _parse_attempt(answer["text"], Review)
+        if value is not None:
+            return value, answer, review_stage
+        retry_input = {**verify_input, "previous_reply": answer["text"],
+                       "contract_error": error,
+                       "repair_instruction": CONTRACT_RETRY_INSTRUCTION}
+        retry_stage = review_stage + ".retry"
+        answer = self._call(job_id, retry_stage, "verifier", VERIFIER_SYSTEM,
+                            retry_input, budget)
+        return parse_result(answer["text"], Review), answer, retry_stage
 
     def _call_verified(self, job_id, stage, verify_input, budget):
         """verifier 主判定（主控 2026-09-23 真跑取证件）：网关**结果无效**
@@ -104,15 +164,17 @@ class SceneRunner:
         轮——同角色重试 1 次，重试以 stage+'.retry' 落 calls 表（收据/台账
         可区分 verifier_invalid_retry 与真 hard issue）。
         fail-closed：重试仍无效 → 原样抛；预算闸不豁免——重试那次同样
-        过 call 预算（超限即 call_budget_exhausted，不静默放宽）。"""
+        过 call 预算（超限即 call_budget_exhausted，不静默放宽）。
+        返回 (reply, 实际落账 stage)——契约重试要基于最终 stage 续名。"""
         try:
             return self._call(job_id, stage, "verifier", VERIFIER_SYSTEM,
-                              verify_input, budget)
+                              verify_input, budget), stage
         except RuntimeFault as e:
             if str(e) != "gateway_invalid_or_partial_result":
                 raise
-            return self._call(job_id, stage + ".retry", "verifier",
-                              VERIFIER_SYSTEM, verify_input, budget)
+            retry_stage = stage + ".retry"
+            return self._call(job_id, retry_stage, "verifier",
+                              VERIFIER_SYSTEM, verify_input, budget), retry_stage
 
     def run(self, plan: ScenePlan, knowledge: KnowledgePackage, budget: Budget, *, stop_after_verified=False):
         from .. import config
@@ -166,8 +228,10 @@ class SceneRunner:
                     writer_input.update({"previous_draft": draft.text, "issues": issues,
                                          "mechanical_errors": errors,
                                          "instruction": "只修复问题；计划及允许变化保持不变。"})
-                reply = self._call(job_id, f"writer.{round_index}", "writer", WRITER_SYSTEM, writer_input, budget)
-                draft = parse_result(reply["text"], Draft)
+                writer_stage = f"writer.{round_index}"
+                reply = self._call(job_id, writer_stage, "writer", WRITER_SYSTEM, writer_input, budget)
+                draft = self._parse_or_retry(job_id, writer_stage, "writer", WRITER_SYSTEM,
+                                             writer_input, budget, reply["text"], Draft)
                 # Verifier sees the authoritative snapshot; Writer sees only compiled POV.
                 world = self.store.snapshot(plan.book_id, plan.branch_id)
                 if world.revision != plan.expected_revision:
@@ -178,9 +242,11 @@ class SceneRunner:
                 if context.get("verifier_context_version") == 2:
                     verify_input["recent_committed_scenes"] = context["recent_committed_scenes"]
                 review_stage = f"verifier.{round_index}"
-                answer = self._call_verified(job_id, review_stage, verify_input, budget)
+                answer, review_stage = self._call_verified(job_id, review_stage, verify_input, budget)
                 try:
-                    review = align_quotes(draft.text, parse_result(answer["text"], Review))
+                    review, answer, review_stage = self._verified_answer_or_retry(
+                        job_id, review_stage, verify_input, answer, budget)
+                    review = align_quotes(draft.text, review)
                     review_contract_errors = [e for e in validate_review(plan, draft.text, review)
                                               if e in {"evidence_not_in_text", "duplicate_event_evidence"}]
                 except RuntimeFault:
