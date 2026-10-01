@@ -315,3 +315,18 @@ def test_writer_invalid_and_contract_retry_do_not_collide(scene, live_cfg):
     assert usage["contract_retries"] == 1
     assert usage["verifier_invalid_retries"] == 0
     assert len(gateway.requests) == 4
+
+
+def test_invalid_result_fault_literal_reconciles_with_client():
+    """`pipeline.INVALID_RESULT_FAULT` 必须与 `client.py` 抛出的那一份逐字一致。
+
+    判据在 `client.py`、触发码写在 `pipeline.py`（两文件各一份字面量）。
+    `client.py` 改名而 pipeline 没跟 ⇒ 写手/校验席重试**静默失效**
+    （fail-closed 变成「永不触发」）。这条对账断言把该耦合钉死
+    （与仓库既有 `test_docs_code_reconcile.py` 同一风格）。"""
+    import inspect
+
+    from app.scene_runtime import client as _client
+
+    assert INVALID_RESULT_FAULT in inspect.getsource(_client)
+    assert f'RuntimeFault("{INVALID_RESULT_FAULT}")' in inspect.getsource(_client)

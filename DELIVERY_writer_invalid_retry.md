@@ -1,8 +1,26 @@
 # DELIVERY：写手侧「网关结果无效」同角色可恢复重试（2026-10-01）
 
 worktree：`F:\agi\_scratch\worktrees\lg-writer-invalid-retry`（基线 `db4996d`）。
-**未 commit、未 push、未写真库、未调真实模型**（全程注入式 httpx MockTransport
-假网关，零额度消耗）。口径文档：`docs/WRITER_INVALID_RETRY.md`。
+**已 commit（`0beb81a`），未 push、未写真库、未调真实模型**（全程注入式 httpx
+MockTransport 假网关，零额度消耗）。值班 agent 接手后并入 main（`1de37fe`）
+⇒ 合并提交 `f83d3d8`，合并后同批回归 **148 passed**。口径文档：`docs/WRITER_INVALID_RETRY.md`。
+
+### 覆盖边界（如实声明，勿当成「唯一改动点」）
+`_call_writer` 只覆盖 `run()` 循环里写手的**主调**一次。以下调用点仍是裸
+`_call`、收到 `gateway_invalid_or_partial_result` 仍当场抛（未覆盖，已知遗留）：
+① `_parse_or_retry`（写手契约重试的第二次调用，`writer.N.retry`）；
+② `_verified_answer_or_retry`（校验席契约重试）；
+③ `_repair_artifact` 内的校验席返修调用。
+三者命中率远低于主调（K5 实测该类 4/46 全部出在写手主调），故本轮只修主调；
+残留点位已在此登记，下一轮如需可同口径扩展。
+
+### 已知口径变化（预算紧张时的失败码迁移）
+写手重试经真 `reserve_call` 扣预算 ⇒ 预算只剩 1 位时，重试会占掉该位、随后
+校验席被闸拦，最终失败码从 `gateway_invalid_or_partial_result` 变为
+`call_budget_exhausted`（§2.3 探针 `budget-only-1-left` 即此形态，用例
+`test_writer_retry_blocked_when_last_call_slot_is_left` 已固化）。
+即「两次都无效 ⇒ 失败原因名一字不变」只在**预算够**的分支成立；下游若按
+`error` 字段聚合 K5，需知这条迁移。
 
 ## 1. 交付清单（全部在允许编辑白名单内）
 
@@ -198,7 +216,7 @@ exit=0
   `tests/*` 逐字未动（§2.2 的 264 项为其通过证据）。
 - **未写真库**：`D:\language-genome-data\language_genome.db` 未触碰；测试与
   探针全在 `tmp_path` / 临时目录的副本库上。
-- **未 commit / 未 push / 未 merge**（提交与合 main 由值班 agent 做）。
+- **未 push / 未 merge 到远端**（提交 `0beb81a` + 合并 main `1de37fe` 的 `f83d3d8` 均在本地；合 main 由值班 agent 完成，远端推送仍待门禁）。
 - 台账里的失败行仍照旧留痕（`writer.0` 行 `status=failed` +
   `error=gateway_invalid_or_partial_result`），K5 的失败类聚合口径不变。
 
