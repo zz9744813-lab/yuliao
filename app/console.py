@@ -126,9 +126,17 @@ def _dashboard(s: Session) -> dict:
 
 def _corpus(s: Session) -> dict:
     # db._make_engine 已拒绝非 SQLite 配置；只维护一个聚合口径。
-    # text_clean 的旧口径是「非 NULL 即已清洗」，空字符串也计入。
-    rows = s.execute(text("""
-        SELECT role, seg_version, COUNT(*), SUM(text_clean IS NOT NULL), SUM(n_chars)
+    # 「已清洗」口径分两段：
+    #   · 瘦身迁移（scripts/slim_segments.py）后——等值行的 text_clean 已归 NULL，
+    #     「非 NULL 即已清洗」会漏计 ⇒ 改读迁移补的 `cleaned` 列（SUM(cleaned)），
+    #     cleaned=1 的口径正是「迁移前 text_clean 非 NULL（含空串）」，逐行等价；
+    #   · 迁移前 / 未跑过迁移的库（ORM create_all 不声明该列）——`cleaned` 不存在 ⇒
+    #     回落旧口径 SUM(text_clean IS NOT NULL)。
+    # 全仓仅此一处在 SQL 侧聚合 text_clean 计数（grep 复核），故只改这一处即可。
+    cols = {r[1] for r in s.execute(text("PRAGMA table_info(segments)"))}
+    cleaned_expr = "SUM(cleaned)" if "cleaned" in cols else "SUM(text_clean IS NOT NULL)"
+    rows = s.execute(text(f"""
+        SELECT role, seg_version, COUNT(*), {cleaned_expr}, SUM(n_chars)
         FROM segments GROUP BY role, seg_version
     """))
     total = cleaned = chars = 0
