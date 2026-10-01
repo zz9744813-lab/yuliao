@@ -74,6 +74,16 @@ class Store:
                 raise RuntimeFault("unsupported_runtime_schema")
             if not row:
                 db.execute("INSERT INTO runtime_meta VALUES(?)", (RUNTIME_VERSION,))
+            # 模型身份诚实化（任务 2026-10-01 A1）：calls 表加持久列
+            # requested_model/actual_model/model_substituted——litellm 静默换
+            # 上游时真相必须可 SQL 直查，不依赖翻 response JSON。加性迁移、
+            # 不抬 RUNTIME_VERSION：既有世界库（历史 k4_worlds 产物）仍可读。
+            have = {r[1] for r in db.execute("PRAGMA table_info(calls)")}
+            for column, decl in (("requested_model", "TEXT"),
+                                 ("actual_model", "TEXT"),
+                                 ("model_substituted", "INTEGER")):
+                if column not in have:
+                    db.execute(f"ALTER TABLE calls ADD COLUMN {column} {decl}")
 
     @contextmanager
     def connection(self, *, transaction=False):
@@ -191,39 +201,73 @@ class Store:
                 raise RuntimeFault("call_budget_exhausted")
             if len(payload["system"]) + len(canonical(payload["input"])) > budget.max_input_chars:
                 raise RuntimeFault("context_budget_exceeded")
-            db.execute("INSERT INTO calls VALUES(?,?,?,?,?,?,?,?,?)",
-                       (job_id, stage, digest(payload), "dispatched", canonical(payload), None, None, utcnow(), None))
+            db.execute("INSERT INTO calls(job,stage,request_hash,status,request,"
+                       "started_at,requested_model) VALUES(?,?,?,?,?,?,?)",
+                       (job_id, stage, digest(payload), "dispatched", canonical(payload),
+                        utcnow(), payload.get("model")))
             db.execute("UPDATE jobs SET status='running',updated_at=? WHERE id=?", (utcnow(), job_id))
         return None
 
     def finish_call(self, job, stage, *, response=None, error=None, unknown=False, duration_ms=0):
         status = "unknown" if unknown else "failed" if error else "succeeded"
+        requested = response.get("requested_model") if isinstance(response, dict) else None
+        actual = response.get("actual_model") if isinstance(response, dict) else None
+        substituted = response.get("substituted") if isinstance(response, dict) else None
+        substituted = None if substituted is None else int(bool(substituted))
         with self.connection(transaction=True) as db:
-            changed = db.execute("UPDATE calls SET response=?,error=?,status=?,duration_ms=? "
+            changed = db.execute("UPDATE calls SET response=?,error=?,status=?,duration_ms=?,"
+                                 "requested_model=COALESCE(?,requested_model),"
+                                 "actual_model=COALESCE(?,actual_model),"
+                                 "model_substituted=COALESCE(?,model_substituted) "
                                  "WHERE job=? AND stage=? AND status='dispatched'",
                                  (canonical(response) if response is not None else None, error, status,
-                                  duration_ms, job, stage)).rowcount
+                                  duration_ms, requested, actual, substituted, job, stage)).rowcount
             if changed != 1:
                 raise RuntimeFault("call_completion_conflict")
 
     def usage(self, job):
         with self.connection() as db:
-            rows = db.execute("SELECT stage,status,response,duration_ms,error FROM calls WHERE job=? ORDER BY rowid", (job,)).fetchall()
-        results = [dict(r) for r in rows]
-        for r in results:
+            rows = db.execute("SELECT stage,status,response,duration_ms,error,"
+                              "requested_model,actual_model,request FROM calls "
+                              "WHERE job=? ORDER BY rowid", (job,)).fetchall()
+        results, contract_flags = [], []
+        for r in rows:
+            entry = {k: r[k] for k in ("stage", "status", "duration_ms", "error",
+                                       "requested_model", "actual_model")}
+            try:
+                payload = json.loads(r["request"] or "{}")
+                contract_flags.append(bool(isinstance(payload, dict)
+                                           and "contract_error" in (payload.get("input") or {})))
+            except (ValueError, TypeError):
+                contract_flags.append(False)
             if r["response"]:
-                reply = json.loads(r.pop("response"))
-                r.update({k: reply.get(k) for k in ("requested_model", "actual_model", "tokens_in", "tokens_out", "finish_reason")})
+                reply = json.loads(r["response"])
+                # 只覆盖回复里**存在**的键：requested_model 已由 reserve_call
+                # 落列（夹具/旧通道回复无该键时不得被 None 抹掉）。
+                entry.update({k: reply[k] for k in
+                              ("requested_model", "actual_model", "substituted",
+                               "tokens_in", "tokens_out", "finish_reason") if k in reply})
+            results.append(entry)
         # 2026-09-23 主控取证件：tokens 聚合缺位=真跑收据恒 0（K5-A 成本模型
         # 与 §6 止损命令都指它）。只聚合**成功调用**的网关实账 tokens；失败
         # 调用的上游计费本侧不可见（网关账 llm_calls 是交叉核对侧）。
-        # verifier_invalid_retries=以 stage+'.retry' 落表的重试数（收据区分
-        # verifier_invalid_retry 与真 hard issue 的依据）。
+        # verifier_invalid_retries=网关无效判定、以 stage+'.retry' 落表的
+        # verifier 重试数（收据区分 verifier_invalid_retry 与真 hard issue
+        # 的依据）。contract_retries=输入携带 contract_error 的 '.retry'
+        # 调用数（任务 2026-10-01 B 的同模型契约重试）——两口径分开记，
+        # 互不吞、互不冒充。
         tokens = sum((r.get("tokens_in") or 0) + (r.get("tokens_out") or 0)
                      for r in results)
-        retries = sum(1 for r in results if str(r["stage"]).endswith(".retry"))
-        return {"calls": len(rows), "duration_ms": sum(r["duration_ms"] or 0 for r in rows),
-                "tokens": tokens, "verifier_invalid_retries": retries,
+        stages = [(r["stage"], flag) for r, flag in zip(results, contract_flags)]
+        contract_retries = sum(1 for stage, flag in stages
+                               if str(stage).endswith(".retry") and flag)
+        verifier_invalid_retries = sum(
+            1 for stage, flag in stages
+            if str(stage).startswith("verifier.") and str(stage).endswith(".retry")
+            and not flag)
+        return {"calls": len(rows), "duration_ms": sum(r["duration_ms"] or 0 for r in results),
+                "tokens": tokens, "verifier_invalid_retries": verifier_invalid_retries,
+                "contract_retries": contract_retries,
                 "cost": None, "attempts": results}
 
     def add_confirmed_issue(self, job_id, text: str, issue: Issue):
@@ -237,7 +281,15 @@ class Store:
             rows = db.execute("SELECT response FROM calls WHERE job=? AND stage LIKE 'writer.%' AND status='succeeded'", (job_id,)).fetchall()
             from .pipeline import parse_result
             from .contracts import Draft
-            if not any(parse_result(json.loads(r[0])["text"], Draft).text == text for r in rows):
+
+            def _matches(raw):
+                try:
+                    return parse_result(json.loads(raw)["text"], Draft).text == text
+                except RuntimeFault:
+                    # 契约重试（任务 2026-10-01 B）会把**不合契约**的回复以
+                    # succeeded 落账——它是模型原文，不是可标注工件，跳过。
+                    return False
+            if not any(_matches(r[0]) for r in rows):
                 raise RuntimeFault("operator_issue_unknown_artifact")
             db.execute("INSERT OR IGNORE INTO confirmed_issues VALUES(?,?,?,?,?)",
                        (job_id, digest(text), digest(issue), canonical(issue), utcnow()))

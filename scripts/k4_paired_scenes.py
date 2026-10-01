@@ -863,6 +863,38 @@ def gateway_host_from_url(url) -> str:
         return ""
 
 
+def model_identity_fields(usage: dict) -> dict:
+    """live 收据的模型身份诚实字段（任务 2026-10-01 A3）。
+
+    背景：litellm 会静默换上游（实测 491 次调用 42 次请求≠实际，8.6%），
+    而 K4/K5 异模型门与 K2 两席按**请求**模型对判定——不核实的话收据里
+    的模型身份可能是假的。口径：
+    · models（既有键）语义不变 = 请求模型，绝不为凑门改指向实际值；
+    · models_actual = calls 台账里的实际服务模型；同角色逐次出现多个不同
+      实际模型（= 逐次换皮）时如实列成有序清单，不取其一冒充全部；
+    · model_identity_ok = **每一笔**带请求侧记录的调用都 actual==requested；
+      无请求侧记录（非网关通道，如离线夹具）⇒ 无法证明身份 ⇒ False
+      （fail-closed，诚实原则优先于让字段变绿）。
+    消费侧复核（docs/MODEL_IDENTITY_AND_RETRY.md）：门的异模型前提应以
+    models_actual 的两个值互异 + model_identity_ok==True 共同成立。"""
+    attempts = (usage or {}).get("attempts", [])
+
+    def actual_for(role_prefix):
+        seen = sorted({a.get("actual_model") for a in attempts
+                       if str(a.get("stage", "")).startswith(role_prefix + ".")
+                       and a.get("actual_model")})
+        if not seen:
+            return None
+        return seen[0] if len(seen) == 1 else seen
+
+    checked = [a for a in attempts if a.get("requested_model") is not None]
+    identity_ok = bool(checked) and all(
+        a.get("actual_model") == a.get("requested_model") for a in checked)
+    return {"models_actual": {"writer": actual_for("writer"),
+                              "verifier": actual_for("verifier")},
+            "model_identity_ok": identity_ok}
+
+
 def run_paired(store_factory, client, lg_session, *, live: bool = False,
                freeze: bool = False, n_scenes: int = 3,
                book_id: str = "WK-K4",
@@ -1005,7 +1037,12 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                     gw_host = gateway_host_from_url(_cfg.GATEWAY_BASE_URL)
                 v_attempts = [{"stage": a["stage"],
                                "model": a.get("requested_model"),
-                               "status": a["status"]}
+                               "status": a["status"],
+                               # 离线收据逐字不变（键集钉死见 tests/
+                               # test_k4_worlds_dir_receipt.py）：实际服务
+                               # 模型只在 live 侧逐次留痕。
+                               **({"model_actual": a.get("actual_model")}
+                                  if live else {})}
                               for a in u.get("attempts", [])
                               if str(a.get("stage", "")
                                      ).startswith("verifier")]
@@ -1023,8 +1060,15 @@ def run_paired(store_factory, client, lg_session, *, live: bool = False,
                        "gateway_host": gw_host,
                        "models": {"writer": client.models.get("writer"),
                                   "verifier": client.models.get("verifier")},
-                       "retried": bool(u.get("verifier_invalid_retries")),
+                       "retried": bool(u.get("verifier_invalid_retries")
+                                       or u.get("contract_retries")),
                        "verifier_attempts": v_attempts}
+                if live:
+                    # 模型身份诚实化（任务 2026-10-01 A3）：models=请求语义
+                    # 不变；models_actual/model_identity_ok 从 calls 台账取
+                    # 实际服务模型——只为 live 收据加键（离线键集逐字钉死）。
+                    rec.update(model_identity_fields(u))
+                    rec["usage"]["contract_retries"] = u.get("contract_retries", 0)
                 if live:
                     # 与顶层产物、世界库和计划绑定同一本书，供验收侧逐臂核对。
                     rec["book_id"] = plan.book_id
