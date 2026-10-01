@@ -184,22 +184,27 @@ def test_bad_review_cannot_grant_permission_and_stops_at_limit(setup, config):
 
 
 def test_forged_review_hits_state_repair_and_cannot_grant_permission(setup):
-    """A10 后语义：伪造 after=999 是核验工件缺陷（正文没错）——不再烧
-    3 轮 Writer，走有上限核验返修；fixture 永远回毒 → 如实失败。
+    """A10 后语义：伪造 after=999 是核验工件缺陷（正文没错）——走有上限核验返修；
+    fixture 永远回毒 ⇒ **本轮**失败并把错误回灌写手，写手剩余轮次照旧可用
+    （2026-10-01 核验返修轮次化），轮次用尽后如实失败且**失败码保留原名**。
     安全性质不变：零提交、世界零改动、不得授信。"""
     store, _, plan, knowledge = setup
     client = FixtureClient(forged=True)
     runner = SceneRunner(store, client)
     with pytest.raises(RuntimeFault, match="verifier_state_repair_exhausted"):
         runner.run(plan, knowledge, Budget())
-    assert client.n == 3 and store.snapshot("book-a").revision == 0
+    # 默认 Budget()：max_rewrites=2 ⇒ 2 轮，每轮 writer+verifier+state1 = 6 次调用
+    # （第 2 轮结束后调用额度已付不起第 3 轮 ⇒ 顶层码仍是工件根因，不是
+    #  call_budget_exhausted——这是 2026-10-01 会审修正锁定的性质）。
+    assert client.n == 6 and store.snapshot("book-a").revision == 0
     assert store.snapshot("book-a").facts["coins"].value == 3
     with store.connection() as db:
         stages = [r[0] for r in db.execute("SELECT stage FROM calls ORDER BY rowid")]
-    assert stages == ["writer.0", "verifier.0", "verifier.0.state1"]
+    assert stages == ["writer.0", "verifier.0", "verifier.0.state1",
+                      "writer.1", "verifier.1", "verifier.1.state1"]
     with pytest.raises(RuntimeFault, match="verifier_state_repair_exhausted"):
         runner.run(plan, knowledge, Budget())
-    assert client.n == 3  # 恢复按 (job, stage) 缓存回放，不重复计费不重跑
+    assert client.n == 6  # 恢复按 (job, stage) 缓存回放，不重复计费不重跑
 
 
 def test_broken_verifier_quote_does_not_cause_prose_rewrite(setup):
@@ -207,10 +212,11 @@ def test_broken_verifier_quote_does_not_cause_prose_rewrite(setup):
     client = FixtureClient(fake_quote=True)
     with pytest.raises(RuntimeFault, match="verifier_contract_repair_exhausted"):
         SceneRunner(store, client).run(plan, knowledge, Budget())
-    assert client.n == 3 and store.snapshot("book-a").revision == 0
+    assert client.n == 6 and store.snapshot("book-a").revision == 0
     with store.connection() as db:
         stages = [r[0] for r in db.execute("SELECT stage FROM calls ORDER BY rowid")]
-    assert stages == ["writer.0", "verifier.0", "verifier.0.contract1"]
+    assert stages == ["writer.0", "verifier.0", "verifier.0.contract1",
+                      "writer.1", "verifier.1", "verifier.1.contract1"]
 
 
 def test_verifier_contract_can_recover_with_original_prose(setup):

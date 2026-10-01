@@ -109,14 +109,17 @@ def test_unchanged_fact_mislisted_repairs_without_burning_writer(tmp_path, world
 
 
 def test_state_repair_exhausted_fails_honestly(tmp_path, world_plan):
-    """返修轮仍回毒工件 → 如实失败，Writer 额度照旧只花一次。"""
+    """返修轮仍回毒工件 → 如实失败，且**失败码保留工件根因**（不是
+    call_budget_exhausted）。2026-10-01 核验返修轮次化：工件不可用 = 本轮失败
+    并回灌写手，写手剩余轮次可用 ⇒ 默认 Budget() 下写手会被叫第 2 次（这不是
+    「为核验器的错改正文」：正文一字未改地返修，只是多一轮让计划事件更明确）。"""
     world, plan, knowledge = world_plan
     store = Store(tmp_path / "runtime.sqlite")
     store.create_world(world)
     client = _Client(poison="extra_change", repair_stub="poison")
     with pytest.raises(RuntimeFault, match="verifier_state_repair_exhausted"):
         SceneRunner(store, client).run(plan, knowledge, Budget())
-    assert client.writer_calls == 1
+    assert client.writer_calls == 2
     assert store.audit("book-a")["commits"] == 0, "未经确认的状态变化绝不落正史"
 
 
