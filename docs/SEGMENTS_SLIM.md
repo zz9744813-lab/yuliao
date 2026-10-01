@@ -24,17 +24,30 @@ integrity 回填**，不做 PK 改造、不删表、不重建表。
 命令面：`--db`（必填）、`--dry-run`（零写入）、`--limit N`（只处理按 rowid 升序前 N 行）、
 `--vacuum`（默认关：耗时且要 2 倍空间）、`--batch`（默认 20000）、`--force-live`。
 
+**入参闸门（会审 BLOCK）**：`--limit`/`--batch` 必须 **>= 1**，否则在开库写任何东西前直接退出码 2。
+`LIMIT 0` 会让子查询空、`MAX(rowid)` 为 NULL、退化成「全库」不可逆改写；`--batch 0` 会让分批循环
+不前进（死循环）。范围只收紧不放宽。
+
 - **a. `cleaned` 列**：`ALTER TABLE segments ADD COLUMN cleaned INTEGER NOT NULL DEFAULT 0`（若不存在），
   再 `UPDATE segments SET cleaned=1 WHERE text_clean IS NOT NULL`（含空串——与 console 旧口径逐行等价）。
-- **b. 归 NULL**（分批 rowid 区间）：`UPDATE segments SET text_clean=NULL WHERE text_clean IS NOT NULL AND text_clean = text`。
-  **`text_clean != text` 的行（真清洗结果、含空串清洗）原样保留。**
-- **c. integrity 回填**：仍是基键 JSON 的行用 `app.segment_integrity.pack_raw()` 压成紧凑串；
-  带附加键（`src_ok`/`severity`/…）、取值越界、非 JSON 的行 pack_raw **原样返回** ⇒ 不写。
+- **b. 归 NULL** + **c. integrity 回填**：**合并为单趟分批 rowid 区间循环**，每批 `commit`。
+  - b：`UPDATE segments SET text_clean=NULL WHERE text_clean IS NOT NULL AND text_clean = text AND rowid BETWEEN ? AND ?`。
+    **`text_clean != text` 的行（真清洗结果、含空串清洗）原样保留。**
+  - c：区间内**流式** fetch（常驻内存 O(batch)、总复杂度 O(行)，会审 BLOCK 修正），
+    仍是基键 JSON 的行用 `app.segment_integrity.pack_raw()` 压成紧凑串；带附加键
+    （`src_ok`/`severity`/…）、取值越界、非 JSON 的行 pack_raw **原样返回** ⇒ 不写。
+    （旧实现对全表 `int_rows` 一次性 `fetchall()`（数百 MB）且每批对 `int_updates` 线性过滤（≈百亿次比较），真库会 OOM/卡死。）
 - **d. `--vacuum`** 才 `VACUUM`；最后打印文件大小前/后、`bytes/row` 前/后、按 105,283,111 行折算的全库预估。
 
-**默认拒绝对活库动手**：路径解析后等于 `D:/language-genome-data/language_genome.db` 或
+**默认拒绝对活库动手**：路径经 `os.path.realpath` 解析（含符号链接 / junction / 8.3 短路径 /
+subst 盘）后等于 `D:/language-genome-data/language_genome.db` 或
 `F:/agi/language-genome/data/language_genome.db`（大小写/斜杠归一比对）直接退出码 2 并打印
-「活库需 --force-live」；只有显式 `--force-live` 才继续。
+「活库需 --force-live」；只有显式 `--force-live` 才继续。**必须 realpath 而非 abspath**
+（会审 BLOCK：abspath 不解析重解析点，符号链接指向活库会绕过守卫；回归
+`tests/test_slim_segments.py::test_symlink_to_live_db_is_refused`）。
+
+本轮只改 `text_clean`/`integrity`/`cleaned` 三列的**列值**，不新增/删除行、不动主键/外键、不重建表，
+故**不再 `PRAGMA foreign_keys=OFF`**（会审建议：关掉反而少一道兜底，已移除）。
 
 ## 2. 为什么 `text_clean` 可以归 NULL —— 读侧处处是回退
 
@@ -66,15 +79,28 @@ integrity 回填**，不做 PK 改造、不删表、不重建表。
 `SUM(text_clean IS NOT NULL)` 仅出现在 console.py:131；`scripts/clean_text.py:540` 是另一脚本的
 ORM 计数，不受影响、不改）。
 
-改法：迁移后等值行 `text_clean` 已归 NULL，旧口径会漏计 ⇒ `_corpus` 用
-`PRAGMA table_info(segments)` 探测 `cleaned` 列：**存在则 `SUM(cleaned)`，否则回落
-`SUM(text_clean IS NOT NULL)`**。回落分支保证：
+改法（会审 BLOCK 修正：`cleaned` 不进 ORM，单看 `SUM(cleaned)` 对增量数据静默漏计）：
+迁移后等值行 `text_clean` 已归 NULL，旧口径会漏计 ⇒ `_corpus` 用 `PRAGMA table_info(segments)`
+探测 `cleaned` 列（实现见 `app/console.py::_cleaned_expr`）：
 
-- 迁移前 / 未跑迁移的库（ORM `create_all` 不声明 `cleaned`，含全部测试库）——口径与改动前**逐行相同**，`test_console.py` 不红；
-- 迁移后——`SUM(cleaned)` 正是「迁移前 text_clean 非 NULL（含空串）」的逐行等价计数。
+- **无 `cleaned` 列**（迁移前 / ORM `create_all` 建的全部测试库）——回落旧口径
+  `SUM(text_clean IS NOT NULL)`，与改动前**逐行相同**，`test_console.py` 不红。
+- **有 `cleaned` 列**（跑过 `slim_segments` 的库）——用**等价复合口径**
+  `SUM(CASE WHEN cleaned = 1 OR text_clean IS NOT NULL THEN 1 ELSE 0 END)`，而**不是**只看 `SUM(cleaned)`。
 
-> `cleaned` 列**只由本迁移器 ALTER 添加**，不进 ORM（`app/models.py` 一行未动）、不进 `app/db.py::_migrate`；
-> 因此它是「离线副本上按需补列」的旁路列，`create_all`/`Segment` 查询按名列选择，多这一列无害。
+为什么必须是复合口径：`cleaned` **不进 ORM**（`app/models.py` 一行未动）、不进 `app/db.py::_migrate`，
+所以**迁移之后任何新导入的 segment 都以 `cleaned=0` 落库**（即使 `text_clean` 非 NULL）。若只读
+`SUM(cleaned)`，「已清洗」指标会从迁移那一刻起只减不增、缺口随增量扩大且永不自愈（会审 [严重] 项）。
+复合口径里：被迁移归 NULL 的等值行由 `cleaned=1` 命中；未迁移行 / 增量新行由 `text_clean IS NOT NULL`
+命中；二者并集恰等于「该段有清洗结果」的原语义——**既不放宽判据、也不改口径语义**。
+
+由此，**`--limit` 部分迁移也当场正确**：范围外已清洗行 `text_clean` 仍非 NULL，走 `text_clean
+IS NOT NULL` 分支计入，无需等全量迁移完成后才能切换 console 口径。回归见
+`tests/test_slim_segments.py::test_incremental_cleaned_not_undercounted`
+与 `::test_limit_partial_migration_console_still_correct`。
+
+> `cleaned` 列**只由本迁移器 ALTER 添加**，不进 ORM（`app/models.py` 一行未动）、不进 `app.db._migrate`；
+> 它是「离线副本上按需补列」的旁路指标位，配合上面的复合口径读侧才自洽。
 
 ## 4. 回滚
 
@@ -86,6 +112,10 @@ ORM 计数，不受影响、不改）。
    - `integrity`：紧凑串 `loads_any` 逐位无损解回原字典，无需还原；若要还原原始 JSON 文本，`canonical_json()` 即读侧等价。
    - `cleaned`：`ALTER TABLE … DROP COLUMN`（SQLite ≥3.35）或直接忽略（不影响任何读侧）。
 3. 迁移**从不改 `text` / `id` / `ordinal` / `n_chars` / `created_at`**，也不删表、不重建表。
+4. **半途而废态（会审 [一般] 项）**：分批循环每批即时 `commit`。若最后校验发现残留等值
+   `text_clean`（`left_equal != 0`，迁移器返回退出码 1、不执行 VACUUM），**此前各批 UPDATE 已经落盘，
+   不可自动回滚**。此时必须按本节 2 的列级 SQL 手工处理已提交批次，再重跑——不能假定「失败即无副作用」。
+   迁移器在 stderr 会明示此点。
 
 ## 5. 复核 SQL（切换前后各跑一遍，逐项相等即通过）
 
@@ -99,6 +129,15 @@ SELECT COUNT(*) FROM segments WHERE integrity NOT LIKE 'i1:%'
      AND integrity NOT LIKE '%src_ok%';                           -- 应 = 0（基键 JSON 全已紧凑）
 SELECT COUNT(*) FROM segments WHERE integrity LIKE 'i1:1%';       -- > 0（eligible 前缀位仍可 LIKE 命中）
 ```
+
+**逐条口径边界（会审提醒，勿据此判「假失败」）**：
+
+- `text_clean = text` 应=0：仅当**全库迁移跑完**时成立；`--limit` 部分迁移后范围外仍会有非 0，属正常。
+- `cleaned=1` == 迁移前 `SUM(text_clean IS NOT NULL)`：仅对**单次全新全量迁移**成立（重跑时 `cleaned` 保留历史）。
+  读侧「已清洗」计数一律走 §3 的复合口径 `SUM(cleaned=1 OR text_clean IS NOT NULL)`，不依赖本条是否恰好相等。
+- 基键 JSON 全已紧凑：带附加键（`src_ok`/`severity`/`clean_pending_llm`/…）、取值越界、非 JSON 的行
+  **永不紧凑且合法**（K5 裸 SQL 硬约束，见 §6），故 `NOT LIKE 'i1:%' AND json_valid AND NOT LIKE '%src_ok%'`
+  这类行本就不该被压；复核时须排除这些合法未紧凑行，否则对正确迁移的库会返回非 0（假失败）。
 
 `text` 逐字节不变、有效正文两口径不变、integrity `loads_any` 前后等价，由
 `tests/test_slim_segments.py` 在真库小副本（2000 行混合类别）上逐行断言钉死。

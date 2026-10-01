@@ -48,8 +48,12 @@ FULL_DB_ROWS = 105_283_111
 
 
 def _norm(path: str | os.PathLike) -> str:
-    """归一比对键：绝对化 + normcase（Windows 折叠斜杠/盘符大小写）+ 正斜杠 + 小写。"""
-    p = os.path.normpath(os.path.abspath(str(path)))
+    """归一比对键：realpath（解析符号链接 / junction / 8.3 短路径 / subst 盘）
+    + normpath + normcase（Windows 折叠大小写）+ 正斜杠 + 小写。
+
+    必须走 realpath 而非 abspath：abspath 不解析重解析点，符号链接/junction 指向
+    活库文件时会绕过守卫直接写活库（会审 BLOCK 项）。"""
+    p = os.path.normcase(os.path.normpath(os.path.realpath(str(path))))
     return p.replace("\\", "/").lower()
 
 
@@ -91,6 +95,16 @@ def _iter_batches(upper: int, start_rowid: int, batch: int):
 
 def run(db: str, *, dry_run: bool = False, limit: int | None = None,
         vacuum: bool = False, batch: int = 20_000, force_live: bool = False) -> int:
+    # 入参闸门（会审 BLOCK：--limit 0/负数会被 SQLite 当作全库或不限，--batch 0/负数
+    # 会让 _iter_batches 死循环）——范围只收紧不放宽：limit/batch 必须 >= 1。
+    if limit is not None and limit < 1:
+        print(f"[slim] --limit={limit} 非法：必须 >= 1。"
+              f"（LIMIT 0 ⇒ 子查询空 ⇒ MAX(rowid)=NULL ⇒ 会被误当作全库执行，已拒绝。）",
+              file=sys.stderr)
+        return 2
+    if batch < 1:
+        print(f"[slim] --batch={batch} 非法：必须 >= 1。", file=sys.stderr)
+        return 2
     db_path = Path(db)
     if is_live_db(db_path) and not force_live:
         print(f"[slim] 活库需 --force-live：{db} 判定为活库路径，"
@@ -102,73 +116,95 @@ def run(db: str, *, dry_run: bool = False, limit: int | None = None,
 
     size0 = db_path.stat().st_size
     con = sqlite3.connect(str(db_path))
-    con.execute("PRAGMA foreign_keys=OFF")  # 只动列值，不触发外键级联；迁移结束/退出即恢复默认
+    # 本轮只改 text_clean/integrity/cleaned 三列的列值，不新增/删除行、不动主键/外键，
+    # 也不重建表，故无需 PRAGMA foreign_keys=OFF（会审建议：关掉反而少一道兜底，已移除）。
     cur = con.cursor()
     total_rows = cur.execute("SELECT COUNT(*) FROM segments").fetchone()[0]
     hi = _scope_hi(cur, limit)
-    scoped = (f"rowid <= {hi}" if hi is not None else "1=1")
+    scope_sql, scope_params = _scope_clause(hi)  # 参数绑定，不再 f-string 拼 hi
     print(f"[slim] db={db}")
     print(f"[slim] segments 总行数={total_rows}；本轮处理范围 rowid<={hi or '∞'} "
           f"({'--limit ' + str(limit) if limit is not None else '全库'})；"
           f"文件大小={size0:,} B；bytes/row={(size0 / total_rows) if total_rows else 0:.1f}")
 
     # ── a. 补 cleaned 列 + 回填「已清洗」口径（非 NULL 即已清洗，含空串）──
+    # 注意：cleaned 不进 ORM（app/models.py 未改），故**增量新行一律 cleaned=0**；
+    # 读侧口径见 app/console.py::_cleaned_expr，用「cleaned=1 或 text_clean 非 NULL」
+    # 的等价复合口径兜住增量与部分迁移（会审严重项）。本步只保证全量迁移后
+    # cleaned=1 集合 == 迁移前 text_clean 非 NULL 集合。
     t = time.perf_counter()
     if not _col_exists(cur, "segments", "cleaned"):
         if dry_run:
-            print(f"[slim][a] DRY-RUN：将 ADD COLUMN cleaned INTEGER NOT NULL DEFAULT 0")
+            print("[slim][a] DRY-RUN：将 ADD COLUMN cleaned INTEGER NOT NULL DEFAULT 0")
         else:
             cur.execute("ALTER TABLE segments ADD COLUMN cleaned INTEGER NOT NULL DEFAULT 0")
-            print(f"[slim][a] 已补列 cleaned INTEGER NOT NULL DEFAULT 0")
+            print("[slim][a] 已补列 cleaned INTEGER NOT NULL DEFAULT 0")
     pre_cleaned = cur.execute(
-        f"SELECT COUNT(*) FROM segments WHERE text_clean IS NOT NULL AND {scoped}").fetchone()[0]
+        f"SELECT COUNT(*) FROM segments WHERE text_clean IS NOT NULL{scope_sql}",
+        scope_params).fetchone()[0]
     if dry_run:
         print(f"[slim][a] DRY-RUN：将 UPDATE cleaned=1，命中 {pre_cleaned} 行"
               f"（口径同 console「非 NULL 即已清洗」）")
     else:
-        cur.execute(f"UPDATE segments SET cleaned=1 WHERE text_clean IS NOT NULL AND {scoped}")
+        cur.execute(f"UPDATE segments SET cleaned=1 WHERE text_clean IS NOT NULL{scope_sql}",
+                    scope_params)
         print(f"[slim][a] cleaned=1 回填：写 {cur.rowcount} 行 "
               f"（范围内 text_clean 非 NULL 计 {pre_cleaned}）"
               f"，耗时 {time.perf_counter() - t:.2f}s")
 
-    # 预估节省字节（text_clean UTF-8 字节 + integrity 压缩差），dry-run 与正式跑都打印
+    # text_clean 归 NULL 预估（一次廉价聚合，dry-run 与正式跑都打印）
     t = time.perf_counter()
     tc_null_rows = cur.execute(
         f"SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(text_clean AS BLOB))),0) "
-        f"FROM segments WHERE text_clean IS NOT NULL AND text_clean = text AND {scoped}").fetchone()
+        f"FROM segments WHERE text_clean IS NOT NULL AND text_clean = text{scope_sql}",
+        scope_params).fetchone()
     n_null, bytes_clean = tc_null_rows[0], tc_null_rows[1]
 
-    # integrity：仅基键 JSON 行会被 pack_raw 改写，逐行在 Python 侧算压缩差
-    int_rows = cur.execute(
-        f"SELECT rowid, integrity FROM segments "
-        f"WHERE integrity IS NOT NULL AND integrity NOT LIKE 'i1:%' AND {scoped}").fetchall()
-    n_int = 0
-    bytes_int_saved = 0
-    int_updates: list[tuple[str, int]] = []
-    for rid, raw in int_rows:
-        packed = si.pack_raw(raw)
-        if packed is not None and packed != raw:
-            n_int += 1
-            bytes_int_saved += len(str(raw).encode("utf-8")) - len(packed.encode("utf-8"))
-            int_updates.append((packed, rid))
-    est_saved = int(bytes_clean) + bytes_int_saved
-    print(f"[slim][预] 将归 NULL 的等值 text_clean：{n_null} 行 / {int(bytes_clean):,} B；"
-          f"将紧凑化的 JSON integrity：{n_int} 行 / {bytes_int_saved:,} B；"
-          f"合计预估节省 {est_saved:,} B，耗时 {time.perf_counter() - t:.2f}s")
+    # 分批区间：upper 为硬上界（hi 或全库最大 rowid），永不为 None ⇒ _iter_batches 必然收敛。
+    min_rowid = cur.execute("SELECT MIN(rowid) FROM segments").fetchone()[0]
+    max_rowid = cur.execute("SELECT MAX(rowid) FROM segments").fetchone()[0]
+    start_rid = min_rowid if min_rowid is not None else 1
+    upper = hi if hi is not None else (max_rowid if max_rowid is not None else 0)
+    batches = list(_iter_batches(upper, start_rid, batch)) if upper >= start_rid else []
+
+    def _compact_integrity(b0: int, b1: int):
+        """流式处理单个 rowid 区间的 integrity：只在批内 fetch，逐行算 pack_raw 压缩差。
+        返回 (executemany 的 updates, 命中行数, 节省字节)。会审 BLOCK 修正：不再一次性
+        fetchall 全表、不再对 int_updates 逐批线性过滤 ⇒ 常驻内存 O(batch)、总复杂度 O(行)。"""
+        rows = cur.execute(
+            "SELECT rowid, integrity FROM segments "
+            "WHERE integrity IS NOT NULL AND integrity NOT LIKE 'i1:%' AND rowid BETWEEN ? AND ?",
+            (b0, b1)).fetchall()
+        updates: list[tuple[str, int]] = []
+        cnt = saved = 0
+        for rid, raw in rows:
+            packed = si.pack_raw(raw)
+            if packed is not None and packed != raw:
+                updates.append((packed, rid))
+                saved += len(str(raw).encode("utf-8")) - len(packed.encode("utf-8"))
+                cnt += 1
+        return updates, cnt, saved
 
     if dry_run:
+        n_int = bytes_int_saved = 0
+        for b0, b1 in batches:
+            _, c, sv = _compact_integrity(b0, b1)
+            n_int += c
+            bytes_int_saved += sv
+        est_saved = int(bytes_clean) + bytes_int_saved
+        print(f"[slim][预] 将归 NULL 的等值 text_clean：{n_null} 行 / {int(bytes_clean):,} B；"
+              f"将紧凑化的 JSON integrity：{n_int} 行 / {bytes_int_saved:,} B；"
+              f"合计预估节省 {est_saved:,} B，耗时 {time.perf_counter() - t:.2f}s")
         print("[slim][b/c/d] DRY-RUN：零写入，跳过实际 UPDATE / VACUUM")
         _report_projection(size0, size0, total_rows, est_saved, dry=True)
         con.close()
         return 0
 
-    # ── b. 分批归 NULL：只动 text_clean == text 的行 ──
-    min_rowid = cur.execute("SELECT MIN(rowid) FROM segments").fetchone()[0]
-    max_rowid = cur.execute("SELECT MAX(rowid) FROM segments").fetchone()[0]
-    start_rid = min_rowid if min_rowid is not None else 1
-    upper = hi if hi is not None else (max_rowid if max_rowid is not None else 0)
-    done_rows = 0
-    for (b0, b1) in _iter_batches(upper, start_rid, batch):
+    # ── b/c 合并单趟分批循环：每批归 NULL text_clean + 流式紧凑 integrity，逐批 commit ──
+    print(f"[slim][预] 将归 NULL 的等值 text_clean：{n_null} 行 / {int(bytes_clean):,} B；"
+          f"integrity 逐批流式紧凑化（见每批 [b/c] 行）")
+    done_rows = ci = bytes_int_saved = 0
+    for (b0, b1) in batches:
         tb = time.perf_counter()
         cur.execute(
             "UPDATE segments SET text_clean=NULL "
@@ -176,36 +212,33 @@ def run(db: str, *, dry_run: bool = False, limit: int | None = None,
             (b0, b1))
         changed = cur.rowcount
         done_rows += changed
+        updates, c, sv = _compact_integrity(b0, b1)
+        if updates:
+            cur.executemany("UPDATE segments SET integrity=? WHERE rowid=?", updates)
+        ci += c
+        bytes_int_saved += sv
         con.commit()
-        print(f"[slim][b] rowid [{b0}..{b1}]：归 NULL {changed} 行"
-              f"（累计 {done_rows}），耗时 {time.perf_counter() - tb:.2f}s")
-
-    # ── c. integrity 紧凑回填（只改形态；loads_any 等价由 pack_raw 保证）──
-    ci = 0
-    for b0, b1 in _iter_batches(upper, start_rid, batch):
-        sel = [u for u in int_updates if b0 <= u[1] <= b1]
-        if not sel:
-            continue
-        tb = time.perf_counter()
-        cur.executemany("UPDATE segments SET integrity=? WHERE rowid=?", sel)
-        ci += len(sel)
-        con.commit()
-        print(f"[slim][c] rowid [{b0}..{b1}]：紧凑化 {len(sel)} 行"
-              f"（累计 {ci}/{n_int}），耗时 {time.perf_counter() - tb:.2f}s")
+        print(f"[slim][b/c] rowid [{b0}..{b1}]：归 NULL {changed} 行（累计 {done_rows}）；"
+              f"紧凑化 {c} 行（累计 {ci}），耗时 {time.perf_counter() - tb:.2f}s")
+    est_saved = int(bytes_clean) + bytes_int_saved
 
     # 校验：范围内不再有「等值却未归 NULL」的 text_clean（硬不变量）。
     # cleaned 计数与「迁移前 text_clean 非 NULL」的相等关系是**单次全新迁移**的性质，
     # 由 tests/test_slim_segments.py 在全新副本上钉死；重跑时 cleaned=1 会保留历史
     # （等值行上一轮已归 NULL），故此处只作透明打印、不作失败门槛。
     cleaned_cnt = cur.execute(
-        f"SELECT COUNT(*) FROM segments WHERE cleaned=1 AND {scoped}").fetchone()[0]
+        f"SELECT COUNT(*) FROM segments WHERE cleaned=1{scope_sql}", scope_params).fetchone()[0]
     left_equal = cur.execute(
-        f"SELECT COUNT(*) FROM segments WHERE text_clean IS NOT NULL AND text_clean = text "
-        f"AND {scoped}").fetchone()[0]
+        f"SELECT COUNT(*) FROM segments WHERE text_clean IS NOT NULL AND text_clean = text"
+        f"{scope_sql}", scope_params).fetchone()[0]
     print(f"[slim][核] 范围内 cleaned=1 计数={cleaned_cnt}（本轮迁移前 text_clean 非 NULL={pre_cleaned}，"
-          f"重跑时 cleaned 保留历史故可 ≥ 该值）；残留等值 text_clean={left_equal}（应=0）")
+          f"重跑时 cleaned 保留历史故可 ≥ 该值）；残留等值 text_clean={left_equal}（应=0）；"
+          f"合计预估节省 {est_saved:,} B，耗时 {time.perf_counter() - t:.2f}s")
     if left_equal != 0:
-        print("[slim][!] 迁移后仍有等值 text_clean 未归 NULL——不执行 VACUUM", file=sys.stderr)
+        print("[slim][!] 迁移后仍有等值 text_clean 未归 NULL——不执行 VACUUM。\n"
+              "        ⚠ 半途而废态：此前各批 UPDATE 已逐批 commit，不可自动回滚；"
+              "已提交批次必须按 docs/SEGMENTS_SLIM.md §4「回滚」节手工处理后再重跑。",
+              file=sys.stderr)
         con.close()
         return 1
 

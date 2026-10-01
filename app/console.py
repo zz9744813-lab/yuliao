@@ -124,17 +124,30 @@ def _dashboard(s: Session) -> dict:
 
 # ── 2 corpus ────────────────────────────────────────────────
 
+def _cleaned_expr(colnames: set[str]) -> str:
+    """「已清洗」聚合表达式（全仓唯一 SQL 侧口径；test_slim_segments 直接对账此函数）。
+
+    · 无 `cleaned` 列（迁移前 / ORM create_all 建的全部测试库）——回落旧口径
+      `SUM(text_clean IS NOT NULL)`，与改动前逐行相同。
+    · 有 `cleaned` 列（跑过 slim_segments 的库）——用**等价复合口径**
+      `SUM(cleaned=1 OR text_clean IS NOT NULL)`，而非单看 `SUM(cleaned)`。理由（会审严重项）：
+      `cleaned` 不进 ORM（app/models.py 未改），迁移后任何**新导入**的 segment 都以
+      cleaned=0 落库（即使 text_clean 非 NULL）；只读 `SUM(cleaned)` 会让「已清洗」随增量
+      静默漏计且永不自愈。复合口径里：迁移侧被归 NULL 的等值行由 `cleaned=1` 命中；未迁移 /
+      增量新行由 `text_clean IS NOT NULL` 命中；二者并集恰等于「该段有清洗结果」的原语义。
+      `--limit` 部分迁移时范围外非 NULL 行仍走 `text_clean IS NOT NULL`，故口径当场即正确，
+      无需等全量迁移完成。
+    """
+    if "cleaned" in colnames:
+        return "SUM(CASE WHEN cleaned = 1 OR text_clean IS NOT NULL THEN 1 ELSE 0 END)"
+    return "SUM(text_clean IS NOT NULL)"
+
+
 def _corpus(s: Session) -> dict:
     # db._make_engine 已拒绝非 SQLite 配置；只维护一个聚合口径。
-    # 「已清洗」口径分两段：
-    #   · 瘦身迁移（scripts/slim_segments.py）后——等值行的 text_clean 已归 NULL，
-    #     「非 NULL 即已清洗」会漏计 ⇒ 改读迁移补的 `cleaned` 列（SUM(cleaned)），
-    #     cleaned=1 的口径正是「迁移前 text_clean 非 NULL（含空串）」，逐行等价；
-    #   · 迁移前 / 未跑过迁移的库（ORM create_all 不声明该列）——`cleaned` 不存在 ⇒
-    #     回落旧口径 SUM(text_clean IS NOT NULL)。
     # 全仓仅此一处在 SQL 侧聚合 text_clean 计数（grep 复核），故只改这一处即可。
     cols = {r[1] for r in s.execute(text("PRAGMA table_info(segments)"))}
-    cleaned_expr = "SUM(cleaned)" if "cleaned" in cols else "SUM(text_clean IS NOT NULL)"
+    cleaned_expr = _cleaned_expr(cols)
     rows = s.execute(text(f"""
         SELECT role, seg_version, COUNT(*), {cleaned_expr}, SUM(n_chars)
         FROM segments GROUP BY role, seg_version

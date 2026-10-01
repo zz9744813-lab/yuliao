@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ for _p in (str(ROOT), str(ROOT / "scripts")):
 
 import slim_segments as SLIM  # noqa: E402
 from app import segment_integrity as si  # noqa: E402
+from app.console import _cleaned_expr  # noqa: E402  # 全仓唯一「已清洗」SQL 口径
 
 SEG_DDL = """
 CREATE TABLE segments (
@@ -134,6 +136,15 @@ def _readback(db: Path) -> dict:
     return {"rows": n, "cleaned": cleaned, "by_id": snap}
 
 
+def _console_cleaned(db: Path) -> int:
+    """用 app.console 的真实口径表达式读「已清洗」计数（对账会审严重项）。"""
+    con = sqlite3.connect(str(db))
+    cols = {r[1] for r in con.execute("PRAGMA table_info(segments)")}
+    val = con.execute(f"SELECT {_cleaned_expr(cols)} FROM segments").fetchone()[0]
+    con.close()
+    return int(val or 0)
+
+
 # ── 主回归 ──────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
@@ -230,24 +241,31 @@ def test_eligible_prefix_like_still_hits(migrated):
 
 
 def test_reverse_dirty_text_not_fixed(tmp_path):
-    """⑥ 反向用例：把某行 text 改脏后重跑，text 必须仍是脏值（迁移不越权修正文）。"""
+    """⑥ 反向用例（会审 7① 加强版）：选一条**等值行**（迁移后 text_clean 已归 NULL），
+    迁移后把它的 text 改脏再重跑，断言：
+      · text 仍是脏值（迁移不越权修正文）；
+      · text_clean 仍为 NULL——迁移器**绝不**把已归 NULL 的 text_clean「复原」成脏 text。
+    旧版选的是原本 text_clean IS NULL 的行，重跑本就什么都不碰，断言强度弱；此处换成
+    真被迁移触碰过的等值行，反向自证迁移只 NULL、从不回填。"""
     db = tmp_path / "rev.db"
     before = _build(db)
     assert SLIM.run(str(db)) == 0
     con = sqlite3.connect(str(db))
-    target = next(sid for i, sid in enumerate(before)
-                  if _classify(before[sid], sid) == "null")
-    dirty = "\nDIRTY\n" + con.execute(
-        "SELECT text FROM segments WHERE id=?", (target,)).fetchone()[0]
+    target = next(sid for sid in before if _classify(before[sid], sid) == "equal")
+    # 迁移后该等值行 text_clean 应已归 NULL
+    assert con.execute("SELECT text_clean FROM segments WHERE id=?", (target,)).fetchone()[0] is None
+    dirty = "\nDIRTY\n" + con.execute("SELECT text FROM segments WHERE id=?", (target,)).fetchone()[0]
     con.execute("UPDATE segments SET text=? WHERE id=?", (dirty, target))
     con.commit()
     con.close()
 
     assert SLIM.run(str(db)) == 0
     con = sqlite3.connect(str(db))
-    got = con.execute("SELECT text FROM segments WHERE id=?", (target,)).fetchone()[0]
+    got_text = con.execute("SELECT text FROM segments WHERE id=?", (target,)).fetchone()[0]
+    got_tc = con.execute("SELECT text_clean FROM segments WHERE id=?", (target,)).fetchone()[0]
     con.close()
-    assert got == dirty, "迁移不得「顺手修正文」"
+    assert got_text == dirty, "迁移不得「顺手修正文」"
+    assert got_tc is None, "迁移器不得把已归 NULL 的 text_clean 复原成（脏）text"
     # 其余行 text 也未被动过
     after = _readback(db)
     for sid, b in before.items():
@@ -290,7 +308,9 @@ def test_dry_run_zero_write(tmp_path):
 
 
 def test_limit_scope_and_vacuum(tmp_path):
-    """--limit 只处理前 N 行；--vacuum 后物理文件仍可读且行数不变。"""
+    """--limit 只处理前 N 行；--vacuum 后物理文件仍可读且行数不变。
+    并（会审 7②）钉死 --limit 场景下范围外 cleaned 行为：迁移器只回填范围内
+    cleaned=1，范围外已清洗行必须仍 cleaned=0。"""
     db = tmp_path / "lim.db"
     before = _build(db)
     assert SLIM.run(str(db), limit=500, vacuum=True) == 0
@@ -303,7 +323,110 @@ def test_limit_scope_and_vacuum(tmp_path):
         "SELECT COUNT(*) FROM segments WHERE rowid>500 AND text_clean IS NOT NULL "
         "AND text_clean = text").fetchone()[0]
     total = con.execute("SELECT COUNT(*) FROM segments").fetchone()[0]
+    # 7② 范围外「已清洗(text_clean 非 NULL)」行不得被误标 cleaned=1
+    out_nonnull_cleaned = con.execute(
+        "SELECT COUNT(*) FROM segments WHERE rowid>500 AND text_clean IS NOT NULL "
+        "AND cleaned=1").fetchone()[0]
+    out_nonnull = con.execute(
+        "SELECT COUNT(*) FROM segments WHERE rowid>500 AND text_clean IS NOT NULL").fetchone()[0]
+    # 范围内迁移前非 NULL 行应已 cleaned=1
+    in_cleaned = con.execute(
+        "SELECT COUNT(*) FROM segments WHERE rowid<=500 AND cleaned=1").fetchone()[0]
     con.close()
     assert in_scope == 0
     assert out_scope > 0
+    assert out_nonnull > 0
+    assert out_nonnull_cleaned == 0            # 范围外迁移器不碰 ⇒ cleaned 保持默认 0
+    assert in_cleaned > 0
     assert total == 2000
+
+
+# ── 会审 BLOCK 逐项回归 ──────────────────────────────────────
+
+def test_incremental_cleaned_not_undercounted(tmp_path):
+    """[严重-1][反向自检] 迁移后 ORM 插入新行（models.py 未改 ⇒ cleaned 走 DEFAULT 0，
+    但 text_clean 非 NULL）：console 复合口径必须把新行算进去，绝不静默漏计。
+    同时反证「只看 SUM(cleaned)」的旧口径确实会漏这一行。"""
+    db = tmp_path / "inc.db"
+    before = _build(db)
+    assert SLIM.run(str(db)) == 0
+    pre_nonnull = sum(1 for v in before.values() if v["tc_was_nonnull"])
+    assert _console_cleaned(db) == pre_nonnull          # 全量迁移即时读数逐行等价
+
+    # 模拟 ORM 落库：不写 cleaned 列 ⇒ SQLite DEFAULT 0，即使 text_clean 非 NULL
+    con = sqlite3.connect(str(db))
+    con.execute(
+        "INSERT INTO segments (id,work_id,ordinal,text,text_clean,integrity,created_at)"
+        " VALUES (?,?,?,?,?,?,?)",
+        ("SEGNEW", "WKX", 9999, "正文甲", "清洗后乙", "i1:1", "2026-10-01T00:00:00Z"))
+    con.commit()
+    assert con.execute("SELECT cleaned FROM segments WHERE id='SEGNEW'").fetchone()[0] == 0
+    con.close()
+
+    # 复合口径：新行 text_clean 非 NULL ⇒ 计入
+    assert _console_cleaned(db) == pre_nonnull + 1
+    # 反向自证旧口径漏计风险真实存在：SUM(cleaned) 少了这一行
+    con = sqlite3.connect(str(db))
+    only_cleaned = con.execute("SELECT SUM(cleaned) FROM segments").fetchone()[0]
+    con.close()
+    assert only_cleaned == pre_nonnull
+
+
+def test_limit_partial_migration_console_still_correct(tmp_path):
+    """[一般-3] --limit 部分迁移 + console 组合：范围外已清洗行 cleaned=0 但 text_clean
+    非 NULL，复合口径当场即正确（等于全库迁移前非 NULL 计数），无需等全量迁移完成。"""
+    db = tmp_path / "part.db"
+    before = _build(db)
+    pre_nonnull = sum(1 for v in before.values() if v["tc_was_nonnull"])
+    assert SLIM.run(str(db), limit=500) == 0            # 只迁移前 500 行
+    assert _console_cleaned(db) == pre_nonnull          # 复合口径不漏范围外已清洗行
+
+
+def test_reject_bad_limit_and_batch(tmp_path):
+    """[一般-2][反向自检] --limit 0/负数、--batch 0/负数必须在开库写任何东西前被拒（退出码 2）。"""
+    db = tmp_path / "bad.db"
+    _build(db)
+    for bad in (0, -1, -100):
+        assert SLIM.run(str(db), limit=bad) == 2
+        assert SLIM.run(str(db), dry_run=True, limit=bad) == 2
+    for bad in (0, -5):
+        assert SLIM.run(str(db), batch=bad) == 2
+    # 反向自检：非法入参零写入（绝不补列、绝不归 NULL）
+    con = sqlite3.connect(str(db))
+    cols = {r[1] for r in con.execute("PRAGMA table_info(segments)")}
+    n_eq = con.execute(
+        "SELECT COUNT(*) FROM segments WHERE text_clean IS NOT NULL AND text_clean = text"
+    ).fetchone()[0]
+    con.close()
+    assert "cleaned" not in cols                        # 开库前即拒绝，绝不 ALTER
+    assert n_eq > 0                                     # 一行都没被归 NULL
+
+
+def test_symlink_to_live_db_is_refused(tmp_path):
+    """[一般-5][反向自检] 活库守卫必须走 realpath：临时目录里造符号链接指向活库路径，
+    即便目标文件不存在，realpath 解析后仍命中活库 ⇒ 必须判定为活库并拒绝（abspath 会被绕过）。"""
+    live = "D:/language-genome-data/language_genome.db"
+    assert SLIM.is_live_db(live) is True
+    link = tmp_path / "evil.db"
+    try:
+        os.symlink(live, str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+    assert SLIM.is_live_db(str(link)) is True           # realpath 解析符号链接
+    assert SLIM.run(str(link)) == 2                     # 不加 --force-live 拒绝
+    assert SLIM.run(str(link), dry_run=True) == 2       # dry-run 也不放行到活库
+
+
+def test_fixture_schema_matches_orm_segment():
+    """[建议-10] fixture SEG_DDL 手写 schema 与真 ORM Segment 列集合对账：
+    否则 --limit / 分批 rowid 口径在真库上可能失真。"""
+    from app.models import Segment
+    orm_cols = set(Segment.__table__.columns.keys())
+    con = sqlite3.connect(":memory:")
+    con.executescript(SEG_DDL)
+    ddl_cols = {r[1] for r in con.execute("PRAGMA table_info(segments)")}
+    con.close()
+    # fixture 显式化 rowid（真库 SQLite 隐式 rowid，PRAGMA 不列出）；cleaned 由迁移器补列，
+    # 二者都不属于 ORM 声明列。除 rowid 外必须与 ORM 完全一致。
+    assert ddl_cols - {"rowid"} == orm_cols
+
