@@ -199,6 +199,8 @@ OLD_RC=1
 | `pytest tests/test_verifier_repair_rounds.py tests/test_scene_runtime.py tests/test_scene_runtime_a10.py -q -o addopts=` | **82 passed**（含 3 条被更新的旧契约断言；此前为 `3 failed, 39 passed`） |
 | `pytest tests/test_k4_real_scene_plan.py tests/test_k4_paired.py tests/test_k45_acceptance.py tests/test_live_guard.py tests/test_k4_worlds_dir_receipt.py -q -o addopts=` | **179 passed / 0 failed**（含 4 条旧契约断言的整批回归） |
 | 会审门禁 | 首轮 `glm-5.3 PASS` / `qwen3.8-flash BLOCK`（记录 `team/reviews/lg-verifier-repair-rounds-a1b63f8e25.md`）；BLOCK 的三项（成本上界、归因码降级、默认预算收敛码用例缺口）已逐条修掉并复审 |
+| 合 main 后与本仓既有「模型身份 + 契约重试」（`db4996d`）联调 | **4 条用例按合并后语义重写**（见下）：非法 JSON 现在先吃同角色契约重试（stage `verifier.N.retry`），重试仍非法才进核验返修 ⇒ `test_illegal_review_json_round_one_then_round_two_commits` 收敛在**同一轮内**（`writer_calls == 1`）、`test_second_repair_attempt_can_recover_inside_one_round` 多一项 BAD_JSON、`test_round_failure_feedback_carries_the_verbatim_error` 改用「合法 JSON 但引用编造」构造真正失败的一轮（并断言顶层码仍是 `verifier_contract_repair_exhausted:evidence_not_in_text`）、`test_permanently_illegal_artifact_never_becomes_a_pass` 的核验调用数改锁**下界**（重试会叠加）。判据与安全断言（零提交 / 正史零改动 / 原名码）**一字未动** |
+| 合并后整批回归（分支工作树，含 main） | **137 passed / 0 failed** |
 
 ⇒ 本次交付**未放宽任何判据**：`validate_review` / `align_quotes` / plan 校验零改动；
 新增的只是「工件不可用时本轮失败并把错误回灌写手」的轮次语义 + 预算上界域 + 归因码保真。
