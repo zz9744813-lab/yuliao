@@ -192,31 +192,44 @@ def test_writer_round_two_recovers_from_verifier_artifact_failure(world_plan):
 
 
 def test_illegal_review_json_round_one_then_round_two_commits(world_plan):
-    """同款正向用例（非法 JSON 变体）：核验席跑偏的工件不再炸掉整批。"""
+    """同款正向用例（非法 JSON 变体）：核验席跑偏的工件不再炸掉整批。
+
+    合并 main（模型身份 + 契约重试）后的实测形态：非法 JSON 先被**同角色契约重试**
+    吸收（stage `verifier.0.retry`），重试仍非法才走核验返修（`verifier.0.contract1`）
+    ⇒ 整条链在**同一轮内**收敛，写手只发一次。旧实现首个非法工件就
+    `raise verifier_contract_repair_exhausted` 炸掉整批（§4.1 的反向对照用例覆盖）。
+    """
     store, plan, knowledge = world_plan
     client = ScriptedClient(verifier=[BAD_JSON, BAD_JSON, ok_review])
     result = run(store, plan, knowledge,
                  Budget(max_calls=12, max_rewrites=2, max_verifier_repairs=1), client)
-    assert result["status"] == "committed" and client.writer_calls == 2
-    assert stages_of(store) == ["writer.0", "verifier.0", "verifier.0.contract1",
-                                "writer.1", "verifier.1"]
+    assert result["status"] == "committed" and client.writer_calls == 1
+    assert stages_of(store) == ["writer.0", "verifier.0", "verifier.0.retry",
+                                "verifier.0.contract1"]
 
 
 def test_round_failure_feedback_carries_the_verbatim_error(world_plan):
     """回灌必须是**原文**：错误名 + contract_errors 原文进写手 mechanical_errors，
-    且 previous_draft 逐字回传（写手修稿输入本来就支持这两项）。"""
+    且 previous_draft 逐字回传（写手修稿输入本来就支持这两项）。
+
+    用「合法 JSON 但引用编造」（`bad_quote_review`）构造**真正会失败的一轮**：
+    这类工件不吃契约重试（JSON 能解析），只走核验返修，返修仍不合格 ⇒ 本轮失败、
+    错误回灌写手（这正是任务书要的正向行为）。
+    """
     store, plan, knowledge = world_plan
-    client = ScriptedClient(verifier=[BAD_JSON, BAD_JSON, ok_review])
-    run(store, plan, knowledge, Budget(max_calls=12, max_rewrites=2, max_verifier_repairs=1),
-        client)
+    client = ScriptedClient(verifier=[bad_quote_review])
+    with pytest.raises(RuntimeFault) as excinfo:
+        run(store, plan, knowledge,
+            Budget(max_calls=12, max_rewrites=2, max_verifier_repairs=1), client)
+    assert str(excinfo.value).startswith(f"{CONTRACT_CODE}:evidence_not_in_text")
     feedback = client.writer_payloads[1]
     assert feedback["previous_draft"] == TEXT
-    assert feedback["mechanical_errors"] == ["verifier_contract_repair_exhausted:invalid_review_json"]
+    assert feedback["mechanical_errors"] == [f"{CONTRACT_CODE}:evidence_not_in_text"]
     assert CONTRACT_CODE in feedback["instruction"]
     # 返修载荷只回灌核验席，正文与计划一字不动。
     assert client.verifier_payloads[1]["text"] == TEXT
-    assert client.verifier_payloads[1]["previous_review"] == BAD_JSON
-    assert client.verifier_payloads[1]["contract_errors"] == ["invalid_review_json"]
+    assert client.verifier_payloads[1]["previous_review"] == bad_quote_review(client.verifier_payloads[0])
+    assert client.verifier_payloads[1]["contract_errors"] == ["evidence_not_in_text"]
 
 
 # ------------------------------------------------ 反向自检：恒非法 ⇒ 恒失败
@@ -234,7 +247,9 @@ def test_permanently_illegal_artifact_never_becomes_a_pass(world_plan, poison):
     assert code in {CONTRACT_CODE, STATE_CODE}
     assert str(excinfo.value).split(":", 1)[1]           # contract_errors 原文保留
     assert client.writer_calls == budget.max_rewrites + 1
-    assert client.verifier_calls == client.writer_calls * 2
+    # 每轮 ≥ 1 次首验 + 1 次核验返修；契约重试（`verifier.N.retry`）会再叠一次
+    # ⇒ 只锁下界（判据没放宽才是本用例的要点，不是精确调用次数）。
+    assert client.verifier_calls >= client.writer_calls * 2
     assert store.audit("book-a")["commits"] == 0
     assert store.snapshot("book-a").revision == 0
     assert store.snapshot("book-a").facts["coins"].value == 3      # 正史零改动
@@ -335,14 +350,18 @@ def test_state_repair_stages_follow_max_verifier_repairs(
 
 
 def test_second_repair_attempt_can_recover_inside_one_round(world_plan):
-    """返修预算 >1 时，第 i 次返修成功即过：写手不被拖进下一轮。"""
+    """返修预算 >1 时，第 i 次返修成功即过：写手不被拖进下一轮。
+
+    合并 main 后非法 JSON 会先吃一次同角色契约重试（`verifier.0.retry`）
+    ⇒ 脚本多一项 BAD_JSON，第 2 次核验返修（`contract2`）才拿到合格工件。
+    """
     store, plan, knowledge = world_plan
-    client = ScriptedClient(verifier=[BAD_JSON, BAD_JSON, ok_review])
+    client = ScriptedClient(verifier=[BAD_JSON, BAD_JSON, BAD_JSON, ok_review])
     result = run(store, plan, knowledge,
                  Budget(max_calls=12, max_rewrites=0, max_verifier_repairs=2), client)
     assert result["status"] == "committed"
-    assert client.writer_calls == 1 and client.verifier_calls == 3
-    assert stages_of(store) == ["writer.0", "verifier.0",
+    assert client.writer_calls == 1 and client.verifier_calls == 4
+    assert stages_of(store) == ["writer.0", "verifier.0", "verifier.0.retry",
                                 "verifier.0.contract1", "verifier.0.contract2"]
 
 
