@@ -690,17 +690,28 @@ def test_default_run_untouched_without_pack(tmp_path, monkeypatch, capsys):
 
 
 def test_pack_budget_domain_matches_contract_budget():
-    """逐臂上限的域与 contracts.Budget 同源（不另立一套更宽的域）。"""
+    """逐臂上限的域与 contracts.Budget 同源（不另立一套更宽的域）。
+
+    2026-10-01：上/下限不再写死数字，改为**读 contracts.Budget 自己的 Field 元数据**
+    （`ge`/`le`）——本次把 `le` 从 20/2 提到 60/4 后，旧写死数字会假红；读元数据既
+    不会再假红，也仍然能抓到「包声明了比契约更宽的域」这种真问题。
+    """
     limits = k4.REAL_SCENE_CARD_SOURCE["budget_contract_limits"]
     assert Budget(**limits) == Budget(max_calls=6, max_rewrites=2)
-    for over in ({"max_calls": limits["max_calls"] + 15},      # le=20
-                 {"max_calls": limits["max_calls"] - 5},       # ge=2
-                 {"max_rewrites": limits["max_rewrites"] + 1},  # le=2
-                 {"max_output_tokens": limits["max_output_tokens"] + 5001},
-                 {"max_input_chars": limits["max_input_chars"] + 80000},
-                 {"max_elapsed_seconds": limits["max_elapsed_seconds"] + 3001}):
-        with pytest.raises(Exception):
-            Budget(**{**limits, **over})
+    checked = 0
+    for name, field in Budget.model_fields.items():
+        for meta in field.metadata:
+            le = getattr(meta, "le", None)
+            ge = getattr(meta, "ge", None)
+            if le is not None:
+                with pytest.raises(Exception):
+                    Budget(**{**limits, name: le + 1})
+                checked += 1
+            if ge is not None:
+                with pytest.raises(Exception):
+                    Budget(**{**limits, name: ge - 1})
+                checked += 1
+    assert checked >= 10, "至少核到 10 个域边界（防元数据读取退化成空跑）"
     knowledge = KnowledgePackage(package_id="scope-only", book_id="WK-A",
                                  source_kind="knowledge_query_v2",
                                  techniques=[])

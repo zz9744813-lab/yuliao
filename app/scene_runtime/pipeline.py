@@ -114,6 +114,40 @@ class SceneRunner:
             return self._call(job_id, stage + ".retry", "verifier",
                               VERIFIER_SYSTEM, verify_input, budget)
 
+    def _repair_artifact(self, job_id, round_index, verify_input, draft_text, plan, answer,
+                         *, kind, fault_code, contract_errors, repair_instruction,
+                         accept, budget):
+        """Bounded, prose-free repair of the verification artifact.
+
+        One verifier call per attempt; the stage is `verifier.{round}.{kind}{i}` for
+        i = 1..budget.max_verifier_repairs, so every attempt is visible in the call
+        ledger (i=1 request hash is byte-identical to the pre-2026-10-01 single hard
+        coded attempt, so replays of older ledgers still resolve). The Writer text is
+        never repaired: the same verify_input (world/plan/text) goes out every time.
+
+        Returns (review, answer, stage, fault). `fault` is None once an artifact is
+        accepted, else (fault_code, contract_errors). The caller must treat a fault
+        as a *round* failure — never as a pass — and must keep the original code
+        when the job does fail, so receipts stay diagnosable.
+        """
+        review, stage = None, f"verifier.{round_index}"
+        for repair_index in range(1, budget.max_verifier_repairs + 1):
+            stage = f"verifier.{round_index}.{kind}{repair_index}"
+            payload = {**verify_input, "previous_review": answer["text"],
+                       "contract_errors": contract_errors,
+                       "repair_instruction": repair_instruction}
+            answer = self._call(job_id, stage, "verifier", VERIFIER_SYSTEM, payload, budget)
+            try:
+                candidate = align_quotes(draft_text, parse_result(answer["text"], Review))
+            except RuntimeFault:
+                # An unusable repair reply (illegal JSON or schema) is one failed
+                # attempt, not a batch abort — the state path already behaved so.
+                continue
+            if not accept(candidate):
+                continue
+            return candidate, answer, stage, None
+        return review, answer, stage, (fault_code, contract_errors)
+
     def run(self, plan: ScenePlan, knowledge: KnowledgePackage, budget: Budget, *, stop_after_verified=False):
         from .. import config
         if (config.LLM_MODE == "real" and
@@ -160,12 +194,14 @@ class SceneRunner:
         if job["status"] != "verified":
             context = json.loads(job["context"])
             draft, issues, errors = None, [], []
+            artifact_note = ""
             for round_index in range(budget.max_rewrites + 1):
                 writer_input = {"context": context}
                 if draft is not None:
                     writer_input.update({"previous_draft": draft.text, "issues": issues,
                                          "mechanical_errors": errors,
-                                         "instruction": "只修复问题；计划及允许变化保持不变。"})
+                                         "instruction": "只修复问题；计划及允许变化保持不变。" + artifact_note})
+                    artifact_note = ""   # one-shot: this round's feedback is delivered
                 reply = self._call(job_id, f"writer.{round_index}", "writer", WRITER_SYSTEM, writer_input, budget)
                 draft = parse_result(reply["text"], Draft)
                 # Verifier sees the authoritative snapshot; Writer sees only compiled POV.
@@ -187,17 +223,27 @@ class SceneRunner:
                     review_contract_errors = ["invalid_review_json"]
                 if review_contract_errors:
                     # A broken reviewer citation is not a prose defect. Repair the
-                    # verification artifact once, leaving the Writer text untouched.
-                    repair_input = {**verify_input, "previous_review": answer["text"],
-                        "contract_errors": review_contract_errors,
-                        "repair_instruction": "只修复核验 JSON 和证据引用。正文原封不动；每条 quote 从正文逐字复制一个连续片段，不使用省略号拼接不同位置。"}
-                    review_stage = f"verifier.{round_index}.contract1"
-                    answer = self._call(job_id, review_stage, "verifier",
-                                        VERIFIER_SYSTEM, repair_input, budget)
-                    review = align_quotes(draft.text, parse_result(answer["text"], Review))
-                    if any(e in {"evidence_not_in_text", "duplicate_event_evidence"}
-                           for e in validate_review(plan, draft.text, review)):
-                        raise RuntimeFault("verifier_contract_repair_exhausted")
+                    # verification artifact budget.max_verifier_repairs times, leaving
+                    # the Writer text untouched.
+                    #
+                    # 2026-10-01（核验返修 → 可重试轮次）：两处 hard-coded raise
+                    # （verifier_contract_repair_exhausted / verifier_state_
+                    # repair_exhausted，当场炸掉整批）改为**本轮 issue 回灌**：
+                    # 错误连同 contract_errors 原文进 writer 的 mechanical_errors
+                    # 与 instruction，写手剩余轮次照旧可用（它本来就读
+                    # previous_draft + issues/mechanical_errors）。只有轮次预算
+                    # 用尽才失败，失败码**保留原名**——判据一字未改，可核性优先。
+                    review, answer, review_stage, artifact_fault = self._repair_artifact(
+                        job_id, round_index, verify_input, draft.text, plan, answer,
+                        kind="contract", fault_code="verifier_contract_repair_exhausted",
+                        contract_errors=review_contract_errors,
+                        repair_instruction="只修复核验 JSON 和证据引用。正文原封不动；每条 quote 从正文逐字复制一个连续片段，不使用省略号拼接不同位置。",
+                        accept=lambda candidate: not any(
+                            e in {"evidence_not_in_text", "duplicate_event_evidence"}
+                            for e in validate_review(plan, draft.text, candidate)),
+                        budget=budget)
+                else:
+                    artifact_fault = None
                 # A10（审查 20260920-1810）：正文零缺陷信号 + 只有补丁清单失配
                 # = 核验**工件**缺陷（未变化事实误列 change / 抽取值类型错）。
                 # 旧实现把它当正文缺陷烧 Writer 修稿额度——隔离复现：正文与
@@ -205,24 +251,42 @@ class SceneRunner:
                 # 3 Writer + 3 Verifier 耗尽额度。这里走**有上限的核验返修**：
                 # 正文一字不动；返修不了就如实失败——绝不静默吞掉未经确认的
                 # 状态变化，也绝不为核验器的错改正文。
-                pre_errors = validate_review(plan, draft.text, review)
-                if "state_patch_not_authorized_by_plan" in pre_errors \
-                        and "unresolved_hard_issue" not in pre_errors \
-                        and "text_length_outside_plan" not in pre_errors:
-                    repair_input = {**verify_input, "previous_review": answer["text"],
-                        "contract_errors": ["state_patch_not_authorized_by_plan"],
-                        "repair_instruction": "只修复核验 JSON 的 changes 清单：changes 必须且只须"
-                        "覆盖批准计划里的事件变化（fact 与 after 与计划逐字一致）；没有发生变化"
-                        "的事实一律不许列进 changes。正文与 evidence 引用原封不动。"}
-                    review_stage = f"verifier.{round_index}.state1"
-                    answer = self._call(job_id, review_stage, "verifier",
-                                        VERIFIER_SYSTEM, repair_input, budget)
-                    try:
-                        review = align_quotes(draft.text, parse_result(answer["text"], Review))
-                    except RuntimeFault:
-                        raise RuntimeFault("verifier_state_repair_exhausted")
-                    if "state_patch_not_authorized_by_plan" in validate_review(plan, draft.text, review):
-                        raise RuntimeFault("verifier_state_repair_exhausted")
+                if artifact_fault is None:
+                    pre_errors = validate_review(plan, draft.text, review)
+                    if "state_patch_not_authorized_by_plan" in pre_errors \
+                            and "unresolved_hard_issue" not in pre_errors \
+                            and "text_length_outside_plan" not in pre_errors:
+                        review, answer, review_stage, artifact_fault = self._repair_artifact(
+                            job_id, round_index, verify_input, draft.text, plan, answer,
+                            kind="state", fault_code="verifier_state_repair_exhausted",
+                            contract_errors=["state_patch_not_authorized_by_plan"],
+                            repair_instruction="只修复核验 JSON 的 changes 清单：changes 必须且只须"
+                            "覆盖批准计划里的事件变化（fact 与 after 与计划逐字一致）；没有发生变化"
+                            "的事实一律不许列进 changes。正文与 evidence 引用原封不动。",
+                            accept=lambda candidate: "state_patch_not_authorized_by_plan"
+                                not in validate_review(plan, draft.text, candidate),
+                            budget=budget)
+                if artifact_fault is not None:
+                    # Unusable verification artifact ⇒ this **round** failed. It is
+                    # never applied to canon (apply_review_decisions is skipped) and
+                    # never counts as a pass; the error goes back to the Writer and
+                    # the loop continues while rounds are left.
+                    fault = artifact_fault[0] + ":" + ",".join(artifact_fault[1])
+                    # 2026-10-01 会审（qwen 席）修正：继续下一轮**至少**要花掉
+                    # Writer + Verifier 两次调用；调用预算已付不起时，失败码必须
+                    # 仍是**工件根因**（fault），不能是症状 `call_budget_exhausted`
+                    # —— 否则这次改动要保住的诊断信息（核验工件不可用）会丢，
+                    # 默认 Budget()（max_calls=6）下尤其明显：3 次×2 轮=6 次刚好撞闸，
+                    # 顶层码会从 verifier_*_repair_exhausted 变成 call_budget_exhausted。
+                    calls_left = budget.max_calls - self.store.usage(job_id)["calls"]
+                    if round_index >= budget.max_rewrites or calls_left < 2:
+                        raise RuntimeFault(fault)   # 轮次/调用额度付不起下一轮：保留原名
+                    errors = [fault, *errors]
+                    artifact_note = (
+                        "上一轮核验工件不可用（" + fault + "）：这是**核验席产物**"
+                        "的缺陷，不是你的正文缺陷。计划与允许变化保持不变；请让计划事件"
+                        "与状态变化在正文里更明确，以便核验席逐字引用。")
+                    continue
                 review = self.store.apply_review_decisions(job_id, review_stage, draft.text, review)
                 operator_issues = self.store.confirmed_issues(job_id, digest(draft.text))
                 review.issues.extend(operator_issues)

@@ -125,8 +125,18 @@ class Budget(Contract):
     # 语感体检开关：只把"干瘪/AI 味"变成修稿指令与体检数据，
     # 不参与 hard 判定（见 app/style_contract.py 的失败留档）。
     style_feedback: bool = False
-    max_calls: int = Field(default=6, ge=2, le=20)
-    max_rewrites: int = Field(default=2, ge=0, le=2)
+    # 预算域（2026-10-01 核验返修轮次）：只放**上限**（le），默认值一字未改。
+    # le 放宽 = 允许运行期把上限配到更大，不改默认值、不改任何判据；
+    # ge 与 default 不动 ⇒ 未显式配置时行为与改动前逐字一致。
+    # max_calls 20→60、max_rewrites 2→4：核验工件不可用时的轮次重试（返修
+    # 失败不再是整批中止，见 docs/VERIFIER_REPAIR_ROUNDS.md）需要额度；
+    # 默认 6/2 的闸在未显式配置时照旧生效（跑满仍由 store.reserve_call 拒）。
+    max_calls: int = Field(default=6, ge=2, le=60)
+    max_rewrites: int = Field(default=2, ge=0, le=4)
+    # 每轮**核验工件返修**次数上限（stage=verifier.{round}.contract{i} /
+    # .state{i}）。default=1 = 改动前写死的 1 次 ⇒ 逐字一致。
+    # max_verifier_repairs=0 ⇒ 不做核验返修，首个工件不合格即本轮失败。
+    max_verifier_repairs: int = Field(default=1, ge=0, le=4)
     max_input_chars: int = Field(default=24000, ge=100, le=100000)
     max_output_tokens: int = Field(default=3000, ge=100, le=8000)
     max_elapsed_seconds: int = Field(default=600, ge=1, le=3600)
