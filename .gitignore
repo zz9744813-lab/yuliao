@@ -11,4 +11,7 @@ __pycache__/
 .env.*
 !.env.example
 out_k4_*/
+rejected_out_*/
+_scratch/
+*.bak_*
 _pairs/
