@@ -521,5 +521,7 @@ def test_real_db_readonly_smoke():
         s["kind_rows"]["good_when_optional"]
     if n_cond == 0:
         # 派工背景的主控读数：条件面无数据 ⇒ 全库空转、上限 0
-        assert s["n_idle"] == s["n_strategies"] == 8
+        # 注意：策略数是**库的真实读数**，会随 K 线增臂而变（曾写死 8，库里加到 10 后误红）。
+        # 这里只钉「全库空转」这条关系 + 一个下限，不钉具体数字。
+        assert s["n_idle"] == s["n_strategies"] >= 8
         assert s["required_matches"]["current"] == 0

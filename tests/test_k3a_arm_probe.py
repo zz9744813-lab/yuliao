@@ -77,7 +77,14 @@ LEDGER_KEYS = {"side_a_n_rejected", "n_silently_dropped_by_status_gate",
 
 
 def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """分块流式哈希。真库已长到数十 GB，``read_bytes()`` 整读会 MemoryError
+    （2026-10-02 实测 OOM），而本例的承诺是「内容指纹逐字不变」——
+    流式分块既保住这条承诺，又不在内存里放整库。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _fingerprint(path: Path) -> tuple:
