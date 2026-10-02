@@ -18,12 +18,13 @@
   /* ── 令牌两层：原语层（色阶）→ 语义层（组件只引用语义令牌）──────────────
      换肤/深色只改语义层映射，组件代码一行不动。 */
   :root{
-    /* Round 5「冷纸」：参照 Geist/Linear 的做法——中性色去彩化、层级拉开，
-       让金色成为唯一的彩色，出现在"值得注意"的地方 */
-    --n-0:#ffffff; --n-50:#fafaf8; --n-100:#f3f2ef; --n-200:#ebeae6;
-    --n-300:#e0dfdb; --n-400:#d2d1cb; --n-500:#aeada6; --n-600:#7c7b74;
-    --n-700:#555450; --n-800:#35342f; --n-900:#201f1c; --n-950:#141310;
-    --acc-100:#f0e8da; --acc-300:#c9b28a; --acc-500:#8a6d3b; --acc-600:#755c30; --acc-700:#5e4926;
+    /* 2026-09-30「纸·墨·朱印」：与研究台同源——宣纸暖白 × 松烟墨 × 朱砂。
+       中性色去彩化、层级拉开，让朱砂成为唯一的彩色，出现在"值得注意"的地方；
+       A/B 功能色（松绿/黛紫）与 diff 增删色保持原语义不动。 */
+    --n-0:#fdfcf7; --n-50:#f8f5ec; --n-100:#f2eee1; --n-200:#e9e3d2;
+    --n-300:#dcd4bf; --n-400:#c7bca1; --n-500:#a1977d; --n-600:#6f6958;
+    --n-700:#4c4738; --n-800:#323025; --n-900:#21201a; --n-950:#161511;
+    --acc-100:#f6e2d6; --acc-300:#d98a6b; --acc-500:#b4371f; --acc-600:#932a18; --acc-700:#711f12;
 
     --bg:var(--n-100); --surface:var(--n-0); --surface-2:var(--n-50);
     --line:var(--n-300); --line-2:var(--n-400);
@@ -31,12 +32,12 @@
     --accent:var(--acc-500); --accent-soft:var(--acc-100); --accent-strong:var(--acc-600);
     --a:#2f6f4f; --a-soft:#eef5f0; --a-line:#7fb094;
     --b:#7a4a86; --b-soft:#f5eff6; --b-line:#b18bbd;
-    --ok:#2f6f4f; --bad:#a8412f; --info:#3a6ea5;
+    --ok:#2f6f4f; --bad:#96242e; --info:#3a5f8a;
 
     --shadow-sm:0 1px 2px rgba(38,36,31,.05), 0 3px 10px rgba(38,36,31,.045);
     --shadow-md:0 2px 6px rgba(38,36,31,.06), 0 14px 32px rgba(38,36,31,.09);
     --shadow-dock:0 -2px 10px rgba(38,36,31,.05), 0 -10px 24px rgba(38,36,31,.06);
-    --skel-1:#eceae3; --skel-2:#f7f5f0;
+    --skel-1:#eae5d3; --skel-2:#f6f2e6;
     --del-bg:#fdf0ec; --del-bd:#dfa892; --ins-bg:#eef5f0; --ins-bd:#9cc3a9;
     --kbd-bg:rgba(0,0,0,.06);
     --toast-bg:var(--n-900); --toast-fg:var(--n-100);
@@ -50,7 +51,7 @@
     --scroll:var(--n-400); --scroll-hover:var(--n-500);
     --win-a:rgba(47,111,79,.32); --win-b:rgba(122,74,134,.32);
     --paper:radial-gradient(1100px 520px at 50% -8%, rgba(255,255,255,.55), rgba(255,255,255,0));
-    --paper-bg:#fdfcf9;
+    --paper-bg:#fdfcf7;
     --shadow-card:0 1px 2px rgba(38,36,31,.05), 0 10px 30px -10px rgba(38,36,31,.13);
 
     --sans:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
@@ -61,23 +62,23 @@
     --rv-line:2.05;    /* 密度：舒适 2.05 / 紧凑 1.85 */
   }
   html[data-theme="dark"]{
-    /* Round 5「石墨」：近黑底 + 纯灰结构 + 金色单点，A/B 稿纸保持温暖深棕拉温差 */
-    --n-0:#161619; --n-50:#1b1b1f; --n-100:#101013; --n-200:#232327;
-    --n-300:#2b2b30; --n-400:#3a3a40; --n-500:#56565f; --n-600:#8b8b94;
-    --n-700:#a9a9b0; --n-800:#cfcdd2; --n-900:#ecebe8; --n-950:#f7f6f3;
-    --acc-100:#2e2616; --acc-300:#c9b28a; --acc-500:#c9a86a; --acc-600:#d8bc85; --acc-700:#e3cd9c;
+    /* 2026-09-30「松烟墨」：暖黑底 + 纸白文字 + 朱砂提亮，A/B 稿纸保持温暖深棕拉温差 */
+    --n-0:#1d1b15; --n-50:#22201a; --n-100:#14130f; --n-200:#2b2820;
+    --n-300:#373429; --n-400:#4c4736; --n-500:#6f6952; --n-600:#9b947b;
+    --n-700:#b7b096; --n-800:#d4cdb5; --n-900:#eae4d0; --n-950:#f6f1e1;
+    --acc-100:#3d2014; --acc-300:#d98a6b; --acc-500:#d96a4c; --acc-600:#e68a6d; --acc-700:#f2ab92;
 
-    --bg:#0c0c0e; --surface:#151517; --surface-2:#1b1b1f;
-    --line:#26262b; --line-2:#35363c;
-    --fg:#ecebe7; --fg-2:#a8a7a0; --dim:#84837d;
+    --bg:#100f0c; --surface:#1a1813; --surface-2:#211f19;
+    --line:#2e2b22; --line-2:#403c2e;
+    --fg:#eae4d0; --fg-2:#b3ac92; --dim:#8d8671;
     --a:#7fb094; --a-soft:rgba(127,191,154,.12); --a-line:#4d7d62;
     --b:#b18bbd; --b-soft:rgba(177,139,189,.12); --b-line:#6e5680;
-    --ok:#7fb094; --bad:#e08d78; --info:#8fb8d9;
+    --ok:#82b894; --bad:#e0707e; --info:#8faed4;
 
     --shadow-sm:0 1px 2px rgba(0,0,0,.30), 0 3px 10px rgba(0,0,0,.28);
     --shadow-md:0 2px 6px rgba(0,0,0,.35), 0 14px 32px rgba(0,0,0,.42);
     --shadow-dock:0 -2px 10px rgba(0,0,0,.30), 0 -10px 24px rgba(0,0,0,.35);
-    --skel-1:#26262c; --skel-2:#32323a;
+    --skel-1:#28251d; --skel-2:#353125;
     --del-bg:rgba(224,141,120,.16); --del-bd:#c97a63;
     --ins-bg:rgba(127,191,154,.14); --ins-bd:#6ba784;
     --kbd-bg:rgba(255,255,255,.12);
@@ -89,10 +90,10 @@
     --warn-btn-bd:#5a4a26; --warn-btn-bg:#3a3020;
     --ctx-fg:#9a968c;
     --tag-ok-bd:#2c4a38; --tag-info-bd:#2c4055; --tag-bad-bd:#5a3a31;
-    --scroll:#3d3d46; --scroll-hover:#56565f;
+    --scroll:#3c382c; --scroll-hover:#544e3d;
     --win-a:rgba(127,191,154,.30); --win-b:rgba(177,139,189,.30);
     --paper:radial-gradient(1100px 520px at 50% -8%, rgba(255,255,255,.035), rgba(255,255,255,0));
-    --paper-bg:#1d1a16;
+    --paper-bg:#1d1b15;
     --shadow-card:0 1px 2px rgba(0,0,0,.45), 0 12px 34px -8px rgba(0,0,0,.62);
   }
   *{box-sizing:border-box;}

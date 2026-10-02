@@ -1,11 +1,11 @@
-/* 盲评台 · 编辑档案室。A/B 两侧在判定前采用完全相同的视觉权重。 */
+/* 盲评台 · 编排层「纸·墨·朱印」（2026-09-30 换代）。A/B 两侧在判定前采用完全相同的视觉权重。 */
 :root{
   /* 调色板刻度（原语层）：与 websrc/_shared/editorial.css 逐值一致，
      tests/test_editorial_residual.py 做机械对账，任一侧漂移即红。 */
-  --n-0:#fffdf8;--n-50:#f9f6ef;--n-100:#f2eee5;--n-200:#e9e3d8;
-  --n-300:#d8d1c3;--n-400:#c3baa9;--n-500:#938d81;--n-600:#6b6c63;
-  --n-700:#4d524b;--n-800:#343a34;--n-900:#202720;--n-950:#151b16;
-  --acc-100:#f3ebda;--acc-300:#c5a36b;--acc-500:#82643b;--acc-600:#6c502f;--acc-700:#513c24;
+  --n-0:#fdfcf7;--n-50:#f8f5ec;--n-100:#f2eee1;--n-200:#e9e3d2;
+  --n-300:#dcd4bf;--n-400:#c7bca1;--n-500:#a1977d;--n-600:#6f6958;
+  --n-700:#4c4738;--n-800:#323025;--n-900:#21201a;--n-950:#161511;
+  --acc-100:#f6e2d6;--acc-300:#d98a6b;--acc-500:#b4371f;--acc-600:#932a18;--acc-700:#711f12;
   /* 语义层别名：沿用 index.html 历史命名，全部指向刻度——口径同 tokens.css 的两层令牌架构。
      禁止再写裸色值（回归钉住）。 */
   --bg:var(--n-100);--surface:var(--n-0);--surface-2:var(--n-50);
@@ -13,32 +13,43 @@
   --accent:var(--acc-500);--accent-soft:var(--acc-100);--accent-strong:var(--acc-600);
   --paper-bg:var(--n-0);--ctx-fg:var(--n-600);
   --radius:4px;
-  --shadow-sm:0 1px 2px rgba(32,39,32,.035);--shadow-card:0 1px 3px rgba(32,39,32,.05);
-  --shadow-dock:0 -8px 25px rgba(32,39,32,.08);
+  --shadow-sm:0 1px 2px rgba(33,32,26,.04);--shadow-card:0 1px 3px rgba(33,32,26,.05);
+  --shadow-dock:0 -8px 25px rgba(33,32,26,.08);
 }
 html[data-theme="dark"]{
   /* 暗色仅覆写刻度：语义别名在 :root 已指向刻度名，随主题自动解析 */
-  --n-0:#202620;--n-50:#1a211b;--n-100:#141a15;--n-200:#2a322b;
-  --n-300:#354038;--n-400:#4a544a;--n-500:#707a6f;--n-600:#a0a99e;
-  --n-700:#c0c7bb;--n-800:#dbded3;--n-900:#f0eee4;--n-950:#faf7ec;
-  --acc-100:#322b1c;--acc-300:#b79862;--acc-500:#d1b079;--acc-600:#dfc18d;--acc-700:#ecd4a5;
+  --n-0:#1d1b15;--n-50:#22201a;--n-100:#14130f;--n-200:#2b2820;
+  --n-300:#373429;--n-400:#4c4736;--n-500:#6f6952;--n-600:#9b947b;
+  --n-700:#b7b096;--n-800:#d4cdb5;--n-900:#eae4d0;--n-950:#f6f1e1;
+  --acc-100:#3d2014;--acc-300:#d98a6b;--acc-500:#d96a4c;--acc-600:#e68a6d;--acc-700:#f2ab92;
   --shadow-sm:0 1px 2px rgba(0,0,0,.16);--shadow-card:0 1px 3px rgba(0,0,0,.23);
   --shadow-dock:0 -8px 25px rgba(0,0,0,.2);
 }
+::selection{background:var(--acc-500);color:#fdfcf7}
 body{background:var(--bg);background-image:none;color:var(--fg)}
 body::after,html[data-theme="dark"] body::after{display:none}
 header{height:66px;padding:0 clamp(18px,3.4vw,54px);gap:20px;background:var(--surface);border-bottom:1px solid var(--line);backdrop-filter:none;-webkit-backdrop-filter:none}
 header h1{font:600 18px/1.3 var(--serif);letter-spacing:.08em;white-space:nowrap}
 header h1 b{font:400 11px/1.4 var(--sans);letter-spacing:.1em;color:var(--dim);margin-left:5px}
-header .hmark{width:32px;height:32px;border-radius:2px;background:var(--fg);color:var(--surface);box-shadow:none;font:600 18px/1 var(--serif)}
+header .hmark{width:32px;height:32px;border-radius:2px;background:var(--acc-500);color:#fdfcf7;box-shadow:0 0 0 1px rgba(0,0,0,.18);font:600 18px/1 var(--serif)}
 header .mode{border-radius:2px;font-size:10px;padding:3px 8px}
 nav{height:100%;align-items:stretch;gap:0}
-nav button{border-radius:0;padding:5px 16px;border-bottom:2px solid transparent;font-size:12px}
+nav button{border-radius:0;padding:5px 16px;border-bottom:2px solid transparent;font-size:12px;transition:color .16s,border-color .16s,background .16s}
 nav button.on{background:transparent;color:var(--fg);border-bottom-color:var(--accent);font-weight:600}
 nav button:hover{background:var(--surface-2)}
 main{max-width:1260px;padding:34px 25px 70px}
-.rv-top{background:transparent;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:0 0 18px;margin-bottom:18px}
-.rv-top::before{content:'READING ROOM  /  BLIND REVIEW';display:block;font:10px/1.2 ui-monospace,Consolas,monospace;letter-spacing:.17em;color:var(--accent);margin-bottom:12px}
+.rv-top{background:transparent;border:0;border-bottom:0;border-radius:0;padding:0 0 2px;margin-bottom:18px}
+.rv-top::before{content:'READING ROOM  /  BLIND REVIEW';display:block;font:10px/1.2 ui-monospace,Consolas,monospace;letter-spacing:.17em;color:var(--accent);margin-bottom:12px;padding-left:15px;background:linear-gradient(var(--acc-500),var(--acc-500)) left 0 top 2px/8px 8px no-repeat}
+/* 刻度尺：与研究台同款（major 64px 通高 / minor 8px 半高 + 书眉线） */
+.rv-top::after{
+  content:'';display:block;height:9px;margin-top:18px;border-bottom:1px solid var(--line);
+  background-image:
+    linear-gradient(90deg,var(--line-2) 0 1px,transparent 1px 64px),
+    linear-gradient(90deg,var(--line-2) 0 1px,transparent 1px 8px);
+  background-size:64px 9px,8px 5px;
+  background-position:0 0,0 4px;
+  background-repeat:repeat-x;
+}
 .rv-title{font:500 25px/1.25 var(--serif);letter-spacing:.03em}
 .rv-title #rv-batch{font:600 14px/1 var(--sans);letter-spacing:0}
 .rv-title small{font:11px/1.4 var(--sans)}
@@ -78,7 +89,7 @@ html[data-theme="dark"] .dock .vb.strong,html[data-theme="dark"] .dock .vb.stron
   header .spop-wrap{order:2;width:100%;margin:0;display:flex;justify-content:flex-end;gap:5px}
   nav{order:3;width:100%;height:36px;justify-content:space-between}nav button{flex:1;padding:4px 8px}
   main{padding:19px 12px 45px;width:100%;min-width:0;overflow-x:clip}
-  .rv-title{font-size:21px}.rv-top{padding-bottom:14px}.rv-head{display:block}
+  .rv-title{font-size:21px}.rv-top{padding-bottom:2px}.rv-top::after{margin-top:12px}.rv-head{display:block}
   .rv-prog{display:grid;grid-template-columns:auto auto minmax(64px,1fr);width:100%;margin:14px 0 0;gap:8px}
   .rv-prog .bar{width:100%;min-width:0;align-self:center}
   .rv-prog .tgrp{grid-column:1/-1;display:flex;justify-content:space-between;max-width:100%}
