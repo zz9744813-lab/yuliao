@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from app.scene_runtime.client import GatewayClient, OutcomeUnknown
 from app.scene_runtime.contracts import (Budget, Change, Fact, KnowledgePackage, PlannedEvent,
                                         RuntimeFault, ScenePlan, World, canonical)
-from app.scene_runtime.pipeline import SceneRunner
+from app.scene_runtime.pipeline import SceneRunner, VERIFIER_SYSTEM, WRITER_SYSTEM
 from app.scene_runtime.store import Store
 
 
@@ -36,6 +36,20 @@ class FixtureClient:
                                   for e in plan["events"] for c in e["changes"]]}
         return {"text": canonical(result), "requested_model": self.models[role], "actual_model": "fixture",
                 "tokens_in": 1, "tokens_out": 1, "finish_reason": "stop"}
+
+
+def test_continuity_prompt_contract_keeps_explicit_evidence_floor():
+    """Continuity guidance must survive later prompt edits without broadening hard issues."""
+    for phrase in ("道具归属", "单调推进", "说话人归属", "第三百步", "第八十步"):
+        assert phrase in WRITER_SYSTEM
+    assert "道具交接" in WRITER_SYSTEM
+    assert "hard 类别（五类" in VERIFIER_SYSTEM
+    assert "⑤ **正文内部自相矛盾**" in VERIFIER_SYSTEM
+    for phrase in ("两处明示", "两处冲突的原句", "连续原文", "沉默/省略",
+                   "人称代词可多解", "拿不准就不报 hard"):
+        assert phrase in VERIFIER_SYSTEM
+    assert "③ **视点越界或离场未收**" in VERIFIER_SYSTEM
+    assert "④ **核心事件未落地或专名被换**" in VERIFIER_SYSTEM
 
 
 @pytest.fixture
